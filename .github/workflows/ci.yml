@@ -1,0 +1,94 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          # 10.0.x is the current SDK (builds everything); 8.0.x supplies the LTS
+          # runtime so the net8.0 leg runs on the real .NET 8, not a roll-forward
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Build (both TFMs, warnings are errors)
+        run: dotnet build tests/Tests.csproj -c Release
+      - name: Tests (net10.0)
+        run: dotnet run -c Release --project tests/Tests.csproj -f net10.0 --no-build
+      - name: Tests (net8.0, the LTS leg)
+        run: dotnet run -c Release --project tests/Tests.csproj -f net8.0 --no-build
+      - name: Soak (bounded)
+        run: dotnet run -c Release --project tests/Tests.csproj -f net10.0 --no-build -- soak 2000
+      - name: Build the compat harness
+        run: dotnet build compat/Compat.csproj -c Release
+
+  c-interop:
+    name: C wire compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check out the C netcode library (pinned ref)
+        uses: actions/checkout@v7
+        with:
+          # the interop pin: bump deliberately, in its own commit, after reading
+          # the upstream diff (a wire change upstream is a spec change first).
+          repository: mas-bandwidth/netcode
+          ref: 12d25754a8dafdaa77b9cc306901089576685777
+          path: c-netcode
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+      # CC=clang pins the compiler; the gate builds the REAL netcode.c + its
+      # vendored libsodium and requires: byte-identical goldens both ways, cross
+      # reads, and two live localhost sessions (C server <- C# client with a
+      # C#-minted token, and C# server <- C client with a C-minted token).
+      - name: Interop gate
+        run: CC=clang scripts/interop.sh c-netcode
+
+  spec-sync:
+    name: STANDARD.md matches upstream
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # STANDARD.md here is a VERBATIM VENDORED COPY of the protocol standard that
+      # lives in mas-bandwidth/netcode. This job fails if the two have diverged.
+      #
+      # Why vendor rather than link: an implementer wants the normative text
+      # beside the implementation, at the revision they are reading. Why check:
+      # a duplicated normative document is the same failure as a duplicated
+      # constant, except it drifts silently and the ports are what break.
+      #
+      # If this fails, the upstream spec changed. Read the diff, port whatever it
+      # implies, then copy the new file across in the same commit.
+      - name: Compare against mas-bandwidth/netcode
+        run: |
+          curl -fsSL -o /tmp/upstream-STANDARD.md \
+            https://raw.githubusercontent.com/mas-bandwidth/netcode/main/STANDARD.md
+          if ! diff -u /tmp/upstream-STANDARD.md STANDARD.md; then
+            echo "::error::STANDARD.md has diverged from mas-bandwidth/netcode"
+            exit 1
+          fi
+          echo "STANDARD.md matches upstream"

@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net8.0 (LTS) is the floor so game servers on .NET 8 can reference the
+         library; net10.0 is the current SDK. (family precedent: serialize.cs) -->
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Netcode</RootNamespace>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Tests" />
+    <InternalsVisibleTo Include="Compat" />
+  </ItemGroup>
+
+  <!-- family value: zero third-party dependencies. no package references, ever.
+       the crypto (Crypto.cs) is fully managed for exactly this reason. -->
+
+</Project>

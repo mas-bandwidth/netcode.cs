@@ -1,0 +1,7 @@
+bin/
+obj/
+compat-c
+*.bin
+
+# local tooling logs, never library content
+tending/
