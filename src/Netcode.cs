@@ -1896,6 +1896,14 @@ namespace Netcode
         /// <summary>Non-blocking receive. Returns 0 when no packet is available.</summary>
         public int ReceivePacket(ref Address from, Span<byte> packetData)
         {
+            // ReceiveFrom requires Size >= the family maximum before every call, and
+            // .NET 8 overwrites Size BEFORE checking the recvfrom result — so an empty
+            // poll (EWOULDBLOCK, the common case on a non-blocking socket) zeroes it
+            // and the next call throws ArgumentOutOfRangeException ("SocketAddress is
+            // too small"). .NET 9 moved that assignment after the error check. Re-arm
+            // the size each call; it is a field store, nothing allocates.
+            _receiveAddress.Size = SocketAddress.GetMaximumAddressSize(_socket.AddressFamily);
+
             int result;
             try
             {
