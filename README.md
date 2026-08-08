@@ -1,6 +1,6 @@
 # netcode.cs
 
-**Status: DRAFT** — not yet released.
+**Status: released** — v1.0.0, the first release. Wire compatibility with the C reference is proven in CI on every push (the "C wire compatibility" gate).
 
 C# port of [netcode](https://github.com/mas-bandwidth/netcode), a simple protocol
 for creating secure client/server connections over UDP (protocol
