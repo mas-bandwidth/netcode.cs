@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/mas-bandwidth/netcode.cs/actions/workflows/ci.yml/badge.svg)](https://github.com/mas-bandwidth/netcode.cs/actions/workflows/ci.yml)
 
+If this library helps you, please support it: **[Become a supporter](https://www.patreon.com/MasBandwidth/membership)**
+
 **Status: released** — v1.0.0, the first release. Wire compatibility with the C reference is proven in CI on every push (the "C wire compatibility" gate).
 
 C# port of [netcode](https://github.com/mas-bandwidth/netcode), a simple protocol
