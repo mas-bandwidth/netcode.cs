@@ -20,7 +20,7 @@ asserted by a test.
 
 ## License
 
-AGPL-3.0 for now; intended to move to MBSL when ready.
+This library is licensed AGPL-3.0 (see [LICENSE](LICENSE)).
 
 ## What this is
 

@@ -38,8 +38,7 @@ Apple clang 21) before this commit.
   warnings-as-errors, both test legs, soak) + a `c-interop` job pinned to
   netcode ref `12d25754…` + a STANDARD.md drift check. **Not yet observed
   running on GitHub** (see below).
-- **License**: AGPL-3.0 (`LICENSE`), with the "move to MBSL when ready" note in
-  the README.
+- **License**: AGPL-3.0 (`LICENSE`), noted in the README.
 
 ## Honest gaps / what's next
 
