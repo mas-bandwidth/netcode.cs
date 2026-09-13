@@ -16,6 +16,84 @@ using System.Buffers.Binary;
 
 namespace Netcode
 {
+    internal enum ConnectTokenEntryState
+    {
+        Free = 0,
+        Pending = 1,
+        Consumed = 2,
+    }
+
+    internal sealed class ConnectTokenHistory
+    {
+        public const int MaxEntries = Protocol.MaxClients * 8;
+        public const int Refused = -1;
+        public const int Full = -2;
+
+        private readonly ConnectTokenEntryState[] _state = new ConnectTokenEntryState[MaxEntries];
+        private readonly double[] _time = new double[MaxEntries];
+        private readonly ulong[] _expireTimestamp = new ulong[MaxEntries];
+        private readonly byte[] _mac = new byte[MaxEntries * Protocol.MacBytes];
+        private readonly Address[] _address = new Address[MaxEntries];
+
+        public ConnectTokenHistory() => Reset();
+
+        public void Reset()
+        {
+            Array.Clear(_state);
+            Array.Clear(_expireTimestamp);
+            Array.Clear(_mac);
+            Array.Clear(_address);
+            for (int i = 0; i < MaxEntries; i++)
+                _time[i] = -1000.0;
+        }
+
+        public int FindOrAdd(in Address address, ReadOnlySpan<byte> mac, ulong expireTimestamp, ulong currentTimestamp, double time)
+        {
+            int matchingTokenIndex = -1;
+            int freeTokenIndex = -1;
+
+            for (int i = 0; i < MaxEntries; i++)
+            {
+                if (_state[i] != ConnectTokenEntryState.Free &&
+                    mac.SequenceEqual(_mac.AsSpan(i * Protocol.MacBytes, Protocol.MacBytes)))
+                    matchingTokenIndex = i;
+
+                if (freeTokenIndex == -1 &&
+                    (_state[i] == ConnectTokenEntryState.Free || _expireTimestamp[i] <= currentTimestamp))
+                    freeTokenIndex = i;
+            }
+
+            if (matchingTokenIndex == -1)
+            {
+                if (freeTokenIndex == -1)
+                    return Full;
+
+                _state[freeTokenIndex] = ConnectTokenEntryState.Pending;
+                _time[freeTokenIndex] = time;
+                _expireTimestamp[freeTokenIndex] = expireTimestamp;
+                _address[freeTokenIndex] = address;
+                mac.CopyTo(_mac.AsSpan(freeTokenIndex * Protocol.MacBytes, Protocol.MacBytes));
+                return freeTokenIndex;
+            }
+
+            if (_state[matchingTokenIndex] == ConnectTokenEntryState.Pending &&
+                _address[matchingTokenIndex].Equals(address))
+                return matchingTokenIndex;
+
+            return Refused;
+        }
+
+        public void Consume(int index)
+        {
+            if ((uint)index >= MaxEntries)
+                throw new ArgumentOutOfRangeException(nameof(index));
+            _state[index] = ConnectTokenEntryState.Consumed;
+        }
+
+        public ConnectTokenEntryState State(int index) => _state[index];
+        public double EntryTime(int index) => _time[index];
+    }
+
     /// <summary>Why server creation failed (carried by NetcodeException.ErrorCode). Bind failures
     /// are reported separately because a port already in use is the common operational failure.</summary>
     public enum ServerCreateError
@@ -72,6 +150,8 @@ namespace Netcode
         public SendPacketOverrideDelegate? SendPacketOverride;
         /// <summary>Incoming packet hook (used when OverrideSendAndReceive is true).</summary>
         public ReceivePacketOverrideDelegate? ReceivePacketOverride;
+        /// <summary>The longest lifetime, in seconds, of connect tokens issued by the backend. Values at or below zero use the default.</summary>
+        public int MaxConnectTokenLifetime = Protocol.DefaultMaxConnectTokenLifetime;
         /// <summary>Tag outgoing packets DSCP EF (low latency). Off by default; no-op on Windows.</summary>
         public bool EnablePacketTagging;
     }
@@ -85,8 +165,6 @@ namespace Netcode
     {
         internal const uint FlagIgnoreConnectionRequestPackets = 1;
         internal const uint FlagIgnoreConnectionResponsePackets = 1 << 1;
-
-        private const int MaxConnectTokenEntries = Protocol.MaxClients * 8;
 
         private static readonly bool[] AllowedPackets = BuildAllowedPackets();
 
@@ -114,6 +192,8 @@ namespace Netcode
         private int _numConnectedClients;
         private ulong _globalSequence;
         private ulong _challengeSequence;
+        private readonly int _maxConnectTokenLifetime;
+        private ulong _minConnectTokenExpireTimestamp;
         private readonly byte[] _challengeKey = new byte[Protocol.KeyBytes];
         private readonly bool[] _clientConnected = new bool[Protocol.MaxClients];
         private readonly int[] _clientTimeout = new int[Protocol.MaxClients];
@@ -132,9 +212,7 @@ namespace Netcode
 
         // connect token single-use history. the find-or-add scan is constant time
         // worst case on purpose: timing must not leak whether a token was seen.
-        private readonly double[] _connectTokenEntryTime = new double[MaxConnectTokenEntries];
-        private readonly byte[] _connectTokenEntryMac = new byte[MaxConnectTokenEntries * Protocol.MacBytes];
-        private readonly Address[] _connectTokenEntryAddress = new Address[MaxConnectTokenEntries];
+        private readonly ConnectTokenHistory _connectTokenHistory = new ConnectTokenHistory();
 
         private readonly EncryptionManager _encryptionManager = new EncryptionManager();
 
@@ -162,6 +240,9 @@ namespace Netcode
                 throw new ArgumentException($"config.PrivateKey must be {Protocol.KeyBytes} bytes", nameof(config));
 
             _config = config;
+            _maxConnectTokenLifetime = config.MaxConnectTokenLifetime > 0
+                ? config.MaxConnectTokenLifetime
+                : Protocol.DefaultMaxConnectTokenLifetime;
             config.PrivateKey.CopyTo(_privateKey.AsSpan());
             _simulatorReceiveHandler = ProcessPacketFromSimulator;
 
@@ -301,6 +382,8 @@ namespace Netcode
             _challengeSequence = 0;
             Rng.GenerateKey(_challengeKey);
 
+            _minConnectTokenExpireTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (ulong)_maxConnectTokenLifetime;
+
             // global packets (challenge, denied) encrypt with the same per-token server to
             // client keys as per-client packets, whose sequences start at zero, so the global
             // sequence lives in the top half of the sequence space to keep AEAD nonces
@@ -336,6 +419,7 @@ namespace Netcode
 
             _globalSequence = 0;
             _challengeSequence = 0;
+            _minConnectTokenExpireTimestamp = 0;
             Array.Clear(_challengeKey);
 
             ConnectTokenEntriesReset();
@@ -351,51 +435,12 @@ namespace Netcode
 
         private void ConnectTokenEntriesReset()
         {
-            for (int i = 0; i < MaxConnectTokenEntries; i++)
-            {
-                _connectTokenEntryTime[i] = -1000.0;
-                _connectTokenEntryAddress[i] = default;
-            }
-            Array.Clear(_connectTokenEntryMac);
+            _connectTokenHistory.Reset();
         }
 
-        private bool ConnectTokenEntriesFindOrAdd(in Address address, ReadOnlySpan<byte> mac, double time)
+        private int ConnectTokenEntriesFindOrAdd(in Address address, ReadOnlySpan<byte> mac, ulong expireTimestamp, ulong currentTimestamp, double time)
         {
-            // find the matching entry for the token mac and the oldest token entry.
-            // constant time worst case. This is intentional!
-
-            int matchingTokenIndex = -1;
-            int oldestTokenIndex = -1;
-            double oldestTokenTime = 0.0;
-
-            for (int i = 0; i < MaxConnectTokenEntries; i++)
-            {
-                if (mac.SequenceEqual(_connectTokenEntryMac.AsSpan(i * Protocol.MacBytes, Protocol.MacBytes)))
-                    matchingTokenIndex = i;
-
-                if (oldestTokenIndex == -1 || _connectTokenEntryTime[i] < oldestTokenTime)
-                {
-                    oldestTokenTime = _connectTokenEntryTime[i];
-                    oldestTokenIndex = i;
-                }
-            }
-
-            // if no entry is found with the mac, this is a new connect token. replace the oldest.
-
-            if (matchingTokenIndex == -1)
-            {
-                _connectTokenEntryTime[oldestTokenIndex] = time;
-                _connectTokenEntryAddress[oldestTokenIndex] = address;
-                mac.CopyTo(_connectTokenEntryMac.AsSpan(oldestTokenIndex * Protocol.MacBytes, Protocol.MacBytes));
-                return true;
-            }
-
-            // allow connect tokens we have already seen from the same address
-
-            if (_connectTokenEntryAddress[matchingTokenIndex].Equals(address))
-                return true;
-
-            return false;
+            return _connectTokenHistory.FindOrAdd(in address, mac, expireTimestamp, currentTimestamp, time);
         }
 
         // --------------------------------------------------------------
@@ -590,6 +635,10 @@ namespace Netcode
             _clientLastPacketReceiveTime[clientIndex] = _time;
             userData.CopyTo(_clientUserData.AsSpan(clientIndex * Protocol.UserDataBytes, Protocol.UserDataBytes));
 
+            int connectTokenEntryIndex = _encryptionManager.GetConnectTokenEntryIndex(encryptionIndex);
+            if (connectTokenEntryIndex >= 0)
+                _connectTokenHistory.Consume(connectTokenEntryIndex);
+
             if (NetcodeLog.Enabled(LogLevel.Info))
                 NetcodeLog.Info($"server accepted client {address} {clientId:x16} in slot {clientIndex}\n");
 
@@ -602,7 +651,7 @@ namespace Netcode
         // packet processing
         // --------------------------------------------------------------
 
-        private void ProcessConnectionRequestPacket(in Address from, Span<byte> decryptedToken)
+        private void ProcessConnectionRequestPacket(in Address from, Span<byte> decryptedToken, ulong connectTokenExpireTimestamp, ulong currentTimestamp)
         {
             var connectTokenPrivate = new ConnectTokenPrivate();
             if (!connectTokenPrivate.Read(decryptedToken))
@@ -638,10 +687,18 @@ namespace Netcode
             }
 
             // the private token's HMAC survives in-place decryption in the last 16 bytes
-            if (!ConnectTokenEntriesFindOrAdd(
+            int connectTokenEntryIndex = ConnectTokenEntriesFindOrAdd(
                     in from,
                     decryptedToken.Slice(Defines.ConnectTokenPrivateBytes - Protocol.MacBytes, Protocol.MacBytes),
-                    _time))
+                    connectTokenExpireTimestamp,
+                    currentTimestamp,
+                    _time);
+            if (connectTokenEntryIndex == ConnectTokenHistory.Full)
+            {
+                NetcodeLog.Debug("server ignored connection request. connect token history is full\n");
+                return;
+            }
+            if (connectTokenEntryIndex == ConnectTokenHistory.Refused)
             {
                 NetcodeLog.Debug("server ignored connection request. connect token has already been used\n");
                 return;
@@ -662,7 +719,8 @@ namespace Netcode
                     connectTokenPrivate.ClientToServerKey,
                     _time,
                     expireTime,
-                    connectTokenPrivate.TimeoutSeconds))
+                    connectTokenPrivate.TimeoutSeconds,
+                    connectTokenEntryIndex))
             {
                 NetcodeLog.Debug("server ignored connection request. failed to add encryption mapping\n");
                 return;
@@ -736,7 +794,7 @@ namespace Netcode
             ConnectClient(clientIndex, in from, challengeClientId, encryptionIndex, timeoutSeconds, challengeUserData);
         }
 
-        private void ProcessPacketInternal(in Address from, in ReadPacketResult packet, Span<byte> buffer, int encryptionIndex, int clientIndex)
+        private void ProcessPacketInternal(in Address from, in ReadPacketResult packet, Span<byte> buffer, int encryptionIndex, int clientIndex, ulong currentTimestamp)
         {
             switch (packet.Type)
             {
@@ -746,7 +804,7 @@ namespace Netcode
                     {
                         if (NetcodeLog.Enabled(LogLevel.Debug))
                             NetcodeLog.Debug($"server received connection request from {from}\n");
-                        ProcessConnectionRequestPacket(in from, buffer.Slice(packet.DataOffset, packet.DataLength));
+                        ProcessConnectionRequestPacket(in from, buffer.Slice(packet.DataOffset, packet.DataLength), packet.ConnectTokenExpireTimestamp, currentTimestamp);
                     }
                 }
                 break;
@@ -850,12 +908,13 @@ namespace Netcode
                 hasPrivateKey: true,
                 _privateKey,
                 AllowedPackets,
-                clientIndex != -1 ? _clientReplayProtection[clientIndex] : null);
+                clientIndex != -1 ? _clientReplayProtection[clientIndex] : null,
+                _minConnectTokenExpireTimestamp);
 
             if (packet.Type < 0)
                 return;
 
-            ProcessPacketInternal(in from, in packet, packetData, encryptionIndex, clientIndex);
+            ProcessPacketInternal(in from, in packet, packetData, encryptionIndex, clientIndex, currentTimestamp);
         }
 
         /// <summary>

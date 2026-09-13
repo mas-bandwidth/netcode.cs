@@ -18,7 +18,7 @@ redesign).
 | `netcode_replay_protection_t` | `sealed class ReplayProtection` (internal) | 256-entry window, identical overflow-safe compare |
 | `netcode_packet_queue_t` | `sealed class PacketQueue` (internal) | ring of 256; payload buffers come from a private fixed pool, not the GC |
 | `netcode_encryption_manager_t` | `sealed class EncryptionManager` (internal) | flat arrays + linear scan, same as C — deliberate (attacker controls addresses; linear is the hardened choice, per upstream) |
-| `netcode_connect_token_entry_t[]` | inside `Server` | constant-time worst-case scan preserved (timing must not leak whether a token was seen) |
+| `netcode_connect_token_entry_t[]` | inside `Server` | constant-time worst-case scan; pending/consumed state, expiry timestamps, and history index carried by the encryption mapping |
 | `netcode_network_simulator_t` | `public sealed class NetworkSimulator` | same xorshift64* RNG, same seed, so loss/jitter sequences match the C library run-for-run |
 | `netcode_client_t` | `public sealed class Client` | states as `public enum ClientState` (same numeric values −6..3) |
 | `netcode_server_t` | `public sealed class Server` | flat per-client arrays, max 256 clients, global sequence seeded `1UL<<63` on start AND stop→start (nonce-space separation — upstream 1.4.0 fix, every seeding site kept) |
@@ -115,8 +115,9 @@ token-reuse → full? denied : add-mapping → challenge).
   `expire_time` (token timeout after request, cleared to −1 on connect).
 - Global packet sequence starts at `1UL<<63` on every `Server.Start` (nonce
   disjointness vs per-client sequences starting at 0 under the same key).
-- Connect token single-use history: constant-time worst-case scan, replace
-  oldest, same-address re-use allowed.
+- Connect token single-use history: constant-time worst-case scan; pending and
+  consumed states; expiry timestamps; pending same-address retransmits only;
+  no eviction while entries are unexpired; entry time is never refreshed.
 - Client timeout uses `last_packet_receive_time + timeout < time`; server
   uses `<= time`. (Yes, they differ in the C source; ported as-is.)
 

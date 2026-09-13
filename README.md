@@ -51,6 +51,10 @@ server.Update(time);
 while ((bytes = server.ReceivePacket(clientIndex, buffer, out var sequence)) >= 0) { ... }
 server.SendPacket(clientIndex, payload);
 
+Set `ServerConfig.MaxConnectTokenLifetime` to the longest lifetime issued by
+the backend (the default is 30 seconds); the server rejects tokens that could
+have been issued before its current start.
+
 // client
 using var client = new Client("0.0.0.0:0");
 client.Connect(connectToken);          // 2048 bytes from your backend
@@ -135,7 +139,9 @@ Inherited from the C reference implementation, on purpose:
   scale (~100 players).
 - **Connect-token single-use tracking is constant-time worst-case**: the
   find-or-add scan always walks every entry, so timing does not leak whether a
-  token was seen.
+  token was seen. Pending entries admit only same-address retransmits;
+  installation consumes the token for every address, and unexpired entries are
+  never evicted.
 - **Per-packet socket send errors are swallowed.** UDP is unreliable; a send
   error is semantically identical to a dropped packet, and a persistently dead
   socket surfaces as a connection timeout through the state machine.

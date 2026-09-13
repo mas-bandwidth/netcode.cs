@@ -124,6 +124,9 @@ internal static class Program
         RunTest("test_client_create", ClientServerTests.TestClientCreate);
         RunTest("test_server_create", ClientServerTests.TestServerCreate);
         RunTest("test_server_restart_global_sequence", ClientServerTests.TestServerRestartGlobalSequence);
+        RunTest("test_connect_token_history", ClientServerTests.TestConnectTokenHistory);
+        RunTest("test_client_reconnect_used_connect_token", ClientServerTests.TestClientReconnectUsedConnectToken);
+        RunTest("test_client_error_connect_token_predates_server_start", ClientServerTests.TestClientErrorConnectTokenPredatesServerStart);
         RunTest("test_client_server_connect", ClientServerTests.TestClientServerConnect);
         RunTest("test_client_server_ipv4_socket_connect", ClientServerTests.TestClientServerIpv4SocketConnect);
         RunTest("test_client_server_ipv6_socket_connect", ClientServerTests.TestClientServerIpv6SocketConnect);
