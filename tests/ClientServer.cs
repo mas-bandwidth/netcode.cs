@@ -1063,6 +1063,108 @@ internal static class ClientServerTests
         Check.That(server.NumConnectedClients == 1);
         Check.That(loopbackClient.State == ClientState.Disconnected);
     }
+
+    public static void TestClientCreateMissingOverrideCallback()
+    {
+        // override_send_and_receive with either override callback missing is refused at
+        // create time with the new code, rather than calling null on the first update.
+
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+        };
+
+        try
+        {
+            using var client = new Client("127.0.0.1:40000", config);
+            Check.That(false);
+        }
+        catch (NetcodeException e)
+        {
+            Check.That(e.ErrorCode == (int)ClientCreateError.MissingOverrideCallback);
+        }
+
+        config.SendPacketOverride = null;
+        config.ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0;
+
+        try
+        {
+            using var client = new Client("127.0.0.1:40000", config);
+            Check.That(false);
+        }
+        catch (NetcodeException e)
+        {
+            Check.That(e.ErrorCode == (int)ClientCreateError.MissingOverrideCallback);
+        }
+    }
+
+    public static void TestServerCreateMissingOverrideCallback()
+    {
+        // override_send_and_receive with either override callback missing is refused at
+        // create time with the new code, rather than calling null on the first update.
+
+        var config = CreateServerConfig(null);
+        config.OverrideSendAndReceive = true;
+        config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { };
+
+        try
+        {
+            using var server = new Server("127.0.0.1:40000", config);
+            Check.That(false);
+        }
+        catch (NetcodeException e)
+        {
+            Check.That(e.ErrorCode == (int)ServerCreateError.MissingOverrideCallback);
+        }
+
+        config.SendPacketOverride = null;
+        config.ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0;
+
+        try
+        {
+            using var server = new Server("127.0.0.1:40000", config);
+            Check.That(false);
+        }
+        catch (NetcodeException e)
+        {
+            Check.That(e.ErrorCode == (int)ServerCreateError.MissingOverrideCallback);
+        }
+    }
+
+    public static void TestClientLoopbackRequiresCallback()
+    {
+        // entering loopback with SendLoopbackPacket unset must refuse to connect, in
+        // every build, rather than calling null on the next send.
+
+        using var client = new Client("127.0.0.1:40000");
+
+        client.ConnectLoopback(0, 1);
+
+        byte[] payload = new byte[Protocol.MaxPacketSize];
+        client.SendPacket(payload);
+
+        Check.That(client.State == ClientState.Disconnected);
+        Check.That(!client.IsLoopback);
+    }
+
+    public static void TestServerLoopbackRequiresCallback()
+    {
+        // attaching a loopback client with SendLoopbackPacket unset must refuse the slot,
+        // in every build, rather than calling null on the next send.
+
+        using var server = new Server("127.0.0.1:40000", CreateServerConfig(null));
+        server.Start(1);
+
+        server.ConnectLoopbackClient(0, 0x11111111, ReadOnlySpan<byte>.Empty);
+
+        byte[] payload = new byte[Protocol.MaxPacketSize];
+        server.SendPacket(0, payload);
+
+        Check.That(!server.ClientLoopback(0));
+        Check.That(!server.ClientConnected(0));
+        Check.That(server.NumConnectedClients == 0);
+    }
 }
 
 internal static class Soak
