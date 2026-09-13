@@ -146,6 +146,107 @@ internal static class ClientServerTests
         Check.That(server.GlobalSequence == 1UL << 63);
     }
 
+    public static void TestConnectTokenHistory()
+    {
+        var history = new ConnectTokenHistory();
+        Check.That(Address.TryParse("[::1]:50000", out Address addressA));
+        Check.That(Address.TryParse("[::1]:50001", out Address addressB));
+
+        ulong currentTimestamp = 1000;
+        ulong expireTimestamp = currentTimestamp + 30;
+        byte[] mac = new byte[Protocol.MacBytes];
+        mac[0] = 1;
+
+        int index = history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 100.0);
+        Check.That(index >= 0);
+        Check.That(history.State(index) == ConnectTokenEntryState.Pending);
+        Check.That(history.EntryTime(index) == 100.0);
+
+        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 200.0) == index);
+        Check.That(history.EntryTime(index) == 100.0);
+        Check.That(history.FindOrAdd(in addressB, mac, expireTimestamp, currentTimestamp, 200.0) == ConnectTokenHistory.Refused);
+
+        history.Consume(index);
+        Check.That(history.State(index) == ConnectTokenEntryState.Consumed);
+        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 300.0) == ConnectTokenHistory.Refused);
+        Check.That(history.FindOrAdd(in addressB, mac, expireTimestamp, currentTimestamp, 300.0) == ConnectTokenHistory.Refused);
+
+        for (int i = 1; i < ConnectTokenHistory.MaxEntries; i++)
+        {
+            mac = new byte[Protocol.MacBytes];
+            mac[0] = (byte)(i + 1);
+            mac[1] = (byte)((i + 1) >> 8);
+            Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 400.0) >= 0);
+        }
+
+        mac = new byte[Protocol.MacBytes];
+        mac[0] = 0xFF;
+        mac[1] = 0xFF;
+        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 500.0) == ConnectTokenHistory.Full);
+
+        mac[0] = 1;
+        mac[1] = 0;
+        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 500.0) == ConnectTokenHistory.Refused);
+
+        mac[0] = 0xFF;
+        mac[1] = 0xFF;
+        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, expireTimestamp, 600.0) >= 0);
+    }
+
+    public static void TestClientReconnectUsedConnectToken()
+    {
+        NetworkSimulator simulator = CreateSimulator();
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+        using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
+        using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
+        server.Start(1);
+
+        byte[] connectToken = GenerateConnectToken("[::1]:40000", 0x1234);
+        client.Connect(connectToken);
+        ConnectLoop(simulator, client, server, ref time, deltaTime);
+        Check.That(client.State == ClientState.Connected);
+
+        server.DisconnectClient(0);
+        while (client.State > ClientState.Disconnected)
+        {
+            simulator.Update(time);
+            client.Update(time);
+            server.Update(time);
+            time += deltaTime;
+        }
+
+        simulator.Reset();
+        client.Connect(connectToken);
+        ConnectLoop(simulator, client, server, ref time, deltaTime);
+
+        Check.That(client.State == ClientState.ConnectionRequestTimedOut);
+        Check.That(server.NumConnectedClients == 0);
+    }
+
+    public static void TestClientErrorConnectTokenPredatesServerStart()
+    {
+        NetworkSimulator simulator = CreateSimulator();
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+        var serverConfig = CreateServerConfig(simulator);
+        serverConfig.MaxConnectTokenLifetime = 30;
+        using var server = new Server("[::1]:40000", serverConfig, time);
+        using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
+        server.Start(1);
+
+        client.Connect(GenerateConnectToken("[::1]:40000", 0x1234, expiry: 20));
+        ConnectLoop(simulator, client, server, ref time, deltaTime);
+        Check.That(client.State == ClientState.ConnectionRequestTimedOut);
+        Check.That(server.NumConnectedClients == 0);
+
+        simulator.Reset();
+        client.Connect(GenerateConnectToken("[::1]:40000", 0x5678, expiry: 30));
+        ConnectLoop(simulator, client, server, ref time, deltaTime);
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server.NumConnectedClients == 1);
+    }
+
     public static void TestClientServerConnect()
     {
         NetworkSimulator simulator = CreateSimulator();

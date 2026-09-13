@@ -347,7 +347,7 @@ static int do_verify( const char * dir )
         if ( !read_file( dir, "packet_request.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_request_packet_t * packet = (struct netcode_connection_request_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, token_key, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, token_key, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_REQUEST_PACKET );
         VERIFY( packet->protocol_id == GOLDEN_PROTOCOL_ID );
@@ -359,7 +359,7 @@ static int do_verify( const char * dir )
         int bytes = 1 + 8 + NETCODE_MAC_BYTES;      /* prefix + 8 sequence bytes + mac */
         if ( !read_file( dir, "packet_denied.bin", buffer, bytes ) )
             return 0;
-        void * packet = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, NULL, allowed_packets, NULL, NULL, NULL );
+        void * packet = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( ( (uint8_t*) packet )[0] == NETCODE_CONNECTION_DENIED_PACKET );
         VERIFY( sequence == 1ULL << 63 );
@@ -371,7 +371,7 @@ static int do_verify( const char * dir )
         if ( !read_file( dir, "packet_challenge.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_challenge_packet_t * packet = (struct netcode_connection_challenge_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, NULL, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_CHALLENGE_PACKET );
         VERIFY( packet->challenge_token_sequence == GOLDEN_CHALLENGE_SEQUENCE );
@@ -384,7 +384,7 @@ static int do_verify( const char * dir )
         if ( !read_file( dir, "packet_response.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_response_packet_t * packet = (struct netcode_connection_response_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, NULL, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_RESPONSE_PACKET );
         VERIFY( packet->challenge_token_sequence == GOLDEN_CHALLENGE_SEQUENCE );
@@ -397,7 +397,7 @@ static int do_verify( const char * dir )
         if ( !read_file( dir, "packet_keepalive.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_keep_alive_packet_t * packet = (struct netcode_connection_keep_alive_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, NULL, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_KEEP_ALIVE_PACKET );
         VERIFY( packet->client_index == 5 );
@@ -411,7 +411,7 @@ static int do_verify( const char * dir )
         if ( !read_file( dir, "packet_payload.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_payload_packet_t * packet = (struct netcode_connection_payload_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, NULL, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_PAYLOAD_PACKET );
         VERIFY( packet->payload_bytes == NETCODE_MAX_PAYLOAD_BYTES );
@@ -426,7 +426,7 @@ static int do_verify( const char * dir )
         int bytes = 1 + 1 + NETCODE_MAC_BYTES;
         if ( !read_file( dir, "packet_disconnect.bin", buffer, bytes ) )
             return 0;
-        void * packet = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, NULL, allowed_packets, NULL, NULL, NULL );
+        void * packet = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( ( (uint8_t*) packet )[0] == NETCODE_CONNECTION_DISCONNECT_PACKET );
         VERIFY( sequence == 7 );
