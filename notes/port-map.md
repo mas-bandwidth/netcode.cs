@@ -1,7 +1,7 @@
 # netcode.cs port map
 
 C# port of [mas-bandwidth/netcode](https://github.com/mas-bandwidth/netcode)
-(C reference, version 1.4.3, protocol "NETCODE 1.02"). The WIRE is the C
+(C reference, version 1.4.8, protocol "NETCODE 1.02"). The WIRE is the C
 library's, byte-exact; the API is idiomatic C#, mirroring the C library's
 non-blocking update-loop model (games call `Update()` each frame — no async
 redesign).
