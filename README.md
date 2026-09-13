@@ -51,10 +51,6 @@ server.Update(time);
 while ((bytes = server.ReceivePacket(clientIndex, buffer, out var sequence)) >= 0) { ... }
 server.SendPacket(clientIndex, payload);
 
-Set `ServerConfig.MaxConnectTokenLifetime` to the longest lifetime issued by
-the backend (the default is 30 seconds); the server rejects tokens that could
-have been issued before its current start.
-
 // client
 using var client = new Client("0.0.0.0:0");
 client.Connect(connectToken);          // 2048 bytes from your backend
@@ -68,6 +64,10 @@ ConnectTokenGenerator.Generate(publicAddresses, internalAddresses,
     expireSeconds: 30, timeoutSeconds: 15, clientId, protocolId, privateKey,
     userData, tokenBuffer);
 ```
+
+Set `ServerConfig.MaxConnectTokenLifetime` to the longest lifetime issued by
+the backend (the default is 30 seconds); the server rejects tokens that could
+have been issued before its current start.
 
 Like the C library, client and server objects are single-threaded by design and
 perform no internal synchronization.
