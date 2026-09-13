@@ -165,6 +165,14 @@ namespace Netcode
             config.PrivateKey.CopyTo(_privateKey.AsSpan());
             _simulatorReceiveHandler = ProcessPacketFromSimulator;
 
+            // the overrides are called on the update path with no null check. a missing one is a
+            // configuration error, refused here rather than dereferenced on the first update.
+            if (_config.OverrideSendAndReceive && (_config.SendPacketOverride == null || _config.ReceivePacketOverride == null))
+            {
+                NetcodeLog.Error("error: override_send_and_receive requires both send_packet_override and receive_packet_override\n");
+                throw new NetcodeException("override_send_and_receive requires both send_packet_override and receive_packet_override", (int)ServerCreateError.MissingOverrideCallback);
+            }
+
             if (!Address.TryParse(serverAddress1, out Address address1))
             {
                 NetcodeLog.Error("error: failed to parse server public address\n");
@@ -1083,6 +1091,14 @@ namespace Netcode
         /// <summary>Attach a loopback client to a slot: payloads flow through the loopback callbacks, no networking.</summary>
         public void ConnectLoopbackClient(int clientIndex, ulong clientId, ReadOnlySpan<byte> userData)
         {
+            // the server sends to a loopback client only through this callback. without it the
+            // first send would call a null pointer, so refuse the slot at all, in every build.
+            if (_config.SendLoopbackPacket == null)
+            {
+                NetcodeLog.Error("error: a loopback client requires send_loopback_packet_callback\n");
+                return;
+            }
+
             if (!_running)
                 return;
 
