@@ -34,6 +34,8 @@ namespace Netcode
         BindSocketIpv4Failed = 5,
         /// <summary>The IPv6 socket could not be bound (port likely in use).</summary>
         BindSocketIpv6Failed = 6,
+        /// <summary>OverrideSendAndReceive was set without both override callbacks.</summary>
+        MissingOverrideCallback = 8,
     }
 
     /// <summary>Why the client in a server slot was last disconnected. Recorded before the

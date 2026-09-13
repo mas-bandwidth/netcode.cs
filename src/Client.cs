@@ -52,6 +52,8 @@ namespace Netcode
         CreateSocketIpv4Failed = 4,
         /// <summary>The IPv6 socket could not be created or bound.</summary>
         CreateSocketIpv6Failed = 5,
+        /// <summary>OverrideSendAndReceive was set without both override callbacks.</summary>
+        MissingOverrideCallback = 7,
     }
 
     /// <summary>Thrown when a Client or Server cannot be created (bad bind address, socket failure).</summary>
