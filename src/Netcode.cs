@@ -46,6 +46,8 @@ namespace Netcode
         public const int MaxServersPerConnect = 32;
         /// <summary>Maximum number of client slots per server.</summary>
         public const int MaxClients = 256;
+        /// <summary>Default maximum lifetime, in seconds, of connect tokens issued by the backend.</summary>
+        public const int DefaultMaxConnectTokenLifetime = 30;
         /// <summary>Largest payload accepted by SendPacket / delivered by ReceivePacket.</summary>
         public const int MaxPacketSize = 1200;
         /// <summary>The protocol version string carried on the wire (13 bytes with null terminator).</summary>
@@ -890,6 +892,7 @@ namespace Netcode
     {
         public int Type;            // -1 when the packet was rejected
         public ulong Sequence;
+        public ulong ConnectTokenExpireTimestamp;
         public int DataOffset;      // offset of decrypted per-packet-type data in the buffer
         public int DataLength;      // length of decrypted per-packet-type data
     }
@@ -996,7 +999,8 @@ namespace Netcode
             bool hasPrivateKey,
             ReadOnlySpan<byte> privateKey,
             ReadOnlySpan<bool> allowedPackets,
-            ReplayProtection? replayProtection)
+            ReplayProtection? replayProtection,
+            ulong minConnectTokenExpireTimestamp = 0)
         {
             ReadPacketResult result = default;
             result.Type = -1;
@@ -1050,6 +1054,12 @@ namespace Netcode
                     return result;
                 }
 
+                if (packetExpireTimestamp < minConnectTokenExpireTimestamp)
+                {
+                    NetcodeLog.Debug("ignored connection request packet. connect token predates the server start\n");
+                    return result;
+                }
+
                 ReadOnlySpan<byte> packetNonce = buffer.Slice(1 + Defines.VersionInfoBytes + 8 + 8, Defines.ConnectTokenNonceBytes);
 
                 int tokenOffset = 1 + Defines.VersionInfoBytes + 8 + 8 + Defines.ConnectTokenNonceBytes;
@@ -1064,6 +1074,7 @@ namespace Netcode
 
                 result.Type = PacketType.ConnectionRequest;
                 result.Sequence = 0;
+                result.ConnectTokenExpireTimestamp = packetExpireTimestamp;
                 result.DataOffset = tokenOffset;
                 result.DataLength = Defines.ConnectTokenPrivateBytes;
                 return result;
@@ -1501,6 +1512,7 @@ namespace Netcode
         public readonly double[] LastAccessTime = new double[MaxEncryptionMappings];
         public readonly Address[] Address = new Address[MaxEncryptionMappings];
         public readonly int[] ClientIndex = new int[MaxEncryptionMappings];
+        public readonly int[] ConnectTokenEntryIndex = new int[MaxEncryptionMappings];
         public readonly byte[] SendKey = new byte[Protocol.KeyBytes * MaxEncryptionMappings];
         public readonly byte[] ReceiveKey = new byte[Protocol.KeyBytes * MaxEncryptionMappings];
 
@@ -1518,6 +1530,7 @@ namespace Netcode
             for (int i = 0; i < MaxEncryptionMappings; i++)
             {
                 ClientIndex[i] = -1;
+                ConnectTokenEntryIndex[i] = -1;
                 ExpireTime[i] = -1.0;
                 LastAccessTime[i] = -1000.0;
                 Address[i] = default;
@@ -1534,7 +1547,7 @@ namespace Netcode
                    (ExpireTime[index] >= 0.0 && ExpireTime[index] < time);
         }
 
-        public bool AddEncryptionMapping(in Address address, ReadOnlySpan<byte> sendKey, ReadOnlySpan<byte> receiveKey, double time, double expireTime, int timeout)
+        public bool AddEncryptionMapping(in Address address, ReadOnlySpan<byte> sendKey, ReadOnlySpan<byte> receiveKey, double time, double expireTime, int timeout, int connectTokenEntryIndex = -1)
         {
             for (int i = 0; i < NumEncryptionMappings; i++)
             {
@@ -1543,6 +1556,7 @@ namespace Netcode
                     Timeout[i] = timeout;
                     ExpireTime[i] = expireTime;
                     LastAccessTime[i] = time;
+                    ConnectTokenEntryIndex[i] = connectTokenEntryIndex;
                     sendKey.CopyTo(SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     receiveKey.CopyTo(ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     return true;
@@ -1558,6 +1572,7 @@ namespace Netcode
                     Address[i] = address;
                     ExpireTime[i] = expireTime;
                     LastAccessTime[i] = time;
+                    ConnectTokenEntryIndex[i] = connectTokenEntryIndex;
                     sendKey.CopyTo(SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     receiveKey.CopyTo(ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     if (i + 1 > NumEncryptionMappings)
@@ -1577,6 +1592,7 @@ namespace Netcode
                 {
                     ExpireTime[i] = -1.0;
                     LastAccessTime[i] = -1000.0;
+                    ConnectTokenEntryIndex[i] = -1;
                     Address[i] = default;
                     SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes).Clear();
                     ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes).Clear();
@@ -1625,6 +1641,13 @@ namespace Netcode
         public void SetExpireTime(int index, double expireTime)
         {
             ExpireTime[index] = expireTime;
+        }
+
+        public int GetConnectTokenEntryIndex(int index)
+        {
+            if (index == -1)
+                return -1;
+            return ConnectTokenEntryIndex[index];
         }
 
         public Span<byte> GetSendKey(int index)

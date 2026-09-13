@@ -52,6 +52,8 @@ namespace Netcode
         CreateSocketIpv4Failed = 4,
         /// <summary>The IPv6 socket could not be created or bound.</summary>
         CreateSocketIpv6Failed = 5,
+        /// <summary>OverrideSendAndReceive was set without both override callbacks.</summary>
+        MissingOverrideCallback = 7,
     }
 
     /// <summary>Thrown when a Client or Server cannot be created (bad bind address, socket failure).</summary>
@@ -152,6 +154,14 @@ namespace Netcode
         {
             _config = config ?? new ClientConfig();
             _simulatorReceiveHandler = ProcessPacketFromSimulator;
+
+            // the overrides are called on the update path with no null check. a missing one is a
+            // configuration error, refused here rather than dereferenced on the first update.
+            if (_config.OverrideSendAndReceive && (_config.SendPacketOverride == null || _config.ReceivePacketOverride == null))
+            {
+                NetcodeLog.Error("error: override_send_and_receive requires both send_packet_override and receive_packet_override\n");
+                throw new NetcodeException("override_send_and_receive requires both send_packet_override and receive_packet_override", (int)ClientCreateError.MissingOverrideCallback);
+            }
 
             if (!Address.TryParse(bindAddress1, out Address address1))
             {
@@ -778,6 +788,15 @@ namespace Netcode
         {
             if (_state > ClientState.Disconnected)
                 throw new InvalidOperationException("client must be disconnected before connecting loopback");
+
+            // a loopback client sends only through this callback. without it the first send would
+            // call a null pointer, so refuse to enter loopback at all, in every build.
+            if (_config.SendLoopbackPacket == null)
+            {
+                NetcodeLog.Error("error: a loopback client requires send_loopback_packet_callback\n");
+                return;
+            }
+
             NetcodeLog.Info($"client connected to server via loopback as client {clientIndex}\n");
             _state = ClientState.Connected;
             _clientIndex = clientIndex;
