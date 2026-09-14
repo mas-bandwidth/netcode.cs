@@ -4,7 +4,7 @@
 
 If this library helps you, please support it: **[Become a supporter](https://www.patreon.com/MasBandwidth/membership)**
 
-**Status: released** — v1.0.0, the first release. Wire compatibility with the C reference is proven in CI on every push (the "C wire compatibility" gate).
+**Status: released** — v1.1.0, tested against the C reference at netcode 1.4.8. Wire compatibility with the C reference is proven in CI on every push (the "C wire compatibility" gate).
 
 C# port of [netcode](https://github.com/mas-bandwidth/netcode), a simple protocol
 for creating secure client/server connections over UDP (protocol
