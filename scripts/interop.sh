@@ -35,7 +35,7 @@ cleanup()
 trap cleanup EXIT
 
 echo "== building C compat harness against $NETCODE"
-"$CC" -O2 -Wall -I "$NETCODE" -I "$NETCODE/sodium" -o "$WORK/compat-c" compat/c/compat.c "$NETCODE/sodium/sodium.c" -lm
+"$CC" -O2 -ffp-contract=off -Wall -I "$NETCODE" -I "$NETCODE/sodium" -o "$WORK/compat-c" compat/c/compat.c "$NETCODE/sodium/sodium.c" -lm
 
 echo "== building C# compat harness"
 dotnet build compat/Compat.csproj -c Release --nologo -v quiet

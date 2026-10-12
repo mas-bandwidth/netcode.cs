@@ -121,6 +121,7 @@ internal static class Program
         RunTest("test_encryption_manager", CoreTests.TestEncryptionManager);
         RunTest("test_replay_protection", CoreTests.TestReplayProtection);
         RunTest("test_network_simulator_determinism", CoreTests.TestNetworkSimulatorDeterminism);
+        RunTest("FloatMultiplyAddRoundsTwice", CoreTests.FloatMultiplyAddRoundsTwice);
         RunTest("test_client_create", ClientServerTests.TestClientCreate);
         RunTest("test_server_create", ClientServerTests.TestServerCreate);
         RunTest("test_server_restart_global_sequence", ClientServerTests.TestServerRestartGlobalSequence);
@@ -163,6 +164,37 @@ internal static class Program
 
 internal static class CoreTests
 {
+    // Canary inputs for FloatMultiplyAddRoundsTwice. Deliberately mutable static
+    // fields, not constants: the JIT must not be able to fold the test expression
+    // at compile time, or the canary would prove nothing about the runtime.
+    private static float _canaryFloatA = BitConverter.Int32BitsToSingle(0x3F800800);
+    private static float _canaryFloatC = BitConverter.Int32BitsToSingle(unchecked((int)0xBF801000));
+    private static double _canaryDoubleA = BitConverter.Int64BitsToDouble(0x3FF0000002000000L);
+    private static double _canaryDoubleC = BitConverter.Int64BitsToDouble(unchecked((long)0xBFF0000004000000UL));
+
+    public static void FloatMultiplyAddRoundsTwice()
+    {
+        // The estate rule is that network libraries build without floating-point
+        // contraction: every operation rounds on its own, so results agree across
+        // implementations and builds. The C half of the interop gate is compiled
+        // with -ffp-contract=off (scripts/interop.sh); C# rounds each operation
+        // and does not contract. These pairs are chosen so a single fused
+        // multiply-add (one rounding) gives 0x33800000 / 0x3C90000000000000,
+        // while two roundings give zero. A failure here means a runtime, a build
+        // setting or a hand-written MathF.FusedMultiplyAdd changed the
+        // simulator's or the timers' arithmetic.
+
+        float a = _canaryFloatA;
+        float b = _canaryFloatA;
+        float c = _canaryFloatC;
+        Check.That(BitConverter.SingleToInt32Bits(a * b + c) == 0x00000000);
+
+        double da = _canaryDoubleA;
+        double db = _canaryDoubleA;
+        double dc = _canaryDoubleC;
+        Check.That(BitConverter.DoubleToInt64Bits(da * db + dc) == 0L);
+    }
+
     public static void TestCryptoAeadVectors()
     {
         // Known-answer test pinned to the same golden bytes as netcode.c's

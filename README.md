@@ -129,6 +129,17 @@ branches or lookups; the tag comparison is
 `CryptographicOperations.FixedTimeEquals`; on decrypt, plaintext is only
 produced after the tag verifies.
 
+## Floating point
+
+Network arithmetic must be reproducible across implementations and builds, so
+every operation rounds on its own and no multiply-add is fused. The C half of
+the interop gate is compiled with `-ffp-contract=off` (`scripts/interop.sh`),
+so the compiler cannot contract `a*b + c` into a single fused multiply-add and
+silently change a result. C# rounds each operation and does not contract by
+default; the `FloatMultiplyAddRoundsTwice` canary in `tests/Tests.cs` pins that
+behavior, failing if a runtime, a build setting or a hand-written
+`MathF.FusedMultiplyAdd` ever changes the simulator's or the timers' arithmetic.
+
 ## Deliberate design decisions (do not "fix")
 
 Inherited from the C reference implementation, on purpose:
