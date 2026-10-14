@@ -6,6 +6,7 @@
 */
 
 using System;
+using System.Net.Sockets;
 using System.Threading;
 
 namespace Netcode.Tests;
@@ -854,6 +855,135 @@ internal static class ClientServerTests
 
         Check.That(client.State == ClientState.Disconnected);
         Check.That(server.NumConnectedClients == 0);
+    }
+
+    /// <summary>A scripted ReceivePacketOverride: values &gt; 0 are junk datagrams of that length, -1 means skip (an empty datagram or a receive error), 0 means would-block (nothing more).</summary>
+    private sealed class DrainScript
+    {
+        private readonly int[] _script;
+        private int _index;
+
+        public int Calls;
+        public int Processed;
+
+        public DrainScript(params int[] script) => _script = script;
+
+        public int Receive(ref Address from, Span<byte> packetData)
+        {
+            int result = _index < _script.Length ? _script[_index] : 0;
+            _index++;
+            Calls++;
+
+            if (result > 0)
+            {
+                Processed++;
+                for (int i = 0; i < result; i++)
+                    packetData[i] = 0xFF; // junk: an invalid prefix byte that every reader refuses
+                from = Address.Parse("203.0.113.7:12345");
+            }
+
+            return result;
+        }
+
+        public void Send(in Address to, ReadOnlySpan<byte> packetData)
+        {
+        }
+    }
+
+    public static void TestReceiveDrainSkipsEmptyAndStopsAtCap()
+    {
+        // a zero-length UDP datagram is legal and must not end the drain: only a
+        // would-block does (the C fix, netcode_classify_receive_result). the loops
+        // count every iteration and stop at the per-update caps.
+
+        // classifier rows (the port of netcode_classify_receive_result):
+        // (0,0) -> skip, (-1,would-block) -> drained, (-1,other error) -> skip, (5,0) -> 5
+
+        Check.That(NetcodeSocket.ClassifyReceiveResult(0, SocketError.Success) == -1);
+        Check.That(NetcodeSocket.ClassifyReceiveResult(-1, SocketError.WouldBlock) == 0);
+        Check.That(NetcodeSocket.ClassifyReceiveResult(-1, SocketError.ConnectionRefused) == -1);
+        Check.That(NetcodeSocket.ClassifyReceiveResult(5, SocketError.Success) == 5);
+
+        // server: a queue [skip, junk, junk, would-block] is consumed whole in one update
+        // and the skip never reaches the packet processor
+
+        {
+            var config = new ServerConfig { ProtocolId = TestConstants.TestProtocolId, OverrideSendAndReceive = true };
+            TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
+            var script = new DrainScript(-1, 11, 11, 0);
+            config.SendPacketOverride = script.Send;
+            config.ReceivePacketOverride = script.Receive;
+
+            using var server = new Server("127.0.0.1:40000", config, 0.0);
+            server.Start(1);
+
+            server.Update(1.0);
+
+            Check.That(script.Calls == 4);
+            Check.That(script.Processed == 2);
+        }
+
+        // server: a queue of ServerMaxReceivePackets + 10 junk datagrams consumes
+        // exactly ServerMaxReceivePackets in one update
+
+        {
+            int cap = Defines.ServerMaxReceivePackets;
+            var queue = new int[cap + 10];
+            Array.Fill(queue, 11);
+            queue[cap + 9] = 0;
+
+            var config = new ServerConfig { ProtocolId = TestConstants.TestProtocolId, OverrideSendAndReceive = true };
+            TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
+            var script = new DrainScript(queue);
+            config.SendPacketOverride = script.Send;
+            config.ReceivePacketOverride = script.Receive;
+
+            using var server = new Server("127.0.0.1:40000", config, 0.0);
+            server.Start(1);
+
+            server.Update(1.0);
+
+            Check.That(script.Calls == cap);
+            Check.That(script.Processed == cap);
+        }
+
+        // client: a queue [skip, junk, would-block] is consumed whole in one update
+
+        {
+            var config = new ClientConfig { OverrideSendAndReceive = true };
+            var script = new DrainScript(-1, 11, 0);
+            config.SendPacketOverride = script.Send;
+            config.ReceivePacketOverride = script.Receive;
+
+            using var client = new Client("0.0.0.0:0", config, 0.0);
+
+            client.Update(1.0);
+
+            Check.That(script.Calls == 3);
+            Check.That(script.Processed == 1);
+        }
+
+        // client: a queue of ClientMaxReceivePackets + 10 junk datagrams consumes
+        // exactly ClientMaxReceivePackets in one update
+
+        {
+            int cap = Defines.ClientMaxReceivePackets;
+            var queue = new int[cap + 10];
+            Array.Fill(queue, 11);
+            queue[cap + 9] = 0;
+
+            var config = new ClientConfig { OverrideSendAndReceive = true };
+            var script = new DrainScript(queue);
+            config.SendPacketOverride = script.Send;
+            config.ReceivePacketOverride = script.Receive;
+
+            using var client = new Client("0.0.0.0:0", config, 0.0);
+
+            client.Update(1.0);
+
+            Check.That(script.Calls == cap);
+            Check.That(script.Processed == cap);
+        }
     }
 
     public static void TestServerClientDisconnectReason()
