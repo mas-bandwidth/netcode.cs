@@ -225,6 +225,87 @@ internal static class ClientServerTests
         Check.That(server.NumConnectedClients == 0);
     }
 
+    public static void TestConnectionResponseUsesItsMappingChallenge()
+    {
+        // This functional server path reads the wall clock for token expiry. It uses
+        // an override transport and performs no socket I/O or sleep.
+        byte[] sent = Array.Empty<byte>();
+        var config = new ServerConfig { ProtocolId = TestConstants.TestProtocolId, OverrideSendAndReceive = true };
+        TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
+        config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => sent = data.ToArray();
+        config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+        using var server = new Server("127.0.0.1:40000", config, 0.0);
+        server.Start(4);
+        Address x = Address.Parse("127.0.0.1:50000");
+        Address y = Address.Parse("127.0.0.1:50001");
+
+        ConnectTokenData Token(ulong id, byte marker)
+        {
+            byte[] bytes = new byte[Protocol.ConnectTokenBytes];
+            byte[] userData = new byte[Protocol.UserDataBytes];
+            Array.Fill(userData, marker);
+            string[] addresses = { "127.0.0.1:40000" };
+            Check.That(ConnectTokenGenerator.Generate(addresses, addresses, 30, 15, id,
+                TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, bytes));
+            var token = new ConnectTokenData();
+            Check.That(token.Read(bytes));
+            return token;
+        }
+
+        ConnectTokenData a = Token(0x1111, 0xA1);
+        ConnectTokenData b = Token(0x2222, 0xB2);
+        ConnectTokenData c = Token(0x3333, 0xC3);
+
+        void Request(in Address from, ConnectTokenData token)
+        {
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteConnectionRequestPacket(wire, token.VersionInfo, token.ProtocolId,
+                token.ExpireTimestamp, token.Nonce, token.PrivateData);
+            server.ProcessPacket(in from, wire.AsSpan(0, bytes));
+        }
+
+        byte[] Challenge(ConnectTokenData token)
+        {
+            byte[] wire = (byte[])sent.Clone();
+            bool[] allowed = new bool[PacketType.NumPackets];
+            allowed[PacketType.ConnectionChallenge] = true;
+            ReadPacketResult packet = PacketIO.ReadPacket(wire, true, token.ServerToClientKey,
+                TestConstants.TestProtocolId, 0, false, ReadOnlySpan<byte>.Empty, allowed, null);
+            Check.That(packet.Type == PacketType.ConnectionChallenge);
+            return wire.AsSpan(packet.DataOffset, packet.DataLength).ToArray();
+        }
+
+        void Response(in Address from, ConnectTokenData token, byte[] challenge, ulong sequence)
+        {
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteEncryptedPacket(wire, PacketType.ConnectionResponse,
+                challenge, sequence, token.ClientToServerKey, TestConstants.TestProtocolId);
+            server.ProcessPacket(in from, wire.AsSpan(0, bytes));
+        }
+
+        Request(in x, a);
+        byte[] challengeA = Challenge(a);
+        Request(in y, b);
+        byte[] challengeB = Challenge(b);
+        Response(in y, b, challengeA, 1);
+        Check.That(server.NumConnectedClients == 0);
+        Response(in y, b, challengeB, 2);
+        Check.That(server.NumConnectedClients == 1);
+        Check.That(server.ClientId(0) == 0x2222);
+        Check.That(server.ClientUserData(0)[0] == 0xB2);
+        Request(in x, c);
+        byte[] challengeCFirst = Challenge(c);
+        Request(in x, c);
+        byte[] challengeCSecond = Challenge(c);
+        Check.That(!challengeCFirst.AsSpan().SequenceEqual(challengeCSecond));
+        Response(in x, c, challengeA, 1);
+        Check.That(server.NumConnectedClients == 1);
+        Response(in x, c, challengeCFirst, 2);
+        Check.That(server.NumConnectedClients == 2);
+        Check.That(server.ClientId(1) == 0x3333);
+        Check.That(server.ClientUserData(1)[0] == 0xC3);
+    }
+
     public static void TestClientErrorConnectTokenPredatesServerStart()
     {
         NetworkSimulator simulator = CreateSimulator();

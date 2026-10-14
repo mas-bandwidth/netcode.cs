@@ -654,17 +654,29 @@ namespace Netcode
         /// <summary>Encrypt the 300-byte challenge token buffer in place (first 284 bytes; last 16 hold the MAC).</summary>
         public static void Encrypt(Span<byte> buffer, ulong sequence, ReadOnlySpan<byte> key)
         {
+            Encrypt(buffer, sequence, key, ReadOnlySpan<byte>.Empty);
+        }
+
+        /// <summary>Encrypt a challenge bound to the connect token MAC in associated data.</summary>
+        public static void Encrypt(Span<byte> buffer, ulong sequence, ReadOnlySpan<byte> key, ReadOnlySpan<byte> associatedData)
+        {
             Span<byte> nonce = stackalloc byte[Aead.NonceBytesIetf];
             BuildNonce(nonce, sequence);
-            Aead.EncryptIetf(buffer.Slice(0, Defines.ChallengeTokenBytes), Defines.ChallengeTokenBytes - Protocol.MacBytes, ReadOnlySpan<byte>.Empty, nonce, key);
+            Aead.EncryptIetf(buffer.Slice(0, Defines.ChallengeTokenBytes), Defines.ChallengeTokenBytes - Protocol.MacBytes, associatedData, nonce, key);
         }
 
         /// <summary>Decrypt the 300-byte challenge token buffer in place. Returns false on authentication failure.</summary>
         public static bool Decrypt(Span<byte> buffer, ulong sequence, ReadOnlySpan<byte> key)
         {
+            return Decrypt(buffer, sequence, key, ReadOnlySpan<byte>.Empty);
+        }
+
+        /// <summary>Decrypt a challenge bound to the connect token MAC in associated data.</summary>
+        public static bool Decrypt(Span<byte> buffer, ulong sequence, ReadOnlySpan<byte> key, ReadOnlySpan<byte> associatedData)
+        {
             Span<byte> nonce = stackalloc byte[Aead.NonceBytesIetf];
             BuildNonce(nonce, sequence);
-            return Aead.DecryptIetf(buffer.Slice(0, Defines.ChallengeTokenBytes), Defines.ChallengeTokenBytes, ReadOnlySpan<byte>.Empty, nonce, key);
+            return Aead.DecryptIetf(buffer.Slice(0, Defines.ChallengeTokenBytes), Defines.ChallengeTokenBytes, associatedData, nonce, key);
         }
     }
 
