@@ -649,6 +649,187 @@ static int do_client( int port, const char * token_file )
     return result;
 }
 
+static int do_diff_packets( void )
+{
+    uint8_t token_key[NETCODE_KEY_BYTES], challenge_key[NETCODE_KEY_BYTES], packet_key[NETCODE_KEY_BYTES];
+    uint8_t nonce[NETCODE_CONNECT_TOKEN_NONCE_BYTES];
+    uint8_t private_token[NETCODE_CONNECT_TOKEN_PRIVATE_BYTES];
+    uint8_t buffer[NETCODE_MAX_PACKET_BYTES * 2];
+    uint8_t allowed_packets[NETCODE_CONNECTION_NUM_PACKETS];
+    struct netcode_replay_protection_t replay;
+    uint64_t current_timestamp = GOLDEN_EXPIRE_TIMESTAMP - 1;
+    uint64_t sequence;
+    int bytes;
+
+    (void) challenge_key;
+
+    golden_keys_and_nonce( token_key, challenge_key, packet_key, nonce );
+    memset( allowed_packets, 1, sizeof( allowed_packets ) );
+    memset( &replay, 0, sizeof( replay ) );
+
+    if ( !build_golden_private_token( private_token ) )
+        return 0;
+
+    /* 0: valid connection request packet */
+    {
+        struct netcode_connection_request_packet_t packet;
+        packet.packet_type = NETCODE_CONNECTION_REQUEST_PACKET;
+        memcpy( packet.version_info, NETCODE_VERSION_INFO, NETCODE_VERSION_INFO_BYTES );
+        packet.protocol_id = GOLDEN_PROTOCOL_ID;
+        packet.connect_token_expire_timestamp = GOLDEN_EXPIRE_TIMESTAMP;
+        memcpy( packet.connect_token_nonce, nonce, NETCODE_CONNECT_TOKEN_NONCE_BYTES );
+        memcpy( packet.connect_token_data, private_token, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
+        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
+
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, token_key, allowed_packets, NULL, NULL, NULL );
+        if ( result )
+            printf( "0 request 0 %d\n", NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
+        else
+            printf( "0 refused 0 0\n" );
+    }
+
+    /* 1: bad prefix byte (type 0, 7 sequence bytes) */
+    {
+        uint8_t payload_storage[sizeof( struct netcode_connection_payload_packet_t ) + 100];
+        struct netcode_connection_payload_packet_t * p = (struct netcode_connection_payload_packet_t*) payload_storage;
+        uint8_t payload[100];
+        int i;
+        for ( i = 0; i < (int) sizeof( payload ); i++ )
+            payload[i] = (uint8_t) i;
+
+        p->packet_type = NETCODE_CONNECTION_PAYLOAD_PACKET;
+        p->payload_bytes = sizeof( payload );
+        memcpy( p->payload_data, payload, sizeof( payload ) );
+        bytes = netcode_write_packet( p, buffer, sizeof( buffer ), 1000, packet_key, GOLDEN_PROTOCOL_ID );
+        buffer[0] = 0x70;
+
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, NULL, allowed_packets, &replay, NULL, NULL );
+        printf( "1 %s %lu 0\n", result ? "payload" : "refused", (unsigned long) sequence );
+        if ( result )
+            free( result );
+    }
+
+    /* 2: truncated connection request packet */
+    {
+        struct netcode_connection_request_packet_t packet;
+        packet.packet_type = NETCODE_CONNECTION_REQUEST_PACKET;
+        memcpy( packet.version_info, NETCODE_VERSION_INFO, NETCODE_VERSION_INFO_BYTES );
+        packet.protocol_id = GOLDEN_PROTOCOL_ID;
+        packet.connect_token_expire_timestamp = GOLDEN_EXPIRE_TIMESTAMP;
+        memcpy( packet.connect_token_nonce, nonce, NETCODE_CONNECT_TOKEN_NONCE_BYTES );
+        memcpy( packet.connect_token_data, private_token, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
+        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
+
+        void * result = netcode_read_packet( buffer, bytes - 1, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, token_key, allowed_packets, NULL, NULL, NULL );
+        printf( "2 %s %lu 0\n", result ? "request" : "refused", (unsigned long) sequence );
+        if ( result )
+            free( result );
+    }
+
+    /* 3: wrong connection request packet size */
+    {
+        struct netcode_connection_request_packet_t packet;
+        packet.packet_type = NETCODE_CONNECTION_REQUEST_PACKET;
+        memcpy( packet.version_info, NETCODE_VERSION_INFO, NETCODE_VERSION_INFO_BYTES );
+        packet.protocol_id = GOLDEN_PROTOCOL_ID;
+        packet.connect_token_expire_timestamp = GOLDEN_EXPIRE_TIMESTAMP;
+        memcpy( packet.connect_token_nonce, nonce, NETCODE_CONNECT_TOKEN_NONCE_BYTES );
+        memcpy( packet.connect_token_data, private_token, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
+        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
+
+        void * result = netcode_read_packet( buffer, bytes - 2, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, token_key, allowed_packets, NULL, NULL, NULL );
+        printf( "3 %s %lu 0\n", result ? "request" : "refused", (unsigned long) sequence );
+        if ( result )
+            free( result );
+    }
+
+    /* 4: valid encrypted payload packet */
+    {
+        uint8_t payload_storage[sizeof( struct netcode_connection_payload_packet_t ) + 100];
+        struct netcode_connection_payload_packet_t * p = (struct netcode_connection_payload_packet_t*) payload_storage;
+        uint8_t payload[100];
+        int i;
+        for ( i = 0; i < (int) sizeof( payload ); i++ )
+            payload[i] = (uint8_t) i;
+
+        p->packet_type = NETCODE_CONNECTION_PAYLOAD_PACKET;
+        p->payload_bytes = sizeof( payload );
+        memcpy( p->payload_data, payload, sizeof( payload ) );
+        bytes = netcode_write_packet( p, buffer, sizeof( buffer ), 1000, packet_key, GOLDEN_PROTOCOL_ID );
+
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, NULL, allowed_packets, &replay, NULL, NULL );
+        if ( result )
+            printf( "4 payload %lu %d\n", (unsigned long) sequence, ( (struct netcode_connection_payload_packet_t*) result )->payload_bytes );
+        else
+            printf( "4 refused 0 0\n" );
+        if ( result )
+            free( result );
+    }
+
+    /* 5: replayed payload packet */
+    {
+        uint8_t payload_storage[sizeof( struct netcode_connection_payload_packet_t ) + 100];
+        struct netcode_connection_payload_packet_t * p = (struct netcode_connection_payload_packet_t*) payload_storage;
+        uint8_t payload[100];
+        int i;
+        for ( i = 0; i < (int) sizeof( payload ); i++ )
+            payload[i] = (uint8_t) i;
+
+        p->packet_type = NETCODE_CONNECTION_PAYLOAD_PACKET;
+        p->payload_bytes = sizeof( payload );
+        memcpy( p->payload_data, payload, sizeof( payload ) );
+        bytes = netcode_write_packet( p, buffer, sizeof( buffer ), 1000, packet_key, GOLDEN_PROTOCOL_ID );
+
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, NULL, allowed_packets, &replay, NULL, NULL );
+        printf( "5 %s %lu 0\n", result ? "payload" : "refused", (unsigned long) sequence );
+        if ( result )
+            free( result );
+    }
+
+    /* 6: wrong version info in connection request */
+    {
+        struct netcode_connection_request_packet_t packet;
+        packet.packet_type = NETCODE_CONNECTION_REQUEST_PACKET;
+        memcpy( packet.version_info, NETCODE_VERSION_INFO, NETCODE_VERSION_INFO_BYTES );
+        packet.protocol_id = GOLDEN_PROTOCOL_ID;
+        packet.connect_token_expire_timestamp = GOLDEN_EXPIRE_TIMESTAMP;
+        memcpy( packet.connect_token_nonce, nonce, NETCODE_CONNECT_TOKEN_NONCE_BYTES );
+        memcpy( packet.connect_token_data, private_token, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
+        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
+        buffer[1] = 'X';
+
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, token_key, allowed_packets, NULL, NULL, NULL );
+        printf( "6 %s %lu 0\n", result ? "request" : "refused", (unsigned long) sequence );
+        if ( result )
+            free( result );
+    }
+
+    /* 7: wrong protocol id in connection request */
+    {
+        struct netcode_connection_request_packet_t packet;
+        packet.packet_type = NETCODE_CONNECTION_REQUEST_PACKET;
+        memcpy( packet.version_info, NETCODE_VERSION_INFO, NETCODE_VERSION_INFO_BYTES );
+        packet.protocol_id = GOLDEN_PROTOCOL_ID;
+        packet.connect_token_expire_timestamp = GOLDEN_EXPIRE_TIMESTAMP;
+        memcpy( packet.connect_token_nonce, nonce, NETCODE_CONNECT_TOKEN_NONCE_BYTES );
+        memcpy( packet.connect_token_data, private_token, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
+        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
+        {
+            uint64_t wrong = ~GOLDEN_PROTOCOL_ID;
+            int i;
+            for ( i = 0; i < 8; i++ )
+                buffer[1 + NETCODE_VERSION_INFO_BYTES + i] = (uint8_t) ( wrong >> ( i * 8 ) );
+        }
+
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, token_key, allowed_packets, NULL, NULL, NULL );
+        printf( "7 %s %lu 0\n", result ? "request" : "refused", (unsigned long) sequence );
+        if ( result )
+            free( result );
+    }
+
+    return 1;
+}
+
 int main( int argc, char ** argv )
 {
     if ( netcode_init() != NETCODE_OK )
@@ -671,8 +852,10 @@ int main( int argc, char ** argv )
         ok = do_server( atoi( argv[2] ) );
     else if ( argc == 4 && strcmp( argv[1], "client" ) == 0 )
         ok = do_client( atoi( argv[2] ), argv[3] );
+    else if ( argc == 2 && strcmp( argv[1], "diffpackets" ) == 0 )
+        ok = do_diff_packets();
     else
-        printf( "usage: compat-c goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token>\n" );
+        printf( "usage: compat-c goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token> | diffpackets\n" );
 
     netcode_term();
 
