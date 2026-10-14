@@ -137,7 +137,13 @@ static int build_golden_challenge_token( uint8_t * buffer /* 300 */ )
     uint8_t nonce[NETCODE_CONNECT_TOKEN_NONCE_BYTES];
     golden_keys_and_nonce( token_key, challenge_key, packet_key, nonce );
 
-    return netcode_encrypt_challenge_token( buffer, NETCODE_CHALLENGE_TOKEN_BYTES, GOLDEN_CHALLENGE_SEQUENCE, challenge_key ) == NETCODE_OK;
+    /* Legacy golden uses the historical empty-AD construction. The live
+       mapping-bound scenario below exercises the C reference's new API. */
+    uint8_t challenge_nonce[12] = { 0 };
+    uint8_t * p = challenge_nonce + 4;
+    netcode_write_uint64( &p, GOLDEN_CHALLENGE_SEQUENCE );
+    return netcode_encrypt_aead( buffer, NETCODE_CHALLENGE_TOKEN_BYTES - NETCODE_MAC_BYTES,
+                                 NULL, 0, challenge_nonce, challenge_key ) == NETCODE_OK;
 }
 
 static int do_goldens( const char * dir )
@@ -329,7 +335,11 @@ static int do_verify( const char * dir )
     if ( !read_file( dir, "challenge_token.bin", challenge_token, sizeof( challenge_token ) ) )
         return 0;
 
-    VERIFY( netcode_decrypt_challenge_token( challenge_token, NETCODE_CHALLENGE_TOKEN_BYTES, GOLDEN_CHALLENGE_SEQUENCE, challenge_key ) == NETCODE_OK );
+    uint8_t challenge_nonce[12] = { 0 };
+    uint8_t * p = challenge_nonce + 4;
+    netcode_write_uint64( &p, GOLDEN_CHALLENGE_SEQUENCE );
+    VERIFY( netcode_decrypt_aead( challenge_token, NETCODE_CHALLENGE_TOKEN_BYTES,
+                                 NULL, 0, challenge_nonce, challenge_key ) == NETCODE_OK );
 
     struct netcode_challenge_token_t challenge_struct;
     VERIFY( netcode_read_challenge_token( challenge_token, NETCODE_CHALLENGE_TOKEN_BYTES, &challenge_struct ) == NETCODE_OK );
@@ -349,7 +359,7 @@ static int do_verify( const char * dir )
         if ( !read_file( dir, "packet_request.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_request_packet_t * packet = (struct netcode_connection_request_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, token_key, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, UINT64_MAX, token_key, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_REQUEST_PACKET );
         VERIFY( packet->protocol_id == GOLDEN_PROTOCOL_ID );
@@ -361,7 +371,7 @@ static int do_verify( const char * dir )
         int bytes = 1 + 8 + NETCODE_MAC_BYTES;      /* prefix + 8 sequence bytes + mac */
         if ( !read_file( dir, "packet_denied.bin", buffer, bytes ) )
             return 0;
-        void * packet = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
+        void * packet = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, UINT64_MAX, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( ( (uint8_t*) packet )[0] == NETCODE_CONNECTION_DENIED_PACKET );
         VERIFY( sequence == 1ULL << 63 );
@@ -373,7 +383,7 @@ static int do_verify( const char * dir )
         if ( !read_file( dir, "packet_challenge.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_challenge_packet_t * packet = (struct netcode_connection_challenge_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, UINT64_MAX, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_CHALLENGE_PACKET );
         VERIFY( packet->challenge_token_sequence == GOLDEN_CHALLENGE_SEQUENCE );
@@ -386,7 +396,7 @@ static int do_verify( const char * dir )
         if ( !read_file( dir, "packet_response.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_response_packet_t * packet = (struct netcode_connection_response_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, UINT64_MAX, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_RESPONSE_PACKET );
         VERIFY( packet->challenge_token_sequence == GOLDEN_CHALLENGE_SEQUENCE );
@@ -399,7 +409,7 @@ static int do_verify( const char * dir )
         if ( !read_file( dir, "packet_keepalive.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_keep_alive_packet_t * packet = (struct netcode_connection_keep_alive_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, UINT64_MAX, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_KEEP_ALIVE_PACKET );
         VERIFY( packet->client_index == 5 );
@@ -413,7 +423,7 @@ static int do_verify( const char * dir )
         if ( !read_file( dir, "packet_payload.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_payload_packet_t * packet = (struct netcode_connection_payload_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, UINT64_MAX, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_PAYLOAD_PACKET );
         VERIFY( packet->payload_bytes == NETCODE_MAX_PAYLOAD_BYTES );
@@ -428,7 +438,7 @@ static int do_verify( const char * dir )
         int bytes = 1 + 1 + NETCODE_MAC_BYTES;
         if ( !read_file( dir, "packet_disconnect.bin", buffer, bytes ) )
             return 0;
-        void * packet = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
+        void * packet = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, UINT64_MAX, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( ( (uint8_t*) packet )[0] == NETCODE_CONNECTION_DISCONNECT_PACKET );
         VERIFY( sequence == 7 );
@@ -448,7 +458,7 @@ static int do_mint( const char * filename, const char * server_address )
     uint64_t client_id = 0;
     netcode_random_bytes( (uint8_t*) &client_id, 8 );
 
-    if ( netcode_generate_connect_token( 1, &server_address, &server_address, 60, 15, client_id,
+    if ( netcode_generate_connect_token( 1, &server_address, &server_address, 30, 15, client_id,
                                          SESSION_PROTOCOL_ID, session_private_key, user_data, connect_token ) != NETCODE_OK )
     {
         printf( "error: failed to mint connect token\n" );
@@ -683,7 +693,7 @@ static int do_diff_packets( void )
         memcpy( packet.connect_token_data, private_token, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
         bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
 
-        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, token_key, allowed_packets, NULL, NULL, NULL );
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, UINT64_MAX, token_key, allowed_packets, NULL, NULL, NULL );
         if ( result )
             printf( "0 request 0 %d\n", NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
         else
@@ -705,8 +715,8 @@ static int do_diff_packets( void )
         bytes = netcode_write_packet( p, buffer, sizeof( buffer ), 1000, packet_key, GOLDEN_PROTOCOL_ID );
         buffer[0] = 0x70;
 
-        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, NULL, allowed_packets, NULL, NULL, NULL );
-        printf( "1 %s %lu 0\n", result ? "payload" : "refused", (unsigned long) sequence );
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, UINT64_MAX, NULL, allowed_packets, NULL, NULL, NULL );
+        printf( "1 %s %lu 0\n", result ? "payload" : "refused", result ? (unsigned long) sequence : 0UL );
         if ( result )
             free( result );
     }
@@ -722,8 +732,8 @@ static int do_diff_packets( void )
         memcpy( packet.connect_token_data, private_token, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
         bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
 
-        void * result = netcode_read_packet( buffer, bytes - 1, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, token_key, allowed_packets, NULL, NULL, NULL );
-        printf( "2 %s %lu 0\n", result ? "request" : "refused", (unsigned long) sequence );
+        void * result = netcode_read_packet( buffer, bytes - 1, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, UINT64_MAX, token_key, allowed_packets, NULL, NULL, NULL );
+        printf( "2 %s %lu 0\n", result ? "request" : "refused", result ? (unsigned long) sequence : 0UL );
         if ( result )
             free( result );
     }
@@ -739,8 +749,8 @@ static int do_diff_packets( void )
         memcpy( packet.connect_token_data, private_token, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
         bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
 
-        void * result = netcode_read_packet( buffer, bytes - 2, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, token_key, allowed_packets, NULL, NULL, NULL );
-        printf( "3 %s %lu 0\n", result ? "request" : "refused", (unsigned long) sequence );
+        void * result = netcode_read_packet( buffer, bytes - 2, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, UINT64_MAX, token_key, allowed_packets, NULL, NULL, NULL );
+        printf( "3 %s %lu 0\n", result ? "request" : "refused", result ? (unsigned long) sequence : 0UL );
         if ( result )
             free( result );
     }
@@ -759,7 +769,7 @@ static int do_diff_packets( void )
         memcpy( p->payload_data, payload, sizeof( payload ) );
         bytes = netcode_write_packet( p, buffer, sizeof( buffer ), 1000, packet_key, GOLDEN_PROTOCOL_ID );
 
-        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, NULL, allowed_packets, &replay, NULL, NULL );
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, UINT64_MAX, NULL, allowed_packets, &replay, NULL, NULL );
         if ( result )
             printf( "4 payload %lu %d\n", (unsigned long) sequence, ( (struct netcode_connection_payload_packet_t*) result )->payload_bytes );
         else
@@ -782,8 +792,8 @@ static int do_diff_packets( void )
         memcpy( p->payload_data, payload, sizeof( payload ) );
         bytes = netcode_write_packet( p, buffer, sizeof( buffer ), 1000, packet_key, GOLDEN_PROTOCOL_ID );
 
-        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, NULL, allowed_packets, &replay, NULL, NULL );
-        printf( "5 %s %lu 0\n", result ? "payload" : "refused", (unsigned long) sequence );
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, UINT64_MAX, NULL, allowed_packets, &replay, NULL, NULL );
+        printf( "5 %s %lu 0\n", result ? "payload" : "refused", result ? (unsigned long) sequence : 0UL );
         if ( result )
             free( result );
     }
@@ -800,7 +810,7 @@ static int do_diff_packets( void )
         bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
         buffer[1] = 'X';
 
-        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, token_key, allowed_packets, NULL, NULL, NULL );
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, UINT64_MAX, token_key, allowed_packets, NULL, NULL, NULL );
         printf( "6 %s %lu 0\n", result ? "request" : "refused", (unsigned long) sequence );
         if ( result )
             free( result );
@@ -823,7 +833,7 @@ static int do_diff_packets( void )
                 buffer[1 + NETCODE_VERSION_INFO_BYTES + i] = (uint8_t) ( wrong >> ( i * 8 ) );
         }
 
-        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, token_key, allowed_packets, NULL, NULL, NULL );
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, UINT64_MAX, token_key, allowed_packets, NULL, NULL, NULL );
         printf( "7 %s %lu 0\n", result ? "request" : "refused", (unsigned long) sequence );
         if ( result )
             free( result );
@@ -861,7 +871,7 @@ struct drain_script_t
     int processed;
 };
 
-static void drain_send_override( void * context, const struct netcode_address_t * to, const uint8_t * packet_data, int packet_bytes )
+static void drain_send_override( void * context, struct netcode_address_t * to, const uint8_t * packet_data, int packet_bytes )
 {
     (void) context; (void) to; (void) packet_data; (void) packet_bytes;
 }
@@ -903,9 +913,8 @@ static void drain_server( const char * queue_name, const int * entries, int num_
     config.protocol_id = SESSION_PROTOCOL_ID;
     memcpy( config.private_key, session_private_key, NETCODE_KEY_BYTES );
     config.override_send_and_receive = 1;
-    config.send_packet_override_context = NULL;
     config.send_packet_override = drain_send_override;
-    config.receive_packet_override_context = &script;
+    config.callback_context = &script;
     config.receive_packet_override = drain_receive_override;
 
     memset( &script, 0, sizeof( script ) );
@@ -926,11 +935,9 @@ static void drain_client( const char * queue_name, const int * entries, int num_
     struct netcode_client_t * client;
 
     netcode_default_client_config( &config );
-    config.protocol_id = SESSION_PROTOCOL_ID;
     config.override_send_and_receive = 1;
-    config.send_packet_override_context = NULL;
     config.send_packet_override = drain_send_override;
-    config.receive_packet_override_context = &script;
+    config.callback_context = &script;
     config.receive_packet_override = drain_receive_override;
 
     memset( &script, 0, sizeof( script ) );
@@ -977,11 +984,221 @@ static int do_drain( void )
     }
 
     /* classifier rows (netcode_classify_receive_result) */
-    printf( "classify (0,0) -> %d\n", netcode_classify_receive_result( 0, 0, EAGAIN ) );
-    printf( "classify (-1,wouldblock) -> %d\n", netcode_classify_receive_result( -1, EAGAIN, EAGAIN ) );
-    printf( "classify (-1,other) -> %d\n", netcode_classify_receive_result( -1, ECONNREFUSED, EAGAIN ) );
-    printf( "classify (5,0) -> %d\n", netcode_classify_receive_result( 5, 0, EAGAIN ) );
+    netcode_log_level( NETCODE_LOG_LEVEL_NONE );
+    printf( "classify (0,0) -> %d\n", netcode_classify_receive_result( 0, 0, 0 ) );
+    printf( "classify (-1,wouldblock) -> %d\n", netcode_classify_receive_result( -1, EAGAIN, 1 ) );
+    printf( "classify (-1,other) -> %d\n", netcode_classify_receive_result( -1, ECONNREFUSED, 0 ) );
+    printf( "classify (5,0) -> %d\n", netcode_classify_receive_result( 5, 0, 0 ) );
 
+    return 1;
+}
+
+/* Mapping-bound challenge oracle. All token and packet inputs use fixed bytes;
+   read_and_process_packet receives an explicit timestamp and the override
+   transport captures the challenge without sockets or a wall-clock read. */
+static uint8_t scenario_sent[NETCODE_MAX_PACKET_BYTES];
+static int scenario_sent_bytes;
+
+static void scenario_send( void * context, struct netcode_address_t * to, NETCODE_CONST uint8_t * data, int bytes )
+{
+    (void) context;
+    (void) to;
+    memcpy( scenario_sent, data, bytes );
+    scenario_sent_bytes = bytes;
+}
+
+static int scenario_receive( void * context, struct netcode_address_t * from, uint8_t * data, int max_bytes )
+{
+    (void) context;
+    (void) from;
+    (void) data;
+    (void) max_bytes;
+    return 0;
+}
+
+static void scenario_token( struct netcode_connect_token_t * token, uint64_t id, uint8_t user, uint8_t seed )
+{
+    struct netcode_connect_token_private_t private_token;
+    memset( &private_token, 0, sizeof( private_token ) );
+    private_token.client_id = id;
+    private_token.timeout_seconds = 15;
+    private_token.num_server_addresses = 1;
+    netcode_parse_address( "127.0.0.1:40000", &private_token.server_addresses[0] );
+    fill_pattern( private_token.client_to_server_key, NETCODE_KEY_BYTES, 10 * seed );
+    fill_pattern( private_token.server_to_client_key, NETCODE_KEY_BYTES, 10 * seed + 1 );
+    memset( private_token.user_data, user, NETCODE_USER_DATA_BYTES );
+
+    memset( token, 0, sizeof( *token ) );
+    memcpy( token->version_info, NETCODE_VERSION_INFO, NETCODE_VERSION_INFO_BYTES );
+    token->protocol_id = SESSION_PROTOCOL_ID;
+    token->create_timestamp = 1000;
+    token->expire_timestamp = 1030;
+    fill_pattern( token->nonce, NETCODE_CONNECT_TOKEN_NONCE_BYTES, 10 * seed + 2 );
+    netcode_write_connect_token_private( &private_token, token->private_data, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
+    if ( netcode_encrypt_connect_token_private( token->private_data, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES,
+                                               token->version_info, token->protocol_id, token->expire_timestamp,
+                                               token->nonce, session_private_key ) != NETCODE_OK )
+        abort();
+    token->timeout_seconds = 15;
+    token->num_server_addresses = 1;
+    token->server_addresses[0] = private_token.server_addresses[0];
+    memcpy( token->client_to_server_key, private_token.client_to_server_key, NETCODE_KEY_BYTES );
+    memcpy( token->server_to_client_key, private_token.server_to_client_key, NETCODE_KEY_BYTES );
+}
+
+static void scenario_process( struct netcode_server_t * server, struct netcode_address_t * from,
+                              void * packet, uint64_t sequence, uint8_t * key, double logical_time,
+                              const char * input_dir, const char * name )
+{
+    uint8_t wire[NETCODE_MAX_PACKET_BYTES];
+    int bytes = netcode_write_packet( packet, wire, sizeof( wire ), sequence, key, SESSION_PROTOCOL_ID );
+    if ( !write_file( input_dir, name, wire, bytes ) ) abort();
+    uint8_t allowed[NETCODE_CONNECTION_NUM_PACKETS] = { 0 };
+    allowed[NETCODE_CONNECTION_REQUEST_PACKET] = 1;
+    allowed[NETCODE_CONNECTION_RESPONSE_PACKET] = 1;
+    server->time = logical_time;
+    netcode_server_read_and_process_packet( server, from, wire, bytes, 1001, allowed );
+}
+
+static void scenario_request( struct netcode_server_t * server, struct netcode_address_t * from,
+                              struct netcode_connect_token_t * token, double logical_time,
+                              const char * input_dir, const char * name )
+{
+    struct netcode_connection_request_packet_t packet;
+    memset( &packet, 0, sizeof( packet ) );
+    packet.packet_type = NETCODE_CONNECTION_REQUEST_PACKET;
+    memcpy( packet.version_info, token->version_info, NETCODE_VERSION_INFO_BYTES );
+    packet.protocol_id = token->protocol_id;
+    packet.connect_token_expire_timestamp = token->expire_timestamp;
+    memcpy( packet.connect_token_nonce, token->nonce, NETCODE_CONNECT_TOKEN_NONCE_BYTES );
+    memcpy( packet.connect_token_data, token->private_data, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
+    scenario_process( server, from, &packet, 0, token->client_to_server_key, logical_time, input_dir, name );
+}
+
+static struct netcode_connection_challenge_packet_t scenario_challenge( struct netcode_connect_token_t * token )
+{
+    uint8_t wire[NETCODE_MAX_PACKET_BYTES];
+    memcpy( wire, scenario_sent, scenario_sent_bytes );
+    uint64_t sequence = 0;
+    uint8_t allowed[NETCODE_CONNECTION_NUM_PACKETS] = { 0 };
+    allowed[NETCODE_CONNECTION_CHALLENGE_PACKET] = 1;
+    struct netcode_connection_challenge_packet_t * packet = netcode_read_packet(
+        wire, scenario_sent_bytes, &sequence, token->server_to_client_key, SESSION_PROTOCOL_ID,
+        1001, 0, UINT64_MAX, NULL, allowed, NULL, NULL, NULL );
+    if ( !packet ) abort();
+    struct netcode_connection_challenge_packet_t result = *packet;
+    free( packet );
+    return result;
+}
+
+static void scenario_write_challenge( const char * dir, const char * name,
+                                      struct netcode_connection_challenge_packet_t * challenge )
+{
+    uint8_t data[8 + NETCODE_CHALLENGE_TOKEN_BYTES];
+    uint8_t * p = data;
+    netcode_write_uint64( &p, challenge->challenge_token_sequence );
+    memcpy( p, challenge->challenge_token_data, NETCODE_CHALLENGE_TOKEN_BYTES );
+    if ( !write_file( dir, name, data, sizeof( data ) ) ) abort();
+}
+
+static void scenario_response( struct netcode_server_t * server, struct netcode_address_t * from,
+                               struct netcode_connect_token_t * token,
+                               struct netcode_connection_challenge_packet_t * challenge,
+                               uint64_t sequence, double logical_time,
+                               const char * input_dir, const char * name )
+{
+    struct netcode_connection_response_packet_t packet;
+    memset( &packet, 0, sizeof( packet ) );
+    packet.packet_type = NETCODE_CONNECTION_RESPONSE_PACKET;
+    packet.challenge_token_sequence = challenge->challenge_token_sequence;
+    memcpy( packet.challenge_token_data, challenge->challenge_token_data, NETCODE_CHALLENGE_TOKEN_BYTES );
+    scenario_process( server, from, &packet, sequence, token->client_to_server_key, logical_time, input_dir, name );
+}
+
+static void scenario_print( char const * step, struct netcode_server_t * server )
+{
+    uint64_t ids[NETCODE_MAX_CLIENTS];
+    uint8_t users[NETCODE_MAX_CLIENTS];
+    int count = 0;
+    for ( int i = 0; i < netcode_server_max_clients( server ); i++ )
+        if ( netcode_server_client_connected( server, i ) )
+        {
+            ids[count] = netcode_server_client_id( server, i );
+            users[count] = ((uint8_t*) netcode_server_client_user_data( server, i ))[0];
+            count++;
+        }
+    for ( int i = 0; i < count; i++ )
+        for ( int j = i + 1; j < count; j++ )
+            if ( ids[j] < ids[i] )
+            {
+                uint64_t id = ids[i]; ids[i] = ids[j]; ids[j] = id;
+                uint8_t user = users[i]; users[i] = users[j]; users[j] = user;
+            }
+    printf( "%s connected ", step );
+    if ( count == 0 ) printf( "-" );
+    for ( int i = 0; i < count; i++ ) printf( "%s%04llx", i ? "," : "", (unsigned long long) ids[i] );
+    printf( " userdata " );
+    if ( count == 0 ) printf( "-" );
+    for ( int i = 0; i < count; i++ ) printf( "%s%02x", i ? "," : "", users[i] );
+    printf( "\n" );
+}
+
+static int do_challenge_mapping( const char * input_dir )
+{
+    struct netcode_server_config_t config;
+    netcode_default_server_config( &config );
+    config.protocol_id = SESSION_PROTOCOL_ID;
+    config.override_send_and_receive = 1;
+    config.send_packet_override = scenario_send;
+    config.receive_packet_override = scenario_receive;
+    memcpy( config.private_key, session_private_key, NETCODE_KEY_BYTES );
+    struct netcode_server_t * server = netcode_server_create( "127.0.0.1:40000", &config, 0.0 );
+    if ( !server ) return 0;
+    netcode_server_start( server, 4 );
+    fill_pattern( server->challenge_key, NETCODE_KEY_BYTES, 77 );
+    server->min_connect_token_expire_timestamp = 1000;
+    struct netcode_address_t x, y;
+    netcode_parse_address( "127.0.0.1:50000", &x );
+    netcode_parse_address( "127.0.0.1:50001", &y );
+    struct netcode_connect_token_t a, b, c;
+    scenario_token( &a, 0x1111, 0xa1, 1 );
+    scenario_token( &b, 0x2222, 0xb2, 2 );
+    scenario_token( &c, 0x3333, 0xc3, 3 );
+
+    uint8_t token_bytes[NETCODE_CONNECT_TOKEN_BYTES];
+    netcode_write_connect_token( &a, token_bytes, sizeof( token_bytes ) );
+    if ( !write_file( input_dir, "token-a.bin", token_bytes, sizeof( token_bytes ) ) ) return 0;
+    netcode_write_connect_token( &b, token_bytes, sizeof( token_bytes ) );
+    if ( !write_file( input_dir, "token-b.bin", token_bytes, sizeof( token_bytes ) ) ) return 0;
+    netcode_write_connect_token( &c, token_bytes, sizeof( token_bytes ) );
+    if ( !write_file( input_dir, "token-c.bin", token_bytes, sizeof( token_bytes ) ) ) return 0;
+
+    scenario_request( server, &x, &a, 0.0, input_dir, "01-request-A.bin" );
+    struct netcode_connection_challenge_packet_t challenge_a = scenario_challenge( &a );
+    scenario_write_challenge( input_dir, "challenge-A.bin", &challenge_a );
+    scenario_print( "request-A", server );
+    scenario_request( server, &y, &b, 0.1, input_dir, "02-request-B.bin" );
+    struct netcode_connection_challenge_packet_t challenge_b = scenario_challenge( &b );
+    scenario_write_challenge( input_dir, "challenge-B.bin", &challenge_b );
+    scenario_print( "request-B", server );
+    scenario_response( server, &y, &b, &challenge_a, 1, 0.2, input_dir, "03-response-Y-A.bin" );
+    scenario_print( "response-Y-A", server );
+    scenario_response( server, &y, &b, &challenge_b, 2, 0.3, input_dir, "04-response-Y-B.bin" );
+    scenario_print( "response-Y-B", server );
+    scenario_request( server, &x, &c, 0.4, input_dir, "05-request-C1.bin" );
+    struct netcode_connection_challenge_packet_t challenge_c_first = scenario_challenge( &c );
+    scenario_write_challenge( input_dir, "challenge-C1.bin", &challenge_c_first );
+    scenario_print( "request-C1", server );
+    scenario_request( server, &x, &c, 0.5, input_dir, "06-request-C2.bin" );
+    struct netcode_connection_challenge_packet_t challenge_c_second = scenario_challenge( &c );
+    scenario_write_challenge( input_dir, "challenge-C2.bin", &challenge_c_second );
+    if ( challenge_c_second.challenge_token_sequence == challenge_c_first.challenge_token_sequence ) abort();
+    scenario_print( "request-C2", server );
+    scenario_response( server, &x, &c, &challenge_a, 1, 0.6, input_dir, "07-response-X-A.bin" );
+    scenario_print( "response-X-A", server );
+    scenario_response( server, &x, &c, &challenge_c_first, 2, 0.7, input_dir, "08-response-X-C1.bin" );
+    scenario_print( "response-X-C1", server );
+    netcode_server_destroy( server );
     return 1;
 }
 
@@ -1011,6 +1228,8 @@ int main( int argc, char ** argv )
         ok = do_diff_packets();
     else if ( argc == 2 && strcmp( argv[1], "drain" ) == 0 )
         ok = do_drain();
+    else if ( argc == 3 && strcmp( argv[1], "challenge-mapping" ) == 0 )
+        ok = do_challenge_mapping( argv[2] );
     else
         printf( "usage: compat-c goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token> | diffpackets | drain\n" );
 

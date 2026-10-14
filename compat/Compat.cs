@@ -334,7 +334,7 @@ internal static class Program
         ulong clientId = BinaryPrimitives.ReadUInt64LittleEndian(clientIdBytes);
 
         string[] addresses = { serverAddress };
-        if (!ConnectTokenGenerator.Generate(addresses, addresses, 60, 15, clientId, SessionProtocolId, SessionPrivateKey, userData, connectToken))
+        if (!ConnectTokenGenerator.Generate(addresses, addresses, 30, 15, clientId, SessionProtocolId, SessionPrivateKey, userData, connectToken))
         {
             Console.WriteLine("error: failed to mint connect token");
             return 1;
@@ -691,6 +691,143 @@ internal static class Program
         return 0;
     }
 
+    private static ConnectTokenData ScenarioToken(ulong id, byte user, int seed)
+    {
+        Address serverAddress = Address.Parse("127.0.0.1:40000");
+        var privateToken = new ConnectTokenPrivate
+        {
+            ClientId = id,
+            TimeoutSeconds = 15,
+            NumServerAddresses = 1,
+        };
+        privateToken.ServerAddresses[0] = serverAddress;
+        FillPattern(privateToken.ClientToServerKey, 10 * seed);
+        FillPattern(privateToken.ServerToClientKey, 10 * seed + 1);
+        Array.Fill(privateToken.UserData, user);
+
+        var token = new ConnectTokenData
+        {
+            ProtocolId = SessionProtocolId,
+            CreateTimestamp = 1000,
+            ExpireTimestamp = 1030,
+            TimeoutSeconds = 15,
+            NumServerAddresses = 1,
+        };
+        Defines.VersionInfo.CopyTo(token.VersionInfo);
+        token.ServerAddresses[0] = serverAddress;
+        FillPattern(token.Nonce, 10 * seed + 2);
+        privateToken.ClientToServerKey.CopyTo(token.ClientToServerKey, 0);
+        privateToken.ServerToClientKey.CopyTo(token.ServerToClientKey, 0);
+        privateToken.Write(token.PrivateData);
+        if (!ConnectTokenPrivate.Encrypt(token.PrivateData, token.VersionInfo, token.ProtocolId,
+                token.ExpireTimestamp, token.Nonce, SessionPrivateKey))
+            throw new InvalidOperationException("scenario token encryption failed");
+        return token;
+    }
+
+    private static int DoChallengeMapping(string inputDir)
+    {
+        byte[] sent = Array.Empty<byte>();
+        var config = new ServerConfig { ProtocolId = SessionProtocolId, OverrideSendAndReceive = true };
+        SessionPrivateKey.CopyTo(config.PrivateKey, 0);
+        config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => sent = data.ToArray();
+        config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+        using var server = new Server("127.0.0.1:40000", config, 0.0);
+        server.Start(4);
+        byte[] fixedChallengeKey = new byte[Protocol.KeyBytes];
+        FillPattern(fixedChallengeKey, 77);
+        server.SetChallengeKeyForTest(fixedChallengeKey);
+        server.SetConnectTokenExpiryFloorForTest(1000);
+        Address x = Address.Parse("127.0.0.1:50000");
+        Address y = Address.Parse("127.0.0.1:50001");
+        ConnectTokenData a = ScenarioToken(0x1111, 0xA1, 1);
+        ConnectTokenData b = ScenarioToken(0x2222, 0xB2, 2);
+        ConnectTokenData c = ScenarioToken(0x3333, 0xC3, 3);
+        foreach ((string name, ConnectTokenData token) in new[]
+                 { ("token-a.bin", a), ("token-b.bin", b), ("token-c.bin", c) })
+        {
+            byte[] bytes = new byte[Protocol.ConnectTokenBytes];
+            token.Write(bytes);
+            File.WriteAllBytes(Path.Combine(inputDir, name), bytes);
+        }
+
+        void Request(in Address from, ConnectTokenData token, double logicalTime, string name)
+        {
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteConnectionRequestPacket(wire, token.VersionInfo, token.ProtocolId,
+                token.ExpireTimestamp, token.Nonce, token.PrivateData);
+            File.WriteAllBytes(Path.Combine(inputDir, name), wire.AsSpan(0, bytes).ToArray());
+            server.ProcessPacketAtTimestamp(in from, wire.AsSpan(0, bytes), 1001, logicalTime);
+        }
+
+        byte[] Challenge(ConnectTokenData token)
+        {
+            byte[] wire = (byte[])sent.Clone();
+            bool[] allowed = new bool[PacketType.NumPackets];
+            allowed[PacketType.ConnectionChallenge] = true;
+            ReadPacketResult packet = PacketIO.ReadPacket(wire, true, token.ServerToClientKey,
+                SessionProtocolId, 1001, false, ReadOnlySpan<byte>.Empty, allowed, null);
+            if (packet.Type != PacketType.ConnectionChallenge)
+                throw new InvalidOperationException("scenario challenge was not received");
+            return wire.AsSpan(packet.DataOffset, packet.DataLength).ToArray();
+        }
+
+        void Response(in Address from, ConnectTokenData token, byte[] challenge, ulong sequence, double logicalTime, string name)
+        {
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteEncryptedPacket(wire, PacketType.ConnectionResponse,
+                challenge, sequence, token.ClientToServerKey, SessionProtocolId);
+            File.WriteAllBytes(Path.Combine(inputDir, name), wire.AsSpan(0, bytes).ToArray());
+            server.ProcessPacketAtTimestamp(in from, wire.AsSpan(0, bytes), 1001, logicalTime);
+        }
+
+        void Print(string step)
+        {
+            ulong[] ids = new ulong[server.NumConnectedClients];
+            byte[] users = new byte[ids.Length];
+            int count = 0;
+            for (int slot = 0; slot < server.MaxClients; slot++)
+                if (server.ClientConnected(slot))
+                {
+                    ids[count] = server.ClientId(slot);
+                    users[count] = server.ClientUserData(slot)[0];
+                    count++;
+                }
+            Array.Sort(ids, users);
+            string idText = count == 0 ? "-" : string.Join(",", Array.ConvertAll(ids, id => id.ToString("x4")));
+            string userText = count == 0 ? "-" : string.Join(",", Array.ConvertAll(users, value => value.ToString("x2")));
+            Console.WriteLine($"{step} connected {idText} userdata {userText}");
+        }
+
+        Request(in x, a, 0.0, "01-request-A.bin");
+        byte[] challengeA = Challenge(a);
+        File.WriteAllBytes(Path.Combine(inputDir, "challenge-A.bin"), challengeA);
+        Print("request-A");
+        Request(in y, b, 0.1, "02-request-B.bin");
+        byte[] challengeB = Challenge(b);
+        File.WriteAllBytes(Path.Combine(inputDir, "challenge-B.bin"), challengeB);
+        Print("request-B");
+        Response(in y, b, challengeA, 1, 0.2, "03-response-Y-A.bin");
+        Print("response-Y-A");
+        Response(in y, b, challengeB, 2, 0.3, "04-response-Y-B.bin");
+        Print("response-Y-B");
+        Request(in x, c, 0.4, "05-request-C1.bin");
+        byte[] challengeCFirst = Challenge(c);
+        File.WriteAllBytes(Path.Combine(inputDir, "challenge-C1.bin"), challengeCFirst);
+        Print("request-C1");
+        Request(in x, c, 0.5, "06-request-C2.bin");
+        byte[] challengeCSecond = Challenge(c);
+        File.WriteAllBytes(Path.Combine(inputDir, "challenge-C2.bin"), challengeCSecond);
+        if (BinaryPrimitives.ReadUInt64LittleEndian(challengeCFirst) == BinaryPrimitives.ReadUInt64LittleEndian(challengeCSecond))
+            throw new InvalidOperationException("two challenges for C reused one sequence");
+        Print("request-C2");
+        Response(in x, c, challengeA, 1, 0.6, "07-response-X-A.bin");
+        Print("response-X-A");
+        Response(in x, c, challengeCFirst, 2, 0.7, "08-response-X-C1.bin");
+        Print("response-X-C1");
+        return 0;
+    }
+
     private static int Main(string[] args)
     {
         NetcodeLog.Level = LogLevel.Error;
@@ -704,6 +841,7 @@ internal static class Program
             ["client", var port, var token] => DoClient(int.Parse(port), token),
             ["diffpackets"] => DoDiffPackets(),
             ["drain"] => DoDrain(),
+            ["challenge-mapping", var inputDir] => DoChallengeMapping(inputDir),
             _ => Usage(),
         };
     }

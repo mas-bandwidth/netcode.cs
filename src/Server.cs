@@ -92,6 +92,13 @@ namespace Netcode
 
         public ConnectTokenEntryState State(int index) => _state[index];
         public double EntryTime(int index) => _time[index];
+
+        public ReadOnlySpan<byte> Mac(int index)
+        {
+            if ((uint)index >= MaxEntries)
+                throw new ArgumentOutOfRangeException(nameof(index));
+            return _mac.AsSpan(index * Protocol.MacBytes, Protocol.MacBytes);
+        }
     }
 
     /// <summary>Why server creation failed (carried by NetcodeException.ErrorCode). Bind failures
@@ -736,7 +743,8 @@ namespace Netcode
                 writer.U64(connectTokenPrivate.ClientId);
                 writer.Bytes(connectTokenPrivate.UserData);
             }
-            ChallengeToken.Encrypt(challengeTokenBuffer, _challengeSequence, _challengeKey);
+            ChallengeToken.Encrypt(challengeTokenBuffer, _challengeSequence, _challengeKey,
+                decryptedToken.Slice(Defines.ConnectTokenPrivateBytes - Protocol.MacBytes, Protocol.MacBytes));
 
             _challengeSequence++;
 
@@ -747,10 +755,18 @@ namespace Netcode
 
         private void ProcessConnectionResponsePacket(in Address from, Span<byte> packetData, int encryptionIndex)
         {
+            int connectTokenEntryIndex = _encryptionManager.GetConnectTokenEntryIndex(encryptionIndex);
+            if (connectTokenEntryIndex < 0)
+            {
+                NetcodeLog.Debug("server ignored connection response. no connect token for this encryption mapping\n");
+                return;
+            }
+
             ulong challengeTokenSequence = BinaryPrimitives.ReadUInt64LittleEndian(packetData.Slice(0, 8));
             Span<byte> challengeTokenBuffer = packetData.Slice(8, Defines.ChallengeTokenBytes);
 
-            if (!ChallengeToken.Decrypt(challengeTokenBuffer, challengeTokenSequence, _challengeKey))
+            if (!ChallengeToken.Decrypt(challengeTokenBuffer, challengeTokenSequence, _challengeKey,
+                _connectTokenHistory.Mac(connectTokenEntryIndex)))
             {
                 NetcodeLog.Debug("server ignored connection response. failed to decrypt challenge token\n");
                 return;
@@ -925,6 +941,26 @@ namespace Netcode
         {
             ulong currentTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             ReadAndProcessPacket(in from, packetData, currentTimestamp);
+        }
+
+        // The interop harness passes a fixed timestamp through the same parser
+        // and server path used by ProcessPacket.
+        internal void ProcessPacketAtTimestamp(in Address from, Span<byte> packetData, ulong currentTimestamp, double logicalTime)
+        {
+            _time = logicalTime;
+            ReadAndProcessPacket(in from, packetData, currentTimestamp);
+        }
+
+        internal void SetConnectTokenExpiryFloorForTest(ulong timestamp)
+        {
+            _minConnectTokenExpireTimestamp = timestamp;
+        }
+
+        internal void SetChallengeKeyForTest(ReadOnlySpan<byte> key)
+        {
+            if (key.Length != Protocol.KeyBytes)
+                throw new ArgumentException("challenge key size is invalid", nameof(key));
+            key.CopyTo(_challengeKey);
         }
 
         private void ProcessPacketFromSimulator(in Address from, ReadOnlySpan<byte> packetData)

@@ -110,6 +110,7 @@ internal static class Program
         RunTest("test_connect_token", CoreTests.TestConnectToken);
         RunTest("test_generate_connect_token_out_of_range", CoreTests.TestGenerateConnectTokenOutOfRange);
         RunTest("test_challenge_token", CoreTests.TestChallengeToken);
+        RunTest("test_challenge_token_connect_token_mac", CoreTests.TestChallengeTokenConnectTokenMac);
         RunTest("test_connection_request_packet", CoreTests.TestConnectionRequestPacket);
         RunTest("test_connection_denied_packet", () => CoreTests.TestEmptyPacket(PacketType.ConnectionDenied));
         RunTest("test_connection_challenge_packet", () => CoreTests.TestChallengeResponsePacket(PacketType.ConnectionChallenge));
@@ -127,6 +128,7 @@ internal static class Program
         RunTest("test_server_restart_global_sequence", ClientServerTests.TestServerRestartGlobalSequence);
         RunTest("test_connect_token_history", ClientServerTests.TestConnectTokenHistory);
         RunTest("test_client_reconnect_used_connect_token", ClientServerTests.TestClientReconnectUsedConnectToken);
+        RunTest("test_connection_response_uses_its_mapping_challenge", ClientServerTests.TestConnectionResponseUsesItsMappingChallenge);
         RunTest("test_client_error_connect_token_predates_server_start", ClientServerTests.TestClientErrorConnectTokenPredatesServerStart);
         RunTest("test_client_server_connect", ClientServerTests.TestClientServerConnect);
         RunTest("test_client_server_ipv4_socket_connect", ClientServerTests.TestClientServerIpv4SocketConnect);
@@ -657,6 +659,35 @@ internal static class CoreTests
 
         Check.That(outputToken.ClientId == inputToken.ClientId);
         Check.That(outputToken.UserData.AsSpan().SequenceEqual(inputToken.UserData));
+    }
+
+    public static void TestChallengeTokenConnectTokenMac()
+    {
+        var token = new ChallengeToken { ClientId = 0x1111 };
+        token.UserData[0] = 0xA1;
+        byte[] plaintext = new byte[Defines.ChallengeTokenBytes];
+        token.Write(plaintext);
+
+        byte[] key = new byte[Protocol.KeyBytes];
+        byte[] macA = new byte[Protocol.MacBytes];
+        byte[] macB = new byte[Protocol.MacBytes];
+        new TestRng(0xC011EC7).Fill(key);
+        new TestRng(0xA1).Fill(macA);
+        macA.CopyTo(macB, 0);
+        macB[0] ^= 1;
+
+        byte[] encrypted = (byte[])plaintext.Clone();
+        ChallengeToken.Encrypt(encrypted, 7, key, macA);
+        byte[] wrongMac = (byte[])encrypted.Clone();
+        Check.That(!ChallengeToken.Decrypt(wrongMac, 7, key, macB));
+
+        Check.That(ChallengeToken.Decrypt(encrypted, 7, key, macA));
+        Check.That(encrypted.AsSpan(0, Defines.ChallengeTokenBytes - Protocol.MacBytes)
+            .SequenceEqual(plaintext.AsSpan(0, Defines.ChallengeTokenBytes - Protocol.MacBytes)));
+
+        byte[] legacy = (byte[])plaintext.Clone();
+        ChallengeToken.Encrypt(legacy, 7, key);
+        Check.That(ChallengeToken.Decrypt(legacy, 7, key));
     }
 
     private static readonly bool[] AllAllowed = CreateAllAllowed();
