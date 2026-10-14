@@ -88,4 +88,10 @@ $CS diffpackets > "$WORK/cs-diff.txt"
 diff -u "$WORK/c-diff.txt" "$WORK/cs-diff.txt"
 echo "   packet-reader differential matched"
 
+echo "== leg 6: receive-drain differential (scripted override queues through both drains)"
+$CS drain > "$WORK/cs-drain.txt"
+"$WORK/compat-c" drain > "$WORK/c-drain.txt"
+diff -u "$WORK/c-drain.txt" "$WORK/cs-drain.txt"
+echo "   receive-drain differential matched"
+
 echo "INTEROP GATE PASSED"
