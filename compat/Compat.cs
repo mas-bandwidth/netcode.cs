@@ -14,6 +14,7 @@
 using System;
 using System.Buffers.Binary;
 using System.IO;
+using System.Net.Sockets;
 using System.Threading;
 using Netcode;
 
@@ -587,6 +588,109 @@ internal static class Program
         return 0;
     }
 
+    // The receive-drain differential. The same scripted receive queues run
+    // through the C reference (compat/c/compat.c "drain") and through this port
+    // ("drain" here); scripts/interop.sh diffs the two transcripts byte for
+    // byte. Queue values: > 0 is a junk datagram of that byte length, -1 is
+    // skip (an empty datagram or a receive error), 0 is would-block (nothing
+    // more). Override transports only, time passed in, no sockets, no clock.
+
+    private sealed class DrainScript
+    {
+        private readonly int[] _script;
+        private int _index;
+
+        public int Consumed;
+        public int Processed;
+
+        public DrainScript(params int[] script) => _script = script;
+
+        public int Receive(ref Address from, Span<byte> packetData)
+        {
+            int result = _index < _script.Length ? _script[_index] : 0;
+            _index++;
+            Consumed++;
+
+            if (result > 0)
+            {
+                Processed++;
+                for (int i = 0; i < result; i++)
+                    packetData[i] = 0xFF; // junk: an invalid prefix byte that every reader refuses
+                from = Address.Parse("203.0.113.7:12345");
+            }
+
+            return result;
+        }
+
+        public void Send(in Address to, ReadOnlySpan<byte> packetData)
+        {
+        }
+    }
+
+    private static int[] JunkQueue(int count)
+    {
+        var queue = new int[count];
+        Array.Fill(queue, 11);
+        return queue;
+    }
+
+    private static void DrainServer(string queueName, params int[] queue)
+    {
+        var config = new ServerConfig { ProtocolId = SessionProtocolId, OverrideSendAndReceive = true };
+        SessionPrivateKey.CopyTo(config.PrivateKey, 0);
+        var script = new DrainScript(queue);
+        config.SendPacketOverride = script.Send;
+        config.ReceivePacketOverride = script.Receive;
+
+        using var server = new Server("127.0.0.1:40000", config, 0.0);
+        server.Start(1);
+
+        server.Update(1.0);
+
+        Console.WriteLine($"{queueName} server consumed {script.Consumed} processed {script.Processed}");
+    }
+
+    private static void DrainClient(string queueName, params int[] queue)
+    {
+        var config = new ClientConfig { OverrideSendAndReceive = true };
+        var script = new DrainScript(queue);
+        config.SendPacketOverride = script.Send;
+        config.ReceivePacketOverride = script.Receive;
+
+        using var client = new Client("0.0.0.0:0", config, 0.0);
+
+        client.Update(1.0);
+
+        Console.WriteLine($"{queueName} client consumed {script.Consumed} processed {script.Processed}");
+    }
+
+    private static int DoDrain()
+    {
+        // [junk, EMPTY, junk, junk]
+        DrainServer("q1", 11, -1, 11, 11);
+        DrainClient("q1", 11, -1, 11, 11);
+
+        // [EMPTY, EMPTY, EMPTY, junk]
+        DrainServer("q2", -1, -1, -1, 11);
+        DrainClient("q2", -1, -1, -1, 11);
+
+        // MAX_RECEIVE_PACKETS + 10 junk datagrams
+        DrainServer("q3", JunkQueue(Defines.ServerMaxReceivePackets + 10));
+        DrainClient("q3", JunkQueue(Defines.ClientMaxReceivePackets + 10));
+
+        // a queue that ends with a would-block
+        DrainServer("q4", 11, 11, 0);
+        DrainClient("q4", 11, 11, 0);
+
+        // classifier rows (C: netcode_classify_receive_result; port: ClassifyReceiveResult)
+        Console.WriteLine($"classify (0,0) -> {NetcodeSocket.ClassifyReceiveResult(0, SocketError.Success)}");
+        Console.WriteLine($"classify (-1,wouldblock) -> {NetcodeSocket.ClassifyReceiveResult(-1, SocketError.WouldBlock)}");
+        Console.WriteLine($"classify (-1,other) -> {NetcodeSocket.ClassifyReceiveResult(-1, SocketError.ConnectionRefused)}");
+        Console.WriteLine($"classify (5,0) -> {NetcodeSocket.ClassifyReceiveResult(5, SocketError.Success)}");
+
+        return 0;
+    }
+
     private static int Main(string[] args)
     {
         NetcodeLog.Level = LogLevel.Error;
@@ -599,13 +703,14 @@ internal static class Program
             ["server", var port] => DoServer(int.Parse(port)),
             ["client", var port, var token] => DoClient(int.Parse(port), token),
             ["diffpackets"] => DoDiffPackets(),
+            ["drain"] => DoDrain(),
             _ => Usage(),
         };
     }
 
     private static int Usage()
     {
-        Console.WriteLine("usage: compat goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token> | diffpackets");
+        Console.WriteLine("usage: compat goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token> | diffpackets | drain");
         return 1;
     }
 }

@@ -18,6 +18,8 @@
 
 #include "netcode.c"
 
+#include <errno.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -830,6 +832,159 @@ static int do_diff_packets( void )
     return 1;
 }
 
+/*
+    The receive-drain differential (subcommand "drain"). The same scripted
+    receive queues run through this C reference here and through the C# port
+    (compat/Compat.cs "drain"); scripts/interop.sh diffs the two transcripts
+    byte for byte. Both sides print one line per queue and side:
+
+        <queue> <server|client> consumed <n> processed <m>
+
+    plus the four classifier rows. Queue values: > 0 is a junk datagram of
+    that byte length, -1 is skip (an empty datagram or a receive error),
+    0 is would-block (nothing more). Override transports only, time passed
+    in, no sockets, no clock.
+
+    NOTE: the override transport config field names below follow the C
+    reference surface (sprint/netcode-audit-fixes, merge 7cd5f513):
+    override_send_and_receive, send_packet_override(_context),
+    receive_packet_override(_context). This leg builds against the netcode
+    checkout given to scripts/interop.sh and is skipped when none is given.
+*/
+
+struct drain_script_t
+{
+    const int * entries;
+    int num_entries;
+    int index;
+    int consumed;
+    int processed;
+};
+
+static void drain_send_override( void * context, const struct netcode_address_t * to, const uint8_t * packet_data, int packet_bytes )
+{
+    (void) context; (void) to; (void) packet_data; (void) packet_bytes;
+}
+
+static int drain_receive_override( void * context, struct netcode_address_t * from, uint8_t * buffer, int buffer_bytes )
+{
+    struct drain_script_t * script = (struct drain_script_t *) context;
+    int result = script->index < script->num_entries ? script->entries[script->index] : 0;
+    int i;
+    (void) buffer_bytes;
+    script->index++;
+    script->consumed++;
+    if ( result > 0 )
+    {
+        script->processed++;
+        for ( i = 0; i < result; i++ )
+            buffer[i] = 0xFF;
+        netcode_parse_address( "203.0.113.7:12345", from );
+    }
+    return result;
+}
+
+static int * drain_junk_queue( int count )
+{
+    int * entries = (int *) malloc( sizeof( int ) * (size_t) count );
+    int i;
+    for ( i = 0; i < count; i++ )
+        entries[i] = 11;
+    return entries;
+}
+
+static void drain_server( const char * queue_name, const int * entries, int num_entries )
+{
+    struct drain_script_t script;
+    struct netcode_server_config_t config;
+    struct netcode_server_t * server;
+
+    netcode_default_server_config( &config );
+    config.protocol_id = SESSION_PROTOCOL_ID;
+    memcpy( config.private_key, session_private_key, NETCODE_KEY_BYTES );
+    config.override_send_and_receive = 1;
+    config.send_packet_override_context = NULL;
+    config.send_packet_override = drain_send_override;
+    config.receive_packet_override_context = &script;
+    config.receive_packet_override = drain_receive_override;
+
+    memset( &script, 0, sizeof( script ) );
+    script.entries = entries;
+    script.num_entries = num_entries;
+
+    server = netcode_server_create( "127.0.0.1:40000", &config, 0.0 );
+    netcode_server_start( server, 1 );
+    netcode_server_update( server, 1.0 );
+    printf( "%s server consumed %d processed %d\n", queue_name, script.consumed, script.processed );
+    netcode_server_destroy( server );
+}
+
+static void drain_client( const char * queue_name, const int * entries, int num_entries )
+{
+    struct drain_script_t script;
+    struct netcode_client_config_t config;
+    struct netcode_client_t * client;
+
+    netcode_default_client_config( &config );
+    config.protocol_id = SESSION_PROTOCOL_ID;
+    config.override_send_and_receive = 1;
+    config.send_packet_override_context = NULL;
+    config.send_packet_override = drain_send_override;
+    config.receive_packet_override_context = &script;
+    config.receive_packet_override = drain_receive_override;
+
+    memset( &script, 0, sizeof( script ) );
+    script.entries = entries;
+    script.num_entries = num_entries;
+
+    client = netcode_client_create( "0.0.0.0:0", &config, 0.0 );
+    netcode_client_update( client, 1.0 );
+    printf( "%s client consumed %d processed %d\n", queue_name, script.consumed, script.processed );
+    netcode_client_destroy( client );
+}
+
+static int do_drain( void )
+{
+    /* [junk, EMPTY, junk, junk] */
+    {
+        int entries[4] = { 11, -1, 11, 11 };
+        drain_server( "q1", entries, 4 );
+        drain_client( "q1", entries, 4 );
+    }
+
+    /* [EMPTY, EMPTY, EMPTY, junk] */
+    {
+        int entries[4] = { -1, -1, -1, 11 };
+        drain_server( "q2", entries, 4 );
+        drain_client( "q2", entries, 4 );
+    }
+
+    /* MAX_RECEIVE_PACKETS + 10 junk datagrams */
+    {
+        int * server_entries = drain_junk_queue( NETCODE_SERVER_MAX_RECEIVE_PACKETS + 10 );
+        int * client_entries = drain_junk_queue( NETCODE_CLIENT_MAX_RECEIVE_PACKETS + 10 );
+        drain_server( "q3", server_entries, NETCODE_SERVER_MAX_RECEIVE_PACKETS + 10 );
+        drain_client( "q3", client_entries, NETCODE_CLIENT_MAX_RECEIVE_PACKETS + 10 );
+        free( server_entries );
+        free( client_entries );
+    }
+
+    /* a queue that ends with a would-block */
+    {
+        int entries[3] = { 11, 11, 0 };
+        drain_server( "q4", entries, 3 );
+        drain_client( "q4", entries, 3 );
+    }
+
+    /* classifier rows (netcode_classify_receive_result) */
+    printf( "classify (0,0) -> %d\n", netcode_classify_receive_result( 0, 0, EAGAIN ) );
+    printf( "classify (-1,wouldblock) -> %d\n", netcode_classify_receive_result( -1, EAGAIN, EAGAIN ) );
+    printf( "classify (-1,other) -> %d\n", netcode_classify_receive_result( -1, ECONNREFUSED, EAGAIN ) );
+    printf( "classify (5,0) -> %d\n", netcode_classify_receive_result( 5, 0, EAGAIN ) );
+
+    return 1;
+}
+
 int main( int argc, char ** argv )
 {
     if ( netcode_init() != NETCODE_OK )
@@ -854,8 +1009,10 @@ int main( int argc, char ** argv )
         ok = do_client( atoi( argv[2] ), argv[3] );
     else if ( argc == 2 && strcmp( argv[1], "diffpackets" ) == 0 )
         ok = do_diff_packets();
+    else if ( argc == 2 && strcmp( argv[1], "drain" ) == 0 )
+        ok = do_drain();
     else
-        printf( "usage: compat-c goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token> | diffpackets\n" );
+        printf( "usage: compat-c goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token> | diffpackets | drain\n" );
 
     netcode_term();
 

@@ -1702,6 +1702,20 @@ namespace Netcode
             _sendAddress = sendAddress;
         }
 
+        /// <summary>
+        /// Classify a receive result (port of netcode_classify_receive_result): a positive result
+        /// is the byte count, 0 means would-block (the socket is drained), and -1 means skip this
+        /// datagram and keep draining (a zero-length datagram or any other error).
+        /// </summary>
+        public static int ClassifyReceiveResult(int result, SocketError error)
+        {
+            if (result > 0)
+                return result;
+            if (result == 0)
+                return -1;
+            return error == SocketError.WouldBlock ? 0 : -1;
+        }
+
         public static CreateError Create(in Address address, int sendBufferSize, int receiveBufferSize, bool enablePacketTagging, out NetcodeSocket? result)
         {
             result = null;
@@ -1939,11 +1953,11 @@ namespace Netcode
                 {
                     NetcodeLog.Error($"error: recvfrom failed with error {e.SocketErrorCode}\n");
                 }
-                return 0;
+                return ClassifyReceiveResult(-1, e.SocketErrorCode);
             }
 
             if (result <= 0)
-                return 0;
+                return ClassifyReceiveResult(result, SocketError.Success);
 
             SocketAddressToAddress(_receiveAddress, ref from);
             return result;
@@ -1961,7 +1975,7 @@ namespace Netcode
 
     /// <summary>Custom transport send hook: deliver <paramref name="packetData"/> to <paramref name="to"/>.</summary>
     public delegate void SendPacketOverrideDelegate(in Address to, ReadOnlySpan<byte> packetData);
-    /// <summary>Custom transport receive hook: fill <paramref name="packetData"/> and <paramref name="from"/>, returning the byte count (0 when none).</summary>
+    /// <summary>Custom transport receive hook: fill <paramref name="packetData"/> and <paramref name="from"/>, returning the byte count (0 when none, -1 to skip this datagram and keep draining).</summary>
     public delegate int ReceivePacketOverrideDelegate(ref Address from, Span<byte> packetData);
     /// <summary>Loopback payload delivery: (clientIndex, payload, packetSequence).</summary>
     public delegate void SendLoopbackPacketDelegate(int clientIndex, ReadOnlySpan<byte> packetData, ulong packetSequence);
