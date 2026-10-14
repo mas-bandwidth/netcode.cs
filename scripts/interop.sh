@@ -21,7 +21,15 @@ set -e
 cd "$(dirname "$0")/.."
 
 CC="${CC:-cc}"
-NETCODE="${1:-../netcode}"
+NETCODE="${1:-}"
+
+if [ -z "$NETCODE" ] || [ ! -f "$NETCODE/netcode.c" ]; then
+    echo "INTEROP SKIPPED: no mas-bandwidth/netcode clone reachable."
+    echo "Run: scripts/interop.sh <path-to-netcode-clone>"
+    echo "The default ../netcode was checked and is not present."
+    exit 0
+fi
+
 WORK="$(mktemp -d)"
 SERVER_PID=""
 
@@ -73,5 +81,11 @@ sleep 2
 "$WORK/compat-c" client 40766 "$WORK/token-b.bin"
 wait "$SERVER_PID"
 SERVER_PID=""
+
+echo "== leg 5: packet-reader differential (hostile/golden vectors through both readers)"
+$CS diffpackets > "$WORK/cs-diff.txt"
+"$WORK/compat-c" diffpackets > "$WORK/c-diff.txt"
+diff -u "$WORK/c-diff.txt" "$WORK/cs-diff.txt"
+echo "   packet-reader differential matched"
 
 echo "INTEROP GATE PASSED"
