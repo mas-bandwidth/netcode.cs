@@ -480,6 +480,113 @@ internal static class Program
         return 1;
     }
 
+    private static int DoDiffPackets()
+    {
+        (byte[] tokenKey, _, byte[] packetKey, byte[] nonce) = GoldenKeys();
+
+        byte[] privateToken = BuildGoldenPrivateToken();
+
+        // A current timestamp that is well before the golden expire timestamp so no
+        // token expires during the test.
+        ulong currentTimestamp = GoldenExpireTimestamp - 1;
+
+        var allAllowed = new bool[PacketType.NumPackets];
+        Array.Fill(allAllowed, true);
+
+        var replay = new ReplayProtection();
+
+        string TypeName(int type) => type switch
+        {
+            PacketType.ConnectionRequest => "request",
+            PacketType.ConnectionDenied => "denied",
+            PacketType.ConnectionChallenge => "challenge",
+            PacketType.ConnectionResponse => "response",
+            PacketType.ConnectionKeepAlive => "keepalive",
+            PacketType.ConnectionPayload => "payload",
+            PacketType.ConnectionDisconnect => "disconnect",
+            _ => "refused",
+        };
+
+        void PrintResult(int index, ReadPacketResult result)
+        {
+            string name = result.Type < 0 ? "refused" : TypeName(result.Type);
+            Console.WriteLine($"{index} {name} {result.Sequence} {result.DataLength}");
+        }
+
+        // 0: valid connection request packet
+        {
+            byte[] buffer = new byte[Defines.MaxPacketBytes * 2];
+            int bytes = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, GoldenProtocolId, GoldenExpireTimestamp, nonce, privateToken);
+            ReadPacketResult result = PacketIO.ReadPacket(buffer.AsSpan(0, bytes), true, packetKey, GoldenProtocolId, currentTimestamp, true, tokenKey, allAllowed, null);
+            PrintResult(0, result);
+        }
+
+        // 1: bad prefix byte (invalid packet type / sequence-byte count)
+        {
+            byte[] buffer = new byte[Defines.MaxPacketBytes * 2];
+            int bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionPayload, new byte[100], 1000, packetKey, GoldenProtocolId);
+            buffer[0] = 0x70; // type 0, 7 sequence bytes (out of range)
+            ReadPacketResult result = PacketIO.ReadPacket(buffer.AsSpan(0, bytes), true, packetKey, GoldenProtocolId, currentTimestamp, false, ReadOnlySpan<byte>.Empty, allAllowed, null);
+            PrintResult(1, result);
+        }
+
+        // 2: truncated connection request packet
+        {
+            byte[] buffer = new byte[Defines.MaxPacketBytes * 2];
+            int bytes = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, GoldenProtocolId, GoldenExpireTimestamp, nonce, privateToken);
+            ReadPacketResult result = PacketIO.ReadPacket(buffer.AsSpan(0, bytes - 1), true, packetKey, GoldenProtocolId, currentTimestamp, true, tokenKey, allAllowed, null);
+            PrintResult(2, result);
+        }
+
+        // 3: wrong connection request packet size
+        {
+            byte[] buffer = new byte[Defines.MaxPacketBytes * 2];
+            int bytes = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, GoldenProtocolId, GoldenExpireTimestamp, nonce, privateToken);
+            ReadPacketResult result = PacketIO.ReadPacket(buffer.AsSpan(0, bytes - 2), true, packetKey, GoldenProtocolId, currentTimestamp, true, tokenKey, allAllowed, null);
+            PrintResult(3, result);
+        }
+
+        // 4: valid encrypted payload packet
+        {
+            byte[] payload = new byte[100];
+            for (int i = 0; i < payload.Length; i++) payload[i] = (byte)i;
+            byte[] buffer = new byte[Defines.MaxPacketBytes * 2];
+            int bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionPayload, payload, 1000, packetKey, GoldenProtocolId);
+            ReadPacketResult result = PacketIO.ReadPacket(buffer.AsSpan(0, bytes), true, packetKey, GoldenProtocolId, currentTimestamp, false, ReadOnlySpan<byte>.Empty, allAllowed, replay);
+            PrintResult(4, result);
+        }
+
+        // 5: replayed payload packet (same sequence, same replay state)
+        {
+            byte[] payload = new byte[100];
+            for (int i = 0; i < payload.Length; i++) payload[i] = (byte)i;
+            byte[] buffer = new byte[Defines.MaxPacketBytes * 2];
+            int bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionPayload, payload, 1000, packetKey, GoldenProtocolId);
+            ReadPacketResult result = PacketIO.ReadPacket(buffer.AsSpan(0, bytes), true, packetKey, GoldenProtocolId, currentTimestamp, false, ReadOnlySpan<byte>.Empty, allAllowed, replay);
+            PrintResult(5, result);
+        }
+
+        // 6: wrong version info in connection request
+        {
+            byte[] buffer = new byte[Defines.MaxPacketBytes * 2];
+            int bytes = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, GoldenProtocolId, GoldenExpireTimestamp, nonce, privateToken);
+            buffer[1] = (byte)'X';
+            ReadPacketResult result = PacketIO.ReadPacket(buffer.AsSpan(0, bytes), true, packetKey, GoldenProtocolId, currentTimestamp, true, tokenKey, allAllowed, null);
+            PrintResult(6, result);
+        }
+
+        // 7: wrong protocol id in connection request
+        {
+            byte[] buffer = new byte[Defines.MaxPacketBytes * 2];
+            int bytes = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, GoldenProtocolId, GoldenExpireTimestamp, nonce, privateToken);
+            BinaryPrimitives.WriteUInt64LittleEndian(buffer.AsSpan(1 + Defines.VersionInfoBytes, 8), ~GoldenProtocolId);
+            ReadPacketResult result = PacketIO.ReadPacket(buffer.AsSpan(0, bytes), true, packetKey, GoldenProtocolId, currentTimestamp, true, tokenKey, allAllowed, null);
+            PrintResult(7, result);
+        }
+
+        return 0;
+    }
+
     private static int Main(string[] args)
     {
         NetcodeLog.Level = LogLevel.Error;
@@ -491,13 +598,14 @@ internal static class Program
             ["mint", var file, var address] => DoMint(file, address),
             ["server", var port] => DoServer(int.Parse(port)),
             ["client", var port, var token] => DoClient(int.Parse(port), token),
+            ["diffpackets"] => DoDiffPackets(),
             _ => Usage(),
         };
     }
 
     private static int Usage()
     {
-        Console.WriteLine("usage: compat goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token>");
+        Console.WriteLine("usage: compat goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token> | diffpackets");
         return 1;
     }
 }
