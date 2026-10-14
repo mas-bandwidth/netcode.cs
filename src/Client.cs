@@ -496,8 +496,15 @@ namespace Netcode
         {
             if (_config.Simulator == null)
             {
-                while (true)
+                // a zero-length datagram (or any receive error) is skipped and the drain
+                // continues; only a would-block ends it. every iteration counts and the
+                // loop stops at the per-update cap.
+                int packetsReceived = 0;
+
+                while (packetsReceived < Defines.ClientMaxReceivePackets)
                 {
+                    packetsReceived++;
+
                     Address from = default;
                     int packetBytes = 0;
 
@@ -515,6 +522,9 @@ namespace Netcode
                         if (_socketIpv6 != null)
                             packetBytes = _socketIpv6.ReceivePacket(ref from, _receiveBuffer);
                     }
+
+                    if (packetBytes < 0)
+                        continue;
 
                     if (packetBytes == 0)
                         break;
