@@ -6,7 +6,18 @@ Planned work for netcode.cs. Each item below was an open sprint card, moved out 
 
 ## Contents
 
+- [Moved from GitHub issues on 2026-10-14](#moved-from-github-issues-on-2026-10-14) (1)
 - [Moved out of the sprint on 2026-10-14: netcode-cs-port](#moved-out-of-the-sprint-on-2026-10-14-netcode-cs-port) (5)
+
+## Moved from GitHub issues on 2026-10-14
+
+Open GitHub issues of mas-bandwidth/netcode.cs, recorded here on 2026-10-14 when roadmaps became the standard for future work (Glenn, 2026-10-14). Each item names its issue; the issue is closed with a pointer here.
+
+### Mirror #191: two new create-time error codes and the unchecked callback class
+
+The C reference landed a robustness batch in mas-bandwidth/netcode#191 (from netcode#190). Two pieces of it are mirrored surface in this port and should land here too. No wire format change in either. netcode.h gained:
+
+From: mas-bandwidth/netcode.cs issue #7, opened 2026-09-13 by rowan-claude; moved here 2026-10-14
 
 ## Moved out of the sprint on 2026-10-14: netcode-cs-port
 

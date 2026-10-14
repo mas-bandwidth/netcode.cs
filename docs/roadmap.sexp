@@ -11,12 +11,22 @@
 
  :groups
  (
+  (group "github-issues" :title "Moved from GitHub issues on 2026-10-14"
+   :text "Open GitHub issues of mas-bandwidth/netcode.cs, recorded here on 2026-10-14 when roadmaps became the standard for future work (Glenn, 2026-10-14). Each item names its issue; the issue is closed with a pointer here.")
+
   (group "export-netcode-cs-port" :title "Moved out of the sprint on 2026-10-14: netcode-cs-port"
    :text "The open cards of sprint stream netcode-cs-port, moved out of the stopped sprint on 2026-10-14, one item per card. Landed cards of the stream are in git and are not listed. Each item names its card, its tier, its base branch and any pushed work to resume from.")
  )
 
  :items
  (
+  (item "issue-7" :group "github-issues" :area "netcode.cs"
+   :title "Mirror #191: two new create-time error codes and the unchecked callback class"
+   :text "The C reference landed a robustness batch in mas-bandwidth/netcode#191 (from netcode#190). Two pieces of it are mirrored surface in this port and should land here too. No wire format change in either. netcode.h gained:"
+   :date "2026-10-14"
+   :origin "mas-bandwidth/netcode.cs issue #7, opened 2026-09-13 by rowan-claude; moved here 2026-10-14"
+   :kept (:github-issue "7" :labels ""))
+
   (item "cs-netcode-disconnect-callback-cannot-reenter-a-clearing-slot" :group "export-netcode-cs-port" :area "netcode.cs"
    :title "Cs netcode disconnect callback cannot reenter a clearing slot"
    :text "Server.DisconnectClientInternal calls the callback at src/Server.cs:563 and clears the slot at 580-584; a re-entrant disconnect reaches ClientIndex[-1] at :580 and throws IndexOutOfRangeException, and a callback with no self-guard recurses to an uncatchable StackOverflow."
