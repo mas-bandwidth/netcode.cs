@@ -681,7 +681,7 @@ static int do_diff_packets( void )
         memcpy( packet.connect_token_data, private_token, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
         bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
 
-        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, token_key, allowed_packets, NULL, NULL, NULL );
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, token_key, allowed_packets, NULL, NULL, NULL );
         if ( result )
             printf( "0 request 0 %d\n", NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
         else
@@ -703,7 +703,7 @@ static int do_diff_packets( void )
         bytes = netcode_write_packet( p, buffer, sizeof( buffer ), 1000, packet_key, GOLDEN_PROTOCOL_ID );
         buffer[0] = 0x70;
 
-        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, NULL, allowed_packets, &replay, NULL, NULL );
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, NULL, allowed_packets, NULL, NULL, NULL );
         printf( "1 %s %lu 0\n", result ? "payload" : "refused", (unsigned long) sequence );
         if ( result )
             free( result );
@@ -720,7 +720,7 @@ static int do_diff_packets( void )
         memcpy( packet.connect_token_data, private_token, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
         bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
 
-        void * result = netcode_read_packet( buffer, bytes - 1, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, token_key, allowed_packets, NULL, NULL, NULL );
+        void * result = netcode_read_packet( buffer, bytes - 1, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, token_key, allowed_packets, NULL, NULL, NULL );
         printf( "2 %s %lu 0\n", result ? "request" : "refused", (unsigned long) sequence );
         if ( result )
             free( result );
@@ -737,7 +737,7 @@ static int do_diff_packets( void )
         memcpy( packet.connect_token_data, private_token, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
         bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
 
-        void * result = netcode_read_packet( buffer, bytes - 2, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, token_key, allowed_packets, NULL, NULL, NULL );
+        void * result = netcode_read_packet( buffer, bytes - 2, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, token_key, allowed_packets, NULL, NULL, NULL );
         printf( "3 %s %lu 0\n", result ? "request" : "refused", (unsigned long) sequence );
         if ( result )
             free( result );
@@ -757,7 +757,7 @@ static int do_diff_packets( void )
         memcpy( p->payload_data, payload, sizeof( payload ) );
         bytes = netcode_write_packet( p, buffer, sizeof( buffer ), 1000, packet_key, GOLDEN_PROTOCOL_ID );
 
-        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, NULL, allowed_packets, &replay, NULL, NULL );
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, NULL, allowed_packets, &replay, NULL, NULL );
         if ( result )
             printf( "4 payload %lu %d\n", (unsigned long) sequence, ( (struct netcode_connection_payload_packet_t*) result )->payload_bytes );
         else
@@ -780,7 +780,7 @@ static int do_diff_packets( void )
         memcpy( p->payload_data, payload, sizeof( payload ) );
         bytes = netcode_write_packet( p, buffer, sizeof( buffer ), 1000, packet_key, GOLDEN_PROTOCOL_ID );
 
-        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, NULL, allowed_packets, &replay, NULL, NULL );
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, NULL, allowed_packets, &replay, NULL, NULL );
         printf( "5 %s %lu 0\n", result ? "payload" : "refused", (unsigned long) sequence );
         if ( result )
             free( result );
@@ -798,7 +798,7 @@ static int do_diff_packets( void )
         bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
         buffer[1] = 'X';
 
-        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, token_key, allowed_packets, NULL, NULL, NULL );
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, token_key, allowed_packets, NULL, NULL, NULL );
         printf( "6 %s %lu 0\n", result ? "request" : "refused", (unsigned long) sequence );
         if ( result )
             free( result );
@@ -821,7 +821,7 @@ static int do_diff_packets( void )
                 buffer[1 + NETCODE_VERSION_INFO_BYTES + i] = (uint8_t) ( wrong >> ( i * 8 ) );
         }
 
-        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, token_key, allowed_packets, NULL, NULL, NULL );
+        void * result = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, current_timestamp, 0, token_key, allowed_packets, NULL, NULL, NULL );
         printf( "7 %s %lu 0\n", result ? "request" : "refused", (unsigned long) sequence );
         if ( result )
             free( result );
