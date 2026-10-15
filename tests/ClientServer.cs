@@ -45,6 +45,19 @@ internal static class ClientServerTests
         return config;
     }
 
+    private static Server OverrideServer(string address)
+    {
+        var config = new ServerConfig
+        {
+            ProtocolId = TestConstants.TestProtocolId,
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> data) => 0,
+        };
+        TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
+        return new Server(address, config, 0.0);
+    }
+
     private static void ConnectLoop(NetworkSimulator simulator, Client client, Server server, ref double time, double deltaTime)
     {
         while (true)
@@ -147,6 +160,22 @@ internal static class ClientServerTests
         Check.That(server.GlobalSequence == 1UL << 63);
     }
 
+    public static void TestGlobalSequenceDiffersBetweenServers()
+    {
+        // one connect token carries one server to client key for every server it lists.
+        // two servers that both start at 2^63 encrypt their first challenge under the
+        // same key and nonce. each start must draw a different sequence in the top half.
+
+        using var server1 = OverrideServer("127.0.0.1:40000");
+        using var server2 = OverrideServer("127.0.0.1:40001");
+        server1.Start(1);
+        server2.Start(1);
+
+        Check.That(server1.GlobalSequence != server2.GlobalSequence);
+        Check.That(server1.GlobalSequence >= 1UL << 63);
+        Check.That(server2.GlobalSequence >= 1UL << 63);
+    }
+
     public static void TestConnectTokenHistory()
     {
         var history = new ConnectTokenHistory();
@@ -223,6 +252,31 @@ internal static class ClientServerTests
 
         Check.That(client.State == ClientState.ConnectionRequestTimedOut);
         Check.That(server.NumConnectedClients == 0);
+    }
+
+    public static void TestClientRefusesAReusedConnectToken()
+    {
+        // a client that connects, disconnects, then connects again with the same token
+        // bytes would encrypt again from sequence zero under the same client to server
+        // key. it must refuse the reused token before sending.
+
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> data) => 0,
+        };
+        using var client = new Client("127.0.0.1:50000", config, 0.0);
+        byte[] connectToken = GenerateConnectToken("127.0.0.1:40000", TestConstants.TestClientId);
+
+        client.Connect(connectToken);
+        Check.That(client.State == ClientState.SendingConnectionRequest);
+
+        client.Disconnect();
+        Check.That(client.State == ClientState.Disconnected);
+
+        client.Connect(connectToken);
+        Check.That(client.State == ClientState.InvalidConnectToken);
     }
 
     public static void TestConnectionResponseUsesItsMappingChallenge()

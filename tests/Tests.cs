@@ -126,8 +126,10 @@ internal static class Program
         RunTest("test_client_create", ClientServerTests.TestClientCreate);
         RunTest("test_server_create", ClientServerTests.TestServerCreate);
         RunTest("test_server_restart_global_sequence", ClientServerTests.TestServerRestartGlobalSequence);
+        RunTest("test_global_sequence_differs_between_servers", ClientServerTests.TestGlobalSequenceDiffersBetweenServers);
         RunTest("test_connect_token_history", ClientServerTests.TestConnectTokenHistory);
         RunTest("test_client_reconnect_used_connect_token", ClientServerTests.TestClientReconnectUsedConnectToken);
+        RunTest("test_client_refuses_a_reused_connect_token", ClientServerTests.TestClientRefusesAReusedConnectToken);
         RunTest("test_connection_response_uses_its_mapping_challenge", ClientServerTests.TestConnectionResponseUsesItsMappingChallenge);
         RunTest("test_client_error_connect_token_predates_server_start", ClientServerTests.TestClientErrorConnectTokenPredatesServerStart);
         RunTest("test_client_server_connect", ClientServerTests.TestClientServerConnect);
