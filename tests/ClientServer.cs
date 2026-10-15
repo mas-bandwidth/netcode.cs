@@ -141,7 +141,7 @@ internal static class ClientServerTests
     {
         // global packets (challenge, denied) share per-token server to client keys with
         // per-client packets, so the global sequence must stay in the top half of the
-        // sequence space or a stopped and restarted server reuses AEAD nonces.
+        // sequence space. stop zeroes it; start re-seeds a random offset in that half.
 
         using var server = new Server("127.0.0.1:40000", CreateServerConfig(null));
 
@@ -149,7 +149,7 @@ internal static class ClientServerTests
 
         server.Start(1);
 
-        Check.That(server.GlobalSequence == 1UL << 63);
+        Check.That(server.GlobalSequence >= 1UL << 63);
 
         server.GlobalSequence += 1000; // as if the server had sent some global packets
 
@@ -157,7 +157,7 @@ internal static class ClientServerTests
 
         server.Start(1);
 
-        Check.That(server.GlobalSequence == 1UL << 63);
+        Check.That(server.GlobalSequence >= 1UL << 63);
     }
 
     public static void TestGlobalSequenceDiffersBetweenServers()
@@ -250,7 +250,7 @@ internal static class ClientServerTests
         client.Connect(connectToken);
         ConnectLoop(simulator, client, server, ref time, deltaTime);
 
-        Check.That(client.State == ClientState.ConnectionRequestTimedOut);
+        Check.That(client.State == ClientState.InvalidConnectToken);
         Check.That(server.NumConnectedClients == 0);
     }
 

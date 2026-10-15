@@ -158,10 +158,11 @@ Inherited from the C reference implementation, on purpose:
   socket surfaces as a connection timeout through the state machine.
 - **The server has no state machine of its own** beyond stopped/started; all
   other state is per-client.
-- **The server's global packet sequence is re-seeded to 2^63 on every start.**
+- **The server's global packet sequence is re-seeded on every start to 2^63 plus a random 62-bit offset.**
   Global packets (challenge/denied) share per-token keys with per-client
-  packets whose sequences start at zero; the split sequence space keeps AEAD
-  nonces disjoint. Regression-tested.
+  packets whose sequences start at zero, and one token's server-to-client key
+  is shared by every server it lists. The offset keeps those nonces in the top
+  half and apart across servers. A client refuses a token it has already used.
 - **Replay protection advances its window only after AEAD authentication.**
   The pre-decrypt check is an optimization; advancing before authentication
   would let spoofed sequence numbers poison the window.
