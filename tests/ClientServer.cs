@@ -1299,8 +1299,8 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", config, time);
         serverRef = server;
-        server.Start(1);
-        client.Connect(GenerateConnectToken("[::1]:40000", 0xA1, expiry: 31));
+        StartServerForTests(server, 1);
+        client.Connect(GenerateConnectToken("[::1]:40000", 0xA1));
         ConnectLoop(simulator, client, server, ref time, 0.1);
         Check.That(client.State == ClientState.Connected);
         byte expectedUser = server.ClientUserData(0)[0];
@@ -1313,14 +1313,14 @@ internal static class ClientServerTests
         Check.That(server.NumConnectedClients == 0 && !server.ClientConnected(0));
 
         client.Disconnect();
-        client.Connect(GenerateConnectToken("[::1]:40000", 0xA2, expiry: 31));
+        client.Connect(GenerateConnectToken("[::1]:40000", 0xA2));
         ConnectLoop(simulator, client, server, ref time, 0.1);
         Check.That(client.State == ClientState.Connected);
         callbacks = 0;
         onDisconnect = _ => server.Stop();
         server.DisconnectClient(0);
         Check.That(callbacks == 1 && !server.Running);
-        server.Start(1);
+        StartServerForTests(server, 1);
         Check.That(server.NumConnectedClients == 0 && !server.ClientConnected(0));
 
         byte[] loopbackUser = new byte[Protocol.UserDataBytes];
