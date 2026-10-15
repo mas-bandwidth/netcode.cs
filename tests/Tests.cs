@@ -151,6 +151,7 @@ internal static class Program
         RunTest("test_receive_drain_skips_empty_and_stops_at_cap", ClientServerTests.TestReceiveDrainSkipsEmptyAndStopsAtCap);
         RunTest("test_client_reconnect", ClientServerTests.TestClientReconnect);
         RunTest("test_disable_timeout", ClientServerTests.TestDisableTimeout);
+        RunTest("test_preconnect_mapping_lifetime", ClientServerTests.TestPreconnectMappingLifetime);
         RunTest("test_loopback", ClientServerTests.TestLoopback);
         RunTest("test_client_create_missing_override_callback", ClientServerTests.TestClientCreateMissingOverrideCallback);
         RunTest("test_server_create_missing_override_callback", ClientServerTests.TestServerCreateMissingOverrideCallback);
@@ -752,6 +753,36 @@ internal static class CoreTests
         var outputToken = new ConnectTokenPrivate();
         Check.That(outputToken.Read(buffer.AsSpan(result.DataOffset, result.DataLength)));
         Check.That(outputToken.ClientId == TestConstants.TestClientId);
+
+        // a never-expiring or over-long token must be refused by the lifetime check,
+        // not accepted because its expiry passes the restart floor
+
+        ulong currentTimestamp = 1000;
+        const ulong MaxLifetime = Protocol.DefaultMaxConnectTokenLifetime;
+
+        int ReadRequest(ulong expire, ulong maxLifetime)
+        {
+            byte[] enc = (byte[])connectTokenData.Clone();
+            Check.That(ConnectTokenPrivate.Encrypt(enc, Defines.VersionInfo, TestConstants.TestProtocolId, expire, nonce, key));
+            byte[] req = new byte[2048];
+            int n = PacketIO.WriteConnectionRequestPacket(req, Defines.VersionInfo, TestConstants.TestProtocolId, expire, nonce, enc);
+            ReadPacketResult r = PacketIO.ReadPacket(
+                req.AsSpan(0, n),
+                hasReadPacketKey: true, new byte[Protocol.KeyBytes],
+                TestConstants.TestProtocolId,
+                currentTimestamp,
+                hasPrivateKey: true, key,
+                AllAllowed, null,
+                maxConnectTokenLifetime: maxLifetime);
+            return r.Type;
+        }
+
+        Check.That(ReadRequest(ulong.MaxValue, MaxLifetime) == -1);
+        Check.That(ReadRequest(currentTimestamp + 2 * MaxLifetime, MaxLifetime) == -1);
+        Check.That(ReadRequest(currentTimestamp + MaxLifetime + 1, MaxLifetime) == -1);
+        Check.That(ReadRequest(currentTimestamp + MaxLifetime, MaxLifetime) == PacketType.ConnectionRequest);
+        Check.That(ReadRequest(currentTimestamp + 1, MaxLifetime) == PacketType.ConnectionRequest);
+        Check.That(ReadRequest(currentTimestamp, MaxLifetime) == -1);
     }
 
     public static void TestEmptyPacket(int packetType)

@@ -1012,7 +1012,8 @@ namespace Netcode
             ReadOnlySpan<byte> privateKey,
             ReadOnlySpan<bool> allowedPackets,
             ReplayProtection? replayProtection,
-            ulong minConnectTokenExpireTimestamp = 0)
+            ulong minConnectTokenExpireTimestamp = 0,
+            ulong maxConnectTokenLifetime = 0)
         {
             ReadPacketResult result = default;
             result.Type = -1;
@@ -1674,13 +1675,22 @@ namespace Netcode
             if (index == -1)
                 return Span<byte>.Empty;
             return ReceiveKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes);
-        }
+}
 
         public int GetTimeout(int index)
         {
             if (index == -1)
                 return 0;
             return Timeout[index];
+        }
+
+        public int CountActive(double time)
+        {
+            int count = 0;
+            for (int i = 0; i < NumEncryptionMappings; i++)
+                if (Address[i].Type != AddressType.None && !EntryExpired(i, time))
+                    count++;
+            return count;
         }
     }
 

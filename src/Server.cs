@@ -362,6 +362,9 @@ namespace Netcode
             set => _globalSequence = value;
         }
 
+        // for tests: the number of active (non-expired) encryption mappings at the current time
+        internal int NumEncryptionMappings => _encryptionManager.CountActive(_time);
+
         /// <summary>The port the server socket is bound to.</summary>
         public ushort Port =>
             _address.Type == AddressType.IPv4

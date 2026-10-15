@@ -1317,6 +1317,79 @@ internal static class ClientServerTests
         Check.That(clientNumPacketsReceived >= 10 && serverNumPacketsReceived >= 10);
     }
 
+    public static void TestPreconnectMappingLifetime()
+    {
+        // a pre-connect encryption mapping has its own bounded lifetime: a negative
+        // timeout must not hold a slot forever, and a zero timeout must not expire the
+        // mapping before the response can arrive.
+
+        byte[] sent = Array.Empty<byte>();
+        var config = new ServerConfig { ProtocolId = TestConstants.TestProtocolId, OverrideSendAndReceive = true };
+        TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
+        config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => sent = data.ToArray();
+        config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+        using var server = new Server("127.0.0.1:40000", config, 0.0);
+        server.Start(4);
+        server.SetConnectTokenExpiryFloorForTest(1000);
+        Address x = Address.Parse("127.0.0.1:50000");
+
+        ConnectTokenData Token(int timeout)
+        {
+            byte[] bytes = new byte[Protocol.ConnectTokenBytes];
+            byte[] userData = new byte[Protocol.UserDataBytes];
+            Span<Address> addresses = stackalloc Address[1] { Address.Parse("127.0.0.1:40000") };
+            Span<byte> nonce = stackalloc byte[Defines.ConnectTokenNonceBytes];
+            new TestRng(0x51).Fill(nonce);
+            Check.That(ConnectTokenGenerator.GenerateInternal(addresses, addresses, 1000, 1030, timeout,
+                0x1111, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, nonce, bytes));
+            var token = new ConnectTokenData();
+            Check.That(token.Read(bytes));
+            return token;
+        }
+
+        void Request(in Address from, ConnectTokenData token, double logicalTime)
+        {
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteConnectionRequestPacket(wire, token.VersionInfo, token.ProtocolId,
+                token.ExpireTimestamp, token.Nonce, token.PrivateData);
+            server.ProcessPacketAtTimestamp(in from, wire.AsSpan(0, bytes), 1001, logicalTime);
+        }
+
+        byte[] Challenge(ConnectTokenData token)
+        {
+            byte[] wire = (byte[])sent.Clone();
+            bool[] allowed = new bool[PacketType.NumPackets];
+            allowed[PacketType.ConnectionChallenge] = true;
+            ReadPacketResult packet = PacketIO.ReadPacket(wire, true, token.ServerToClientKey,
+                TestConstants.TestProtocolId, 1001, false, ReadOnlySpan<byte>.Empty, allowed, null);
+            Check.That(packet.Type == PacketType.ConnectionChallenge);
+            return wire.AsSpan(packet.DataOffset, packet.DataLength).ToArray();
+        }
+
+        void Response(in Address from, ConnectTokenData token, byte[] challenge, double logicalTime)
+        {
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteEncryptedPacket(wire, PacketType.ConnectionResponse,
+                challenge, 1, token.ClientToServerKey, TestConstants.TestProtocolId);
+            server.ProcessPacketAtTimestamp(in from, wire.AsSpan(0, bytes), 1001, logicalTime);
+        }
+
+        // timeout -1: the mapping must expire after the preconnect lifetime, not never
+        ConnectTokenData a = Token(-1);
+        Request(in x, a, 0.0);
+        Check.That(server.NumEncryptionMappings == 1);
+        server.Update(11.0);
+        Check.That(server.NumEncryptionMappings == 0);
+
+        // timeout 0: the mapping must survive one update so the response connects
+        ConnectTokenData b = Token(0);
+        Request(in x, b, 0.0);
+        Check.That(server.NumEncryptionMappings == 1);
+        byte[] challengeB = Challenge(b);
+        Response(in x, b, challengeB, 0.1);
+        Check.That(server.NumConnectedClients == 1);
+    }
+
     public static void TestLoopback()
     {
         NetworkSimulator simulator = CreateSimulator();
