@@ -1212,6 +1212,7 @@ internal static class ClientServerTests
         var config = CreateServerConfig(simulator);
         Server? serverRef = null;
         Action<int>? onDisconnect = null;
+        config.SendLoopbackPacket = (int slot, ReadOnlySpan<byte> data, ulong sequence) => { };
         config.OnClientConnectDisconnect = (slot, connected) =>
         {
             if (connected) return;
