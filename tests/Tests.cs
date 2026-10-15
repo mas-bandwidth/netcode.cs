@@ -141,6 +141,8 @@ internal static class Program
         RunTest("test_client_server_multiple_servers", ClientServerTests.TestClientServerMultipleServers);
         RunTest("test_client_error_connect_token_expired", ClientServerTests.TestClientErrorConnectTokenExpired);
         RunTest("test_client_error_invalid_connect_token", ClientServerTests.TestClientErrorInvalidConnectToken);
+        RunTest("test_client_can_reach", ClientServerTests.TestClientCanReach);
+        RunTest("test_client_refuses_server_address_without_socket", ClientServerTests.TestClientRefusesServerAddressWithoutSocket);
         RunTest("test_client_error_connection_timed_out", ClientServerTests.TestClientErrorConnectionTimedOut);
         RunTest("test_client_error_connection_response_timeout", ClientServerTests.TestClientErrorConnectionResponseTimeout);
         RunTest("test_client_error_connection_request_timeout", ClientServerTests.TestClientErrorConnectionRequestTimeout);

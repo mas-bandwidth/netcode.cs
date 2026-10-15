@@ -333,6 +333,30 @@ namespace Netcode
             Array.Clear(_connectToken.ServerAddresses);
         }
 
+        // a client bound for one address family has no socket for the other; a
+        // simulator or override client has no sockets at all and reaches every address
+        internal static bool CanReach(AddressType addressType, bool hasIpv4Socket, bool hasIpv6Socket, bool socketless)
+        {
+            if (socketless)
+                return true;
+            return addressType == AddressType.IPv4 ? hasIpv4Socket :
+                   addressType == AddressType.IPv6 ? hasIpv6Socket : false;
+        }
+
+        private bool HasSocketFor(AddressType addressType)
+        {
+            return CanReach(addressType, _socketIpv4 != null, _socketIpv6 != null,
+                _config.Simulator != null || _config.OverrideSendAndReceive);
+        }
+
+        private int FirstReachableServerAddressIndex()
+        {
+            for (int i = 0; i < _connectToken.NumServerAddresses; i++)
+                if (HasSocketFor(_connectToken.ServerAddresses[i].Type))
+                    return i;
+            return -1;
+        }
+
         /// <summary>
         /// Begin connecting with a 2048-byte connect token obtained from the backend.
         /// On an invalid token the client transitions to InvalidConnectToken (no throw).
@@ -362,8 +386,16 @@ namespace Netcode
             connectTokenMac.CopyTo(_previousConnectTokenMac);
             _hasPreviousConnectTokenMac = true;
 
-            _serverAddressIndex = 0;
-            _serverAddress = _connectToken.ServerAddresses[0];
+            int reachableIndex = FirstReachableServerAddressIndex();
+            if (reachableIndex < 0)
+            {
+                NetcodeLog.Error("error: client connect refused. no server address in the connect token has a socket\n");
+                SetState(ClientState.InvalidConnectToken);
+                return;
+            }
+
+            _serverAddressIndex = reachableIndex;
+            _serverAddress = _connectToken.ServerAddresses[reachableIndex];
 
             if (NetcodeLog.Enabled(LogLevel.Info))
             {
@@ -648,14 +680,18 @@ namespace Netcode
 
         private bool ConnectToNextServer()
         {
-            if (_serverAddressIndex + 1 >= _connectToken.NumServerAddresses)
+            int index = _serverAddressIndex + 1;
+            while (index < _connectToken.NumServerAddresses && !HasSocketFor(_connectToken.ServerAddresses[index].Type))
+                index++;
+
+            if (index >= _connectToken.NumServerAddresses)
             {
                 NetcodeLog.Debug("client has no more servers to connect to\n");
                 return false;
             }
 
-            _serverAddressIndex++;
-            _serverAddress = _connectToken.ServerAddresses[_serverAddressIndex];
+            _serverAddressIndex = index;
+            _serverAddress = _connectToken.ServerAddresses[index];
 
             ResetBeforeNextConnect();
 
