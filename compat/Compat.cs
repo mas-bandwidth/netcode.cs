@@ -828,6 +828,51 @@ internal static class Program
         return 0;
     }
 
+    private static int DoNonces()
+    {
+        NetcodeLog.Level = LogLevel.None;
+        var serverConfig = new ServerConfig
+        {
+            ProtocolId = SessionProtocolId,
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> data) => 0,
+        };
+        SessionPrivateKey.CopyTo(serverConfig.PrivateKey, 0);
+
+        using var serverA = new Server("127.0.0.1:40000", serverConfig, 0.0);
+        using var serverB = new Server("127.0.0.1:40001", serverConfig, 0.0);
+        serverA.Start(1);
+        serverB.Start(1);
+        ulong floor = 1UL << 63;
+        ulong first = serverA.GlobalSequence;
+        Console.WriteLine($"fresh a-ge {(serverA.GlobalSequence >= floor ? 1 : 0)}");
+        Console.WriteLine($"fresh b-ge {(serverB.GlobalSequence >= floor ? 1 : 0)}");
+        Console.WriteLine($"fresh differ {(serverA.GlobalSequence != serverB.GlobalSequence ? 1 : 0)}");
+        serverA.Stop();
+        serverA.Start(1);
+        Console.WriteLine($"restart ge {(serverA.GlobalSequence >= floor ? 1 : 0)}");
+        Console.WriteLine($"restart differ {(serverA.GlobalSequence != first ? 1 : 0)}");
+
+        var clientConfig = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> data) => 0,
+        };
+        using var client = new Client("127.0.0.1:50000", clientConfig, 0.0);
+        byte[] userData = new byte[Protocol.UserDataBytes];
+        Array.Fill(userData, (byte)1);
+        byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
+        if (!ConnectTokenGenerator.Generate(new[] { "127.0.0.1:40000" }, new[] { "127.0.0.1:40000" }, 30, 15, 1, SessionProtocolId, SessionPrivateKey, userData, connectToken))
+            return 1;
+        client.Connect(connectToken);
+        client.Disconnect();
+        client.Connect(connectToken);
+        Console.WriteLine($"client reuse {Client.StateName(client.State)}");
+        return 0;
+    }
+
     private static int Main(string[] args)
     {
         NetcodeLog.Level = LogLevel.Error;
@@ -841,6 +886,7 @@ internal static class Program
             ["client", var port, var token] => DoClient(int.Parse(port), token),
             ["diffpackets"] => DoDiffPackets(),
             ["drain"] => DoDrain(),
+            ["nonces"] => DoNonces(),
             ["challenge-mapping", var inputDir] => DoChallengeMapping(inputDir),
             _ => Usage(),
         };
@@ -848,7 +894,7 @@ internal static class Program
 
     private static int Usage()
     {
-        Console.WriteLine("usage: compat goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token> | diffpackets | drain");
+        Console.WriteLine("usage: compat goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token> | diffpackets | drain | nonces");
         return 1;
     }
 }

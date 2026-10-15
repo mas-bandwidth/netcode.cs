@@ -1202,6 +1202,93 @@ static int do_challenge_mapping( const char * input_dir )
     return 1;
 }
 
+/*
+    Global nonce differential (subcommand "nonces"). Two servers started from
+    fresh, then one stopped and started again, plus a client that connects,
+    disconnects and connects with the same token. Prints only boolean properties
+    of the global sequence and the client state name. Never prints the random
+    sequence values. scripts/interop.sh diffs this against compat/Compat.cs.
+*/
+
+static void nonce_send_override( void * context, struct netcode_address_t * to, const uint8_t * packet_data, int packet_bytes )
+{
+    (void) context;
+    (void) to;
+    (void) packet_data;
+    (void) packet_bytes;
+}
+
+static int nonce_receive_override( void * context, struct netcode_address_t * from, uint8_t * buffer, int buffer_bytes )
+{
+    (void) context;
+    (void) from;
+    (void) buffer;
+    (void) buffer_bytes;
+    return 0;
+}
+
+static int do_nonces( void )
+{
+    struct netcode_server_config_t server_config;
+    struct netcode_client_config_t client_config;
+    struct netcode_server_t * server_a;
+    struct netcode_server_t * server_b;
+    struct netcode_client_t * client;
+    NETCODE_CONST char * server_address = "127.0.0.1:40000";
+    uint8_t connect_token[NETCODE_CONNECT_TOKEN_BYTES];
+    uint8_t user_data[NETCODE_USER_DATA_BYTES];
+    uint64_t floor = 1ULL << 63;
+    uint64_t first;
+
+    netcode_log_level( NETCODE_LOG_LEVEL_NONE );
+
+    netcode_default_server_config( &server_config );
+    server_config.protocol_id = SESSION_PROTOCOL_ID;
+    memcpy( server_config.private_key, session_private_key, NETCODE_KEY_BYTES );
+    server_config.override_send_and_receive = 1;
+    server_config.send_packet_override = nonce_send_override;
+    server_config.receive_packet_override = nonce_receive_override;
+
+    server_a = netcode_server_create( "127.0.0.1:40000", &server_config, 0.0 );
+    server_b = netcode_server_create( "127.0.0.1:40001", &server_config, 0.0 );
+    if ( !server_a || !server_b )
+        return 0;
+
+    netcode_server_start( server_a, 1 );
+    netcode_server_start( server_b, 1 );
+    first = server_a->global_sequence;
+    printf( "fresh a-ge %d\n", server_a->global_sequence >= floor ? 1 : 0 );
+    printf( "fresh b-ge %d\n", server_b->global_sequence >= floor ? 1 : 0 );
+    printf( "fresh differ %d\n", server_a->global_sequence != server_b->global_sequence ? 1 : 0 );
+
+    netcode_server_stop( server_a );
+    netcode_server_start( server_a, 1 );
+    printf( "restart ge %d\n", server_a->global_sequence >= floor ? 1 : 0 );
+    printf( "restart differ %d\n", server_a->global_sequence != first ? 1 : 0 );
+
+    netcode_server_destroy( server_a );
+    netcode_server_destroy( server_b );
+
+    netcode_default_client_config( &client_config );
+    client_config.override_send_and_receive = 1;
+    client_config.send_packet_override = nonce_send_override;
+    client_config.receive_packet_override = nonce_receive_override;
+    client = netcode_client_create( "127.0.0.1:50000", &client_config, 0.0 );
+    if ( !client )
+        return 0;
+
+    memset( user_data, 1, NETCODE_USER_DATA_BYTES );
+    if ( netcode_generate_connect_token( 1, &server_address, &server_address, 30, 15, 1, SESSION_PROTOCOL_ID, session_private_key, user_data, connect_token ) != NETCODE_OK )
+        return 0;
+
+    netcode_client_connect( client, connect_token );
+    netcode_client_disconnect( client );
+    netcode_client_connect( client, connect_token );
+    printf( "client reuse %s\n", netcode_client_state_name( netcode_client_state( client ) ) );
+    netcode_client_destroy( client );
+    return 1;
+}
+
 int main( int argc, char ** argv )
 {
     if ( netcode_init() != NETCODE_OK )
@@ -1228,10 +1315,12 @@ int main( int argc, char ** argv )
         ok = do_diff_packets();
     else if ( argc == 2 && strcmp( argv[1], "drain" ) == 0 )
         ok = do_drain();
+    else if ( argc == 2 && strcmp( argv[1], "nonces" ) == 0 )
+        ok = do_nonces();
     else if ( argc == 3 && strcmp( argv[1], "challenge-mapping" ) == 0 )
         ok = do_challenge_mapping( argv[2] );
     else
-        printf( "usage: compat-c goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token> | diffpackets | drain\n" );
+        printf( "usage: compat-c goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token> | diffpackets | drain | nonces\n" );
 
     netcode_term();
 
