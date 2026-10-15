@@ -943,8 +943,9 @@ internal static class Program
             server.SetConnectTokenExpiryFloorForTest(1000);
         }
 
-        ulong[] expiries = { ulong.MaxValue, 1060, 1031, 1030, 1001, 1000 };
-        string[] expiryNames = { "max", "plus60", "plus31", "plus30", "plus1", "expired" };
+        ulong[] expiries = { ulong.MaxValue, 1060, 1031, 1030, 1030, 1001, 1000 };
+        ulong[] floors = { 1000, 1000, 1000, 1000, 1030, 1000, 1000 };
+        string[] expiryNames = { "max", "plus60", "plus31", "plus30", "floor", "plus1", "expired" };
         ConnectTokenData expiryToken = Token(15);
         for (int i = 0; i < expiries.Length; i++)
         {
@@ -960,7 +961,7 @@ internal static class Program
             allowed[PacketType.ConnectionRequest] = true;
             ReadPacketResult packet = PacketIO.ReadPacket(wire.AsSpan(0, bytes), true,
                 ReadOnlySpan<byte>.Empty, SessionProtocolId, 1000, true,
-                SessionPrivateKey, allowed, null, 1000, 30);
+                SessionPrivateKey, allowed, null, floors[i], 30);
             Console.WriteLine($"expiry {expiryNames[i]} -> {(packet.Type == PacketType.ConnectionRequest ? "accepted" : "refused")}");
         }
 
@@ -996,7 +997,7 @@ internal static class Program
             byte[] token = new byte[Protocol.ConnectTokenBytes];
             connectToken.Write(token);
             client.Connect(token);
-            if (name == "v4v6") client.Update(16.0);
+            if (name == "v4v6" && !client.ConnectToNextServer()) return 1;
             int index = client.State == ClientState.SendingConnectionRequest
                 ? client.ServerAddressIndex
                 : -1;

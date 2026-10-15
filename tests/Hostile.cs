@@ -430,6 +430,8 @@ internal static class Hostile
         using var server = new Server("127.0.0.1:40000", serverConfig, 0.0);
 
         server.Start(1);
+        server.SetConnectTokenExpiryFloorForTest(
+            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + Protocol.DefaultMaxConnectTokenLifetime - 1);
 
         byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
         byte[] userData = new byte[Protocol.UserDataBytes];

@@ -682,7 +682,7 @@ namespace Netcode
             }
         }
 
-        private bool ConnectToNextServer()
+        internal bool ConnectToNextServer()
         {
             if (_serverAddressIndex + 1 >= _connectToken.NumServerAddresses)
             {

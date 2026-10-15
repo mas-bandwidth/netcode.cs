@@ -1348,9 +1348,10 @@ static int do_token_lifetimes( void )
         server->min_connect_token_expire_timestamp = 1000;
     }
 
-    const uint64_t expiries[] = { UINT64_MAX, 1060, 1031, 1030, 1001, 1000 };
-    const char * expiry_names[] = { "max", "plus60", "plus31", "plus30", "plus1", "expired" };
-    for ( int i = 0; i < 6; i++ )
+    const uint64_t expiries[] = { UINT64_MAX, 1060, 1031, 1030, 1030, 1001, 1000 };
+    const uint64_t floors[] = { 1000, 1000, 1000, 1000, 1030, 1000, 1000 };
+    const char * expiry_names[] = { "max", "plus60", "plus31", "plus30", "floor", "plus1", "expired" };
+    for ( int i = 0; i < 7; i++ )
     {
         struct netcode_connect_token_t token;
         scenario_token( &token, 0x1111, 0xa1, 1 );
@@ -1373,7 +1374,7 @@ static int do_token_lifetimes( void )
         uint8_t allowed[NETCODE_CONNECTION_NUM_PACKETS] = { 0 };
         allowed[NETCODE_CONNECTION_REQUEST_PACKET] = 1;
         void * packet = netcode_read_packet( wire, bytes, &sequence, NULL, SESSION_PROTOCOL_ID,
-            1000, 1000, 30, session_private_key, allowed, NULL, NULL, NULL );
+            1000, floors[i], 30, session_private_key, allowed, NULL, NULL, NULL );
         printf( "expiry %s -> %s\n", expiry_names[i], packet ? "accepted" : "refused" );
         free( packet );
     }
@@ -1391,7 +1392,8 @@ static int do_client_address( void )
     config.receive_packet_override = scenario_receive;
     struct netcode_client_t * client = netcode_client_create( "0.0.0.0:50000", &config, 0.0 );
     if ( !client ) return 0;
-    client->config.override_send_and_receive = 0;
+    // The nonzero handle is only an in-memory family marker. Override transport
+    // remains on outside the two direct address-selection calls.
     client->socket_holder.ipv4.handle = 1;
 
     const char * lists[4][2] = { { "[::1]:40000", NULL }, { "[::1]:40000", "127.0.0.1:40000" },
@@ -1407,15 +1409,22 @@ static int do_client_address( void )
         for ( int j = 0; j < num; j++ )
             if ( netcode_parse_address( lists[i][j], &token.server_addresses[j] ) != NETCODE_OK ) return 0;
         netcode_write_connect_token( &token, connect_token, sizeof( connect_token ) );
+        netcode_client_disconnect( client );
+        client->config.override_send_and_receive = 0;
         netcode_client_connect( client, connect_token );
-        if ( i == 3 ) netcode_client_update( client, 16.0 );
+        client->config.override_send_and_receive = 1;
+        if ( i == 3 )
+        {
+            client->config.override_send_and_receive = 0;
+            if ( !netcode_client_connect_to_next_server( client ) ) return 0;
+            client->config.override_send_and_receive = 1;
+        }
         int state = netcode_client_state( client );
         printf( "%s state %s address %s\n", names[i], netcode_client_state_name( state ),
                 state == NETCODE_CLIENT_STATE_SENDING_CONNECTION_REQUEST ?
                     ( client->server_address_index == 1 ? "1" : "0" ) : "none" );
     }
     client->socket_holder.ipv4.handle = 0;
-    client->config.override_send_and_receive = 1;
     netcode_client_destroy( client );
     return 1;
 }

@@ -762,7 +762,7 @@ internal static class CoreTests
         ulong currentTimestamp = 1000;
         const ulong MaxLifetime = Protocol.DefaultMaxConnectTokenLifetime;
 
-        int ReadRequest(ulong expire, ulong maxLifetime)
+        int ReadRequest(ulong expire, ulong maxLifetime, ulong minExpire = 0)
         {
             byte[] enc = (byte[])connectTokenData.Clone();
             Check.That(ConnectTokenPrivate.Encrypt(enc, Defines.VersionInfo, TestConstants.TestProtocolId, expire, nonce, key));
@@ -775,6 +775,7 @@ internal static class CoreTests
                 currentTimestamp,
                 hasPrivateKey: true, key,
                 AllAllowed, null,
+                minConnectTokenExpireTimestamp: minExpire,
                 maxConnectTokenLifetime: maxLifetime);
             return r.Type;
         }
@@ -783,6 +784,7 @@ internal static class CoreTests
         Check.That(ReadRequest(currentTimestamp + 2 * MaxLifetime, MaxLifetime) == -1);
         Check.That(ReadRequest(currentTimestamp + MaxLifetime + 1, MaxLifetime) == -1);
         Check.That(ReadRequest(currentTimestamp + MaxLifetime, MaxLifetime) == PacketType.ConnectionRequest);
+        Check.That(ReadRequest(currentTimestamp + MaxLifetime, MaxLifetime, currentTimestamp + MaxLifetime) == -1);
         Check.That(ReadRequest(currentTimestamp + 1, MaxLifetime) == PacketType.ConnectionRequest);
         Check.That(ReadRequest(currentTimestamp, MaxLifetime) == -1);
     }
