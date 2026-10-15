@@ -1283,7 +1283,11 @@ static int do_disconnect_reentry( const char * input_dir )
                 state.name, state.callbacks, state.reason, state.id, state.user,
                 state.server->num_connected_clients, state.server->encryption_manager.num_encryption_mappings,
                 state.server->client_connected[0] ? "connected" : "clear" );
-        if ( strcmp( state.name, "stop" ) == 0 ) netcode_server_start( state.server, 1 );
+        if ( strcmp( state.name, "stop" ) == 0 )
+        {
+            netcode_server_start( state.server, 1 );
+            if ( state.server->num_connected_clients != 0 || state.server->client_connected[0] ) return 0;
+        }
         netcode_server_destroy( state.server );
     }
     return 1;

@@ -938,21 +938,19 @@ internal static class Program
                 server.ProcessPacketAtTimestamp(in from, wire.AsSpan(0, bytes), 1001, 0.1);
                 if (!server.ClientConnected(0)) throw new InvalidOperationException("reentry client was not admitted");
             }
-            try
-            {
-                if (name == "loopback") server.DisconnectLoopbackClient(0);
-                else if (name == "timeout") server.Update(16.2);
-                else server.DisconnectClient(0);
-            }
-            catch (IndexOutOfRangeException)
-            {
-                // The red implementation reaches ClientIndex[-1] after nested cleanup.
-            }
+            if (name == "loopback") server.DisconnectLoopbackClient(0);
+            else if (name == "timeout") server.Update(16.2);
+            else server.DisconnectClient(0);
             int connectedCount = server.NumConnectedClients;
             int mappings = server.NumEncryptionMappings;
             string slot = server.ClientConnected(0) ? "connected" : "clear";
             Console.WriteLine($"{name} callbacks {callbacks} saw {(int)seenReason} {seenId} {seenUser} connected {connectedCount} mappings {mappings} slot {slot}");
-            if (name == "stop") server.Start(1);
+            if (name == "stop")
+            {
+                server.Start(1);
+                if (server.NumConnectedClients != 0 || server.ClientConnected(0))
+                    throw new InvalidOperationException("restart retained a disconnecting slot");
+            }
         }
         return 0;
     }
