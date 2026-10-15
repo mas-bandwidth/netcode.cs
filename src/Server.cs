@@ -730,7 +730,7 @@ namespace Netcode
                 return;
             }
 
-            double expireTime = connectTokenPrivate.TimeoutSeconds >= 0 ? _time + connectTokenPrivate.TimeoutSeconds : -1.0;
+            double expireTime = EncryptionManager.PreconnectExpireTime(_time, connectTokenPrivate.TimeoutSeconds);
 
             if (!_encryptionManager.AddEncryptionMapping(
                     in from,
@@ -937,7 +937,8 @@ namespace Netcode
                 _privateKey,
                 AllowedPackets,
                 clientIndex != -1 ? _clientReplayProtection[clientIndex] : null,
-                _minConnectTokenExpireTimestamp);
+                _minConnectTokenExpireTimestamp,
+                (ulong)_maxConnectTokenLifetime);
 
             if (packet.Type < 0)
                 return;

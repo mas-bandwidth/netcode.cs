@@ -434,7 +434,7 @@ internal static class Hostile
         byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
         byte[] userData = new byte[Protocol.UserDataBytes];
         string[] address = { "127.0.0.1:40000" };
-        Check.That(ConnectTokenGenerator.Generate(address, address, 60, 15, 0x1234, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken));
+        Check.That(ConnectTokenGenerator.Generate(address, address, 30, 15, 0x1234, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken));
 
         client.Connect(connectToken);
 

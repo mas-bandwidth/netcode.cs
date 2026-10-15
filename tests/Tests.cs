@@ -1079,6 +1079,15 @@ internal static class CoreTests
         encryptionManager.SetExpireTime(index, -1.0);
 
         Check.That(encryptionManager.FindEncryptionMapping(in addresses[0], time) == index);
+
+        // preconnect expire time: a positive timeout is the mapping lifetime, otherwise
+        // the bounded preconnect lifetime applies
+
+        Check.That(EncryptionManager.PreconnectExpireTime(100.0, -1) == 110.0);
+        Check.That(EncryptionManager.PreconnectExpireTime(100.0, 0) == 110.0);
+        Check.That(EncryptionManager.PreconnectExpireTime(100.0, 1) == 101.0);
+        Check.That(EncryptionManager.PreconnectExpireTime(100.0, 5) == 105.0);
+        Check.That(EncryptionManager.PreconnectExpireTime(100.0, 30) == 130.0);
     }
 
     public static void TestReplayProtection()
