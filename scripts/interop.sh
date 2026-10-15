@@ -35,6 +35,11 @@ if ! git -C "$NETCODE" merge-base --is-ancestor 5cc4798d HEAD; then
     exit 1
 fi
 
+if ! git -C "$NETCODE" merge-base --is-ancestor 1c58478d HEAD; then
+    echo "INTEROP FAILED: C reference must contain random global sequence and reused-token refusal (1c58478d)."
+    exit 1
+fi
+
 WORK="$(mktemp -d)"
 SERVER_PID=""
 
@@ -120,5 +125,14 @@ $CS drain > "$WORK/cs-drain.txt"
 "$WORK/compat-c" drain > "$WORK/c-drain.txt"
 diff -u "$WORK/c-drain.txt" "$WORK/cs-drain.txt"
 echo "   receive-drain differential matched"
+
+echo "== leg 8: global nonce differential (override transport, boolean properties only)"
+$CS nonces > "$WORK/cs-nonces.txt"
+"$WORK/compat-c" nonces > "$WORK/c-nonces.txt"
+if ! diff -u "$WORK/c-nonces.txt" "$WORK/cs-nonces.txt"; then
+    echo "   global nonce differential differed; first differing lines above"
+    exit 1
+fi
+echo "   global nonce differential matched"
 
 echo "INTEROP GATE PASSED"

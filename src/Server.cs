@@ -355,7 +355,7 @@ namespace Netcode
         /// <summary>The time passed to the most recent Update.</summary>
         public double Time => _time;
 
-        // for tests: the nonce-space invariant (global sequence re-seeded to 2^63 on every start)
+        // for tests: the nonce-space invariant (global sequence re-seeded into the top half on every start)
         internal ulong GlobalSequence
         {
             get => _globalSequence;
@@ -396,7 +396,16 @@ namespace Netcode
             // sequence lives in the top half of the sequence space to keep AEAD nonces
             // disjoint under a shared key. Stop() zeroes it, so it must be re-seeded on
             // every start — otherwise a stopped and restarted server would reuse nonces.
-            _globalSequence = 1UL << 63;
+            //
+            // one connect token carries one server to client key for every server it lists.
+            // two servers with the same global sequence would encrypt their first global
+            // packet under that shared key at the same nonce, so the sequence is drawn at
+            // random in the top half on every start. addition and a bitwise or are the same
+            // here: the offset is masked to 62 bits, so it never carries into bit 63.
+            Span<byte> offsetBytes = stackalloc byte[8];
+            Rng.Fill(offsetBytes);
+            ulong offset = BinaryPrimitives.ReadUInt64LittleEndian(offsetBytes);
+            _globalSequence = (1UL << 63) + (offset & 0x3FFFFFFFFFFFFFFFUL);
 
             for (int i = 0; i < _maxClients; i++)
                 _clientPacketQueue[i].Clear();

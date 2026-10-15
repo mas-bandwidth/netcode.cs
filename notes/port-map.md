@@ -21,7 +21,7 @@ redesign).
 | `netcode_connect_token_entry_t[]` | inside `Server` | constant-time worst-case scan; pending/consumed state, expiry timestamps, and history index carried by the encryption mapping |
 | `netcode_network_simulator_t` | `public sealed class NetworkSimulator` | same xorshift64* RNG, same seed, so loss/jitter sequences match the C library run-for-run |
 | `netcode_client_t` | `public sealed class Client` | states as `public enum ClientState` (same numeric values −6..3) |
-| `netcode_server_t` | `public sealed class Server` | flat per-client arrays, max 256 clients, global sequence seeded `1UL<<63` on start AND stop→start (nonce-space separation — upstream 1.4.0 fix, every seeding site kept) |
+| `netcode_server_t` | `public sealed class Server` | flat per-client arrays, max 256 clients, global sequence seeded to `2^63` plus a random 62-bit offset on every start (nonce-space separation; two servers sharing a token do not share a nonce) |
 | `netcode_init/term` | not needed | no WSAStartup / sodium_init equivalent in .NET; documented |
 | `netcode_client_create_dual` | `Client` ctor with optional second address | same for `Server` |
 | loopback APIs | ported | yojimbo parity |
@@ -113,8 +113,7 @@ token-reuse → full? denied : add-mapping → challenge).
   `most_recent >= SIZE && sequence <= most_recent - SIZE`.
 - Encryption mapping expires after `timeout` seconds without access, or at
   `expire_time` (token timeout after request, cleared to −1 on connect).
-- Global packet sequence starts at `1UL<<63` on every `Server.Start` (nonce
-  disjointness vs per-client sequences starting at 0 under the same key).
+- Global packet sequence starts at `2^63` plus a random 62-bit offset on every `Server.Start` (nonce disjointness vs per-client sequences starting at 0, and vs another server sharing the token's server-to-client key). A client keeps the previous connect token MAC and refuses a reuse with `InvalidConnectToken`.
 - Connect token single-use history: constant-time worst-case scan; pending and
   consumed states; expiry timestamps; pending same-address retransmits only;
   no eviction while entries are unexpired; entry time is never refreshed.

@@ -132,6 +132,8 @@ namespace Netcode
         private ulong _challengeTokenSequence;
         private readonly byte[] _challengeTokenData = new byte[Defines.ChallengeTokenBytes];
         private bool _loopback;
+        private bool _hasPreviousConnectTokenMac;
+        private readonly byte[] _previousConnectTokenMac = new byte[Protocol.MacBytes];
         private bool _disposed;
 
         private readonly byte[] _receiveBuffer = new byte[Defines.MaxPacketBytes];
@@ -344,6 +346,21 @@ namespace Netcode
                 SetState(ClientState.InvalidConnectToken);
                 return;
             }
+
+            // a connect token's keys must encrypt exactly one session. connecting again
+            // with the same token would encrypt from sequence zero under the same client
+            // to server key, repeating an AEAD nonce. the AEAD tag at the end of the
+            // private data is the fingerprint, so the whole token is not stored.
+            ReadOnlySpan<byte> connectTokenMac = _connectToken.PrivateData.AsSpan(Defines.ConnectTokenPrivateBytes - Protocol.MacBytes, Protocol.MacBytes);
+            if (_hasPreviousConnectTokenMac && connectTokenMac.SequenceEqual(_previousConnectTokenMac))
+            {
+                NetcodeLog.Error("error: client connect refused. the connect token was already used by this client\n");
+                SetState(ClientState.InvalidConnectToken);
+                return;
+            }
+
+            connectTokenMac.CopyTo(_previousConnectTokenMac);
+            _hasPreviousConnectTokenMac = true;
 
             _serverAddressIndex = 0;
             _serverAddress = _connectToken.ServerAddresses[0];
