@@ -1273,6 +1273,67 @@ internal static class ClientServerTests
         Check.That(reasonInCallback == DisconnectReason.TimedOut);
     }
 
+    public static void TestServerDisconnectCallbackReentryIsHarmless()
+    {
+        NetworkSimulator simulator = new NetworkSimulator();
+        double time = 0.0;
+        int callbacks = 0;
+        DisconnectReason seenReason = DisconnectReason.None;
+        ulong seenId = 0;
+        byte seenUser = 0;
+        var config = CreateServerConfig(simulator);
+        Server? serverRef = null;
+        Action<int>? onDisconnect = null;
+        config.SendLoopbackPacket = (int slot, ReadOnlySpan<byte> data, ulong sequence) => { };
+        config.OnClientConnectDisconnect = (slot, connected) =>
+        {
+            if (connected) return;
+            callbacks++;
+            seenReason = serverRef!.ClientDisconnectReason(slot);
+            seenId = serverRef.ClientId(slot);
+            seenUser = serverRef.ClientUserData(slot)[0];
+            // Cap recursion in the red test so the defect fails as a normal assertion/exception.
+            if (callbacks == 1) onDisconnect?.Invoke(slot);
+        };
+
+        using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
+        using var server = new Server("[::1]:40000", config, time);
+        serverRef = server;
+        StartServerForTests(server, 1);
+        client.Connect(GenerateConnectToken("[::1]:40000", 0xA1));
+        ConnectLoop(simulator, client, server, ref time, 0.1);
+        Check.That(client.State == ClientState.Connected);
+        byte expectedUser = server.ClientUserData(0)[0];
+
+        onDisconnect = slot => server.DisconnectClient(slot);
+        server.DisconnectClient(0);
+        Check.That(callbacks == 1);
+        Check.That(seenReason == DisconnectReason.ServerDisconnect);
+        Check.That(seenId == 0xA1 && seenUser == expectedUser);
+        Check.That(server.NumConnectedClients == 0 && !server.ClientConnected(0));
+
+        client.Disconnect();
+        client.Connect(GenerateConnectToken("[::1]:40000", 0xA2));
+        ConnectLoop(simulator, client, server, ref time, 0.1);
+        Check.That(client.State == ClientState.Connected);
+        callbacks = 0;
+        onDisconnect = _ => server.Stop();
+        server.DisconnectClient(0);
+        Check.That(callbacks == 1 && !server.Running);
+        StartServerForTests(server, 1);
+        Check.That(server.NumConnectedClients == 0 && !server.ClientConnected(0));
+
+        byte[] loopbackUser = new byte[Protocol.UserDataBytes];
+        loopbackUser[0] = 0x5A;
+        server.ConnectLoopbackClient(0, 0xA3, loopbackUser);
+        callbacks = 0;
+        onDisconnect = slot => server.DisconnectLoopbackClient(slot);
+        server.DisconnectLoopbackClient(0);
+        Check.That(callbacks == 1 && seenReason == DisconnectReason.ServerDisconnect);
+        Check.That(seenId == 0xA3 && seenUser == 0x5A);
+        Check.That(server.NumConnectedClients == 0 && !server.ClientConnected(0));
+    }
+
     public static void TestClientReconnect()
     {
         NetworkSimulator simulator = CreateSimulator();

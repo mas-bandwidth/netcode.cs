@@ -1275,6 +1275,10 @@ namespace Netcode
 
         public bool AlreadyReceived(ulong sequence)
         {
+            // The top sequence marks an empty slot, so it is always already received.
+            if (sequence == ulong.MaxValue)
+                return true;
+
             // written so it cannot overflow: "sequence + BUFFER_SIZE <= most_recent"
             // wraps for sequence values near UINT64_MAX and falsely rejects them
 

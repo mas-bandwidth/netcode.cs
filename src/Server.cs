@@ -207,6 +207,7 @@ namespace Netcode
         private readonly bool[] _clientLoopback = new bool[Protocol.MaxClients];
         private readonly bool[] _clientConfirmed = new bool[Protocol.MaxClients];
         private readonly DisconnectReason[] _clientDisconnectReason = new DisconnectReason[Protocol.MaxClients];
+        private readonly bool[] _clientDisconnecting = new bool[Protocol.MaxClients];
         private readonly int[] _clientEncryptionIndex = new int[Protocol.MaxClients];
         private readonly ulong[] _clientId = new ulong[Protocol.MaxClients];
         private readonly ulong[] _clientSequence = new ulong[Protocol.MaxClients];
@@ -428,8 +429,18 @@ namespace Netcode
             // loopback clients are not disconnected above, but they must not survive a server stop
             for (int i = 0; i < _maxClients; i++)
             {
-                if (_clientConnected[i] && _clientLoopback[i])
+                if (_clientConnected[i] && _clientLoopback[i] && !_clientDisconnecting[i])
                     DisconnectLoopbackClient(i);
+            }
+
+            // A callback that called Stop already ran for its slot. Clear it without calling back again.
+            for (int i = 0; i < _maxClients; i++)
+            {
+                if (_clientConnected[i])
+                {
+                    _clientReplayProtection[i].Reset();
+                    ResetClientSlot(i);
+                }
             }
 
             _running = false;
@@ -559,6 +570,7 @@ namespace Netcode
             _clientPacketQueue[clientIndex].Clear();
 
             _clientConnected[clientIndex] = false;
+            _clientDisconnecting[clientIndex] = false;
             _clientLoopback[clientIndex] = false;
             _clientConfirmed[clientIndex] = false;
             _clientId[clientIndex] = 0;
@@ -579,7 +591,12 @@ namespace Netcode
             // record why before the callback fires, so the reason can be queried from inside it
             _clientDisconnectReason[clientIndex] = disconnectReason;
 
+            _clientDisconnecting[clientIndex] = true;
+
             _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
+
+            if (!_running || !_clientConnected[clientIndex])
+                return;
 
             if (sendDisconnectPackets)
             {
@@ -596,7 +613,8 @@ namespace Netcode
 
             _clientReplayProtection[clientIndex].Reset();
 
-            _encryptionManager.ClientIndex[_clientEncryptionIndex[clientIndex]] = -1;
+            if (_clientEncryptionIndex[clientIndex] >= 0)
+                _encryptionManager.ClientIndex[_clientEncryptionIndex[clientIndex]] = -1;
 
             _encryptionManager.RemoveEncryptionMapping(in _clientAddress[clientIndex], _time);
 
@@ -618,6 +636,9 @@ namespace Netcode
             if (_clientLoopback[clientIndex])
                 return;
 
+            if (_clientDisconnecting[clientIndex])
+                return;
+
             DisconnectClientInternal(clientIndex, sendDisconnectPackets: true, DisconnectReason.ServerDisconnect);
         }
 
@@ -629,7 +650,7 @@ namespace Netcode
 
             for (int i = 0; i < _maxClients; i++)
             {
-                if (_clientConnected[i] && !_clientLoopback[i])
+                if (_clientConnected[i] && !_clientLoopback[i] && !_clientDisconnecting[i])
                     DisconnectClientInternal(i, sendDisconnectPackets: true, DisconnectReason.ServerDisconnect);
             }
         }
@@ -1263,11 +1284,19 @@ namespace Netcode
             if (!_clientConnected[clientIndex] || !_clientLoopback[clientIndex])
                 return;
 
+            if (_clientDisconnecting[clientIndex])
+                return;
+
             NetcodeLog.Info($"server disconnected loopback client {clientIndex}\n");
 
             _clientDisconnectReason[clientIndex] = DisconnectReason.ServerDisconnect;
 
+            _clientDisconnecting[clientIndex] = true;
+
             _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
+
+            if (!_running || !_clientConnected[clientIndex])
+                return;
 
             ResetClientSlot(clientIndex);
         }
