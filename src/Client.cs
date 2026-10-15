@@ -251,6 +251,8 @@ namespace Netcode
         public ulong NextPacketSequence => _sequence;
         /// <summary>The server address the client is connecting or connected to.</summary>
         public Address ServerAddress => _serverAddress;
+        internal int ServerAddressIndex => _serverAddressIndex;
+        internal Func<AddressType, bool>? SocketAvailabilityOverride { get; set; }
 
         /// <summary>The port the client socket is bound to.</summary>
         public ushort Port =>
@@ -345,6 +347,8 @@ namespace Netcode
 
         private bool HasSocketFor(AddressType addressType)
         {
+            if (SocketAvailabilityOverride != null)
+                return SocketAvailabilityOverride(addressType);
             return CanReach(addressType, _socketIpv4 != null, _socketIpv6 != null,
                 _config.Simulator != null || _config.OverrideSendAndReceive);
         }
@@ -680,14 +684,21 @@ namespace Netcode
 
         private bool ConnectToNextServer()
         {
+            if (_serverAddressIndex + 1 >= _connectToken.NumServerAddresses)
+            {
+                NetcodeLog.Debug("client has no more servers to connect to\n");
+                return false;
+            }
+
             int index = _serverAddressIndex + 1;
             while (index < _connectToken.NumServerAddresses && !HasSocketFor(_connectToken.ServerAddresses[index].Type))
                 index++;
 
             if (index >= _connectToken.NumServerAddresses)
             {
-                NetcodeLog.Debug("client has no more servers to connect to\n");
-                return false;
+                NetcodeLog.Error("error: client connect refused. no server address in the connect token can be reached\n");
+                SetState(ClientState.InvalidConnectToken);
+                return true;
             }
 
             _serverAddressIndex = index;

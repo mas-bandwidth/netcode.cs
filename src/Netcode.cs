@@ -1682,7 +1682,7 @@ namespace Netcode
             if (index == -1)
                 return Span<byte>.Empty;
             return ReceiveKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes);
-}
+        }
 
         public int GetTimeout(int index)
         {

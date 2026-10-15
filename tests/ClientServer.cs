@@ -784,21 +784,47 @@ internal static class ClientServerTests
         // an IPv4-only client given a token whose only server address is IPv6 must
         // refuse it; a token with a reachable IPv4 address must settle on it
 
-        using var client = new Client("0.0.0.0:50000", null, 0.0);
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> data) => 0,
+        };
+        using var client = new Client("0.0.0.0:50000", config, 0.0);
+        client.SocketAvailabilityOverride = type => Client.CanReach(type, true, false, false);
 
-        byte[] token6 = GenerateConnectToken("[::1]:40000", 0x1);
+        byte[] Token(string[] addresses, ulong clientId)
+        {
+            Address[] parsed = Array.ConvertAll(addresses, Address.Parse);
+            byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
+            nonce[0] = (byte)clientId;
+            byte[] token = new byte[Protocol.ConnectTokenBytes];
+            Check.That(ConnectTokenGenerator.GenerateInternal(parsed, parsed, 1000, 1030, 15,
+                clientId, TestConstants.TestProtocolId, TestConstants.PrivateKey,
+                new byte[Protocol.UserDataBytes], nonce, token));
+            return token;
+        }
+
+        byte[] token6 = Token(new[] { "[::1]:40000" }, 0x1);
         client.Connect(token6);
         Check.That(client.State == ClientState.InvalidConnectToken);
 
-        byte[] tokenMixed = GenerateConnectToken(new[] { "[::1]:40000", "127.0.0.1:40000" }, 0x2);
+        byte[] tokenMixed = Token(new[] { "[::1]:40000", "127.0.0.1:40000" }, 0x2);
         client.Connect(tokenMixed);
         Check.That(client.State == ClientState.SendingConnectionRequest);
+        Check.That(client.ServerAddressIndex == 1);
         Check.That(client.ServerAddress.Equals(Address.Parse("127.0.0.1:40000")));
 
-        byte[] token4 = GenerateConnectToken("127.0.0.1:40000", 0x3);
+        byte[] token4 = Token(new[] { "127.0.0.1:40000" }, 0x3);
         client.Connect(token4);
         Check.That(client.State == ClientState.SendingConnectionRequest);
+        Check.That(client.ServerAddressIndex == 0);
         Check.That(client.ServerAddress.Equals(Address.Parse("127.0.0.1:40000")));
+
+        byte[] token4Then6 = Token(new[] { "127.0.0.1:40000", "[::1]:40000" }, 0x4);
+        client.Connect(token4Then6);
+        client.Update(16.0);
+        Check.That(client.State == ClientState.InvalidConnectToken);
     }
 
     public static void TestClientErrorConnectionTimedOut()
