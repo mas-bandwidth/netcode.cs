@@ -753,6 +753,14 @@ internal static class CoreTests
         var outputToken = new ConnectTokenPrivate();
         Check.That(outputToken.Read(buffer.AsSpan(result.DataOffset, result.DataLength)));
         Check.That(outputToken.ClientId == TestConstants.TestClientId);
+
+        // An expiry equal to the restart floor is still from the previous server lifetime.
+        bytesWritten = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo,
+            TestConstants.TestProtocolId, expireTimestamp, nonce, encryptedConnectTokenData);
+        result = PacketIO.ReadPacket(buffer.AsSpan(0, bytesWritten), true,
+            new byte[Protocol.KeyBytes], TestConstants.TestProtocolId, expireTimestamp - 1,
+            true, key, AllAllowed, null, expireTimestamp);
+        Check.That(result.Type == -1);
     }
 
     public static void TestEmptyPacket(int packetType)
@@ -832,6 +840,16 @@ internal static class CoreTests
         Check.That(result.Type == PacketType.ConnectionKeepAlive);
         Check.That(result.DataLength == 8);
         Check.That(buffer.AsSpan(result.DataOffset, 8).SequenceEqual(packetData));
+
+        // UINT64_MAX is the empty replay-slot marker, so it is never admitted.
+        var replay = new ReplayProtection();
+        replay.AdvanceSequence(ulong.MaxValue);
+        bytesWritten = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionKeepAlive,
+            packetData, ulong.MaxValue, packetKey, TestConstants.TestProtocolId);
+        result = PacketIO.ReadPacket(buffer.AsSpan(0, bytesWritten), true, packetKey,
+            TestConstants.TestProtocolId, 1000, false, ReadOnlySpan<byte>.Empty,
+            AllAllowed, replay);
+        Check.That(result.Type == -1);
     }
 
     public static void TestConnectionPayloadPacket()
@@ -1108,6 +1126,11 @@ internal static class CoreTests
         // while packets that fell out of the window are rejected as before
 
         Check.That(replayProtection.AlreadyReceived(ulong.MaxValue - 1 - Defines.ReplayProtectionBufferSize));
+
+        // The maximum sequence is the empty-slot sentinel and must always be rejected.
+        replayProtection.Reset();
+        replayProtection.AdvanceSequence(ulong.MaxValue);
+        Check.That(replayProtection.AlreadyReceived(ulong.MaxValue));
     }
 
     public static void TestNetworkSimulatorDeterminism()
