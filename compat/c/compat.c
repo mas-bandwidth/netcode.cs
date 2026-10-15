@@ -1289,6 +1289,79 @@ static int do_disconnect_reentry( const char * input_dir )
     return 1;
 }
 
+static int do_replay_floor( const char * input_dir )
+{
+    netcode_log_level( NETCODE_LOG_LEVEL_NONE );
+    uint64_t sequences[] = { 0, 1, 255, 256, 257, UINT64_MAX - 257,
+        UINT64_MAX - 256, UINT64_MAX - 255, UINT64_MAX - 1, UINT64_MAX };
+    struct netcode_replay_protection_t replay;
+    netcode_replay_protection_reset( &replay );
+    for ( int i = 0; i < 10; i++ )
+    {
+        uint64_t sequence = sequences[i];
+        printf( "before %" PRIu64 " -> %d\n", sequence, netcode_replay_protection_already_received( &replay, sequence ) );
+        netcode_replay_protection_advance_sequence( &replay, sequence );
+        printf( "after %" PRIu64 " -> %d\n", sequence, netcode_replay_protection_already_received( &replay, sequence ) );
+        for ( int j = 0; j < i; j++ )
+            printf( "probe %" PRIu64 " -> %d\n", sequences[j], netcode_replay_protection_already_received( &replay, sequences[j] ) );
+    }
+
+    uint8_t key[NETCODE_KEY_BYTES];
+    fill_pattern( key, sizeof( key ), 5 );
+    struct netcode_connection_keep_alive_packet_t keepalive;
+    memset( &keepalive, 0, sizeof( keepalive ) );
+    keepalive.packet_type = NETCODE_CONNECTION_KEEP_ALIVE_PACKET;
+    keepalive.client_index = 10;
+    keepalive.max_clients = 16;
+    uint8_t wire[NETCODE_MAX_PACKET_BYTES];
+    int bytes = netcode_write_packet( &keepalive, wire, sizeof( wire ), UINT64_MAX, key, SESSION_PROTOCOL_ID );
+    if ( bytes <= 0 || !write_file( input_dir, "keepalive-max.bin", wire, bytes ) ) return 0;
+    uint8_t allowed[NETCODE_CONNECTION_NUM_PACKETS] = { 0 };
+    allowed[NETCODE_CONNECTION_KEEP_ALIVE_PACKET] = 1;
+    netcode_replay_protection_reset( &replay );
+    netcode_replay_protection_advance_sequence( &replay, UINT64_MAX );
+    uint64_t packet_sequence;
+    void * packet = netcode_read_packet( wire, bytes, &packet_sequence, key, SESSION_PROTOCOL_ID,
+        1000, 0, UINT64_MAX, NULL, allowed, &replay, NULL, NULL );
+    printf( "keepalive %" PRIu64 " -> %s\n", UINT64_MAX, packet ? "accepted" : "refused" );
+    if ( packet ) free( packet );
+
+    struct netcode_connect_token_t token;
+    scenario_token( &token, 0x1111, 0x5a, 1 );
+    uint8_t private_token[NETCODE_CONNECT_TOKEN_PRIVATE_BYTES];
+    memcpy( private_token, token.private_data, sizeof( private_token ) );
+    if ( netcode_decrypt_connect_token_private( private_token, sizeof( private_token ),
+            token.version_info, token.protocol_id, token.expire_timestamp,
+            token.nonce, session_private_key ) != NETCODE_OK ) return 0;
+    uint64_t expiries[] = { 1029, 1030, 1031 };
+    memset( allowed, 0, sizeof( allowed ) );
+    allowed[NETCODE_CONNECTION_REQUEST_PACKET] = 1;
+    for ( int i = 0; i < 3; i++ )
+    {
+        uint64_t expiry = expiries[i];
+        struct netcode_connection_request_packet_t request;
+        memset( &request, 0, sizeof( request ) );
+        request.packet_type = NETCODE_CONNECTION_REQUEST_PACKET;
+        memcpy( request.version_info, token.version_info, NETCODE_VERSION_INFO_BYTES );
+        request.protocol_id = token.protocol_id;
+        request.connect_token_expire_timestamp = expiry;
+        memcpy( request.connect_token_nonce, token.nonce, NETCODE_CONNECT_TOKEN_NONCE_BYTES );
+        memcpy( request.connect_token_data, private_token, sizeof( private_token ) );
+        if ( netcode_encrypt_connect_token_private( request.connect_token_data,
+                NETCODE_CONNECT_TOKEN_PRIVATE_BYTES, request.version_info, request.protocol_id,
+                expiry, request.connect_token_nonce, session_private_key ) != NETCODE_OK ) return 0;
+        bytes = netcode_write_packet( &request, wire, sizeof( wire ), 0, key, SESSION_PROTOCOL_ID );
+        char name[32];
+        snprintf( name, sizeof( name ), "request-%" PRIu64 ".bin", expiry );
+        if ( bytes <= 0 || !write_file( input_dir, name, wire, bytes ) ) return 0;
+        packet = netcode_read_packet( wire, bytes, &packet_sequence, NULL, SESSION_PROTOCOL_ID,
+            1000, 1030, 31, session_private_key, allowed, NULL, NULL, NULL );
+        printf( "request %" PRIu64 " -> %s\n", expiry, packet ? "accepted" : "refused" );
+        if ( packet ) free( packet );
+    }
+    return 1;
+}
+
 /*
     Global nonce differential (subcommand "nonces"). Two servers started from
     fresh, then one stopped and started again, plus a client that connects,
@@ -1548,6 +1621,8 @@ int main( int argc, char ** argv )
         ok = do_challenge_mapping( argv[2] );
     else if ( argc == 3 && strcmp( argv[1], "disconnect-reentry" ) == 0 )
         ok = do_disconnect_reentry( argv[2] );
+    else if ( argc == 3 && strcmp( argv[1], "replay-floor" ) == 0 )
+        ok = do_replay_floor( argv[2] );
     else if ( argc == 2 && strcmp( argv[1], "token-lifetimes" ) == 0 )
         ok = do_token_lifetimes();
     else if ( argc == 2 && strcmp( argv[1], "client-address" ) == 0 )

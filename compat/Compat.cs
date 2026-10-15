@@ -1091,6 +1091,61 @@ internal static class Program
         return 0;
     }
 
+    private static int DoReplayFloor(string inputDir)
+    {
+        NetcodeLog.Level = LogLevel.None;
+        ulong[] sequences = { 0, 1, 255, 256, 257, ulong.MaxValue - 257,
+            ulong.MaxValue - 256, ulong.MaxValue - 255, ulong.MaxValue - 1, ulong.MaxValue };
+        var replay = new ReplayProtection();
+        for (int i = 0; i < sequences.Length; i++)
+        {
+            ulong sequence = sequences[i];
+            Console.WriteLine($"before {sequence} -> {(replay.AlreadyReceived(sequence) ? 1 : 0)}");
+            replay.AdvanceSequence(sequence);
+            Console.WriteLine($"after {sequence} -> {(replay.AlreadyReceived(sequence) ? 1 : 0)}");
+            for (int j = 0; j < i; j++)
+                Console.WriteLine($"probe {sequences[j]} -> {(replay.AlreadyReceived(sequences[j]) ? 1 : 0)}");
+        }
+
+        byte[] key = new byte[Protocol.KeyBytes];
+        FillPattern(key, 5);
+        byte[] payload = new byte[8];
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(0, 4), 10);
+        BinaryPrimitives.WriteUInt32LittleEndian(payload.AsSpan(4, 4), 16);
+        byte[] wire = new byte[Defines.MaxPacketBytes];
+        int bytes = PacketIO.WriteEncryptedPacket(wire, PacketType.ConnectionKeepAlive,
+            payload, ulong.MaxValue, key, SessionProtocolId);
+        File.WriteAllBytes(Path.Combine(inputDir, "keepalive-max.bin"), wire.AsSpan(0, bytes).ToArray());
+        bool[] allowed = new bool[PacketType.NumPackets];
+        allowed[PacketType.ConnectionKeepAlive] = true;
+        replay.Reset();
+        replay.AdvanceSequence(ulong.MaxValue);
+        ReadPacketResult result = PacketIO.ReadPacket(wire.AsSpan(0, bytes), true, key,
+            SessionProtocolId, 1000, false, ReadOnlySpan<byte>.Empty, allowed, replay);
+        Console.WriteLine($"keepalive {ulong.MaxValue} -> {(result.Type < 0 ? "refused" : "accepted")}");
+
+        ConnectTokenData token = ScenarioToken(0x1111, 0x5A, 1);
+        byte[] privateToken = (byte[])token.PrivateData.Clone();
+        if (!ConnectTokenPrivate.Decrypt(privateToken, token.VersionInfo, token.ProtocolId,
+                token.ExpireTimestamp, token.Nonce, SessionPrivateKey)) return 1;
+        ulong[] expiries = { 1029, 1030, 1031 };
+        Array.Clear(allowed);
+        allowed[PacketType.ConnectionRequest] = true;
+        foreach (ulong expiry in expiries)
+        {
+            byte[] encrypted = (byte[])privateToken.Clone();
+            if (!ConnectTokenPrivate.Encrypt(encrypted, token.VersionInfo, token.ProtocolId,
+                    expiry, token.Nonce, SessionPrivateKey)) return 1;
+            bytes = PacketIO.WriteConnectionRequestPacket(wire, token.VersionInfo,
+                token.ProtocolId, expiry, token.Nonce, encrypted);
+            File.WriteAllBytes(Path.Combine(inputDir, $"request-{expiry}.bin"), wire.AsSpan(0, bytes).ToArray());
+            result = PacketIO.ReadPacket(wire.AsSpan(0, bytes), true, ReadOnlySpan<byte>.Empty,
+                SessionProtocolId, 1000, true, SessionPrivateKey, allowed, null, 1030, 31);
+            Console.WriteLine($"request {expiry} -> {(result.Type == PacketType.ConnectionRequest ? "accepted" : "refused")}");
+        }
+        return 0;
+    }
+
     private static int Main(string[] args)
     {
         NetcodeLog.Level = LogLevel.Error;
@@ -1109,6 +1164,7 @@ internal static class Program
             ["challenge-mapping", var inputDir] => DoChallengeMapping(inputDir),
             ["token-lifetimes"] => DoTokenLifetimes(),
             ["client-address"] => DoClientAddress(),
+            ["replay-floor", var inputDir] => DoReplayFloor(inputDir),
             _ => Usage(),
         };
     }

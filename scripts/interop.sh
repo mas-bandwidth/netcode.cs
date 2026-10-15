@@ -173,4 +173,17 @@ if ! diff -u "$WORK/c-reentry.txt" "$WORK/cs-reentry.txt"; then
 fi
 echo "   disconnect callback reentry differential matched"
 
+echo "== leg 12: replay sentinel and restart floor differential (fixed packets)"
+mkdir "$WORK/c-replay" "$WORK/cs-replay"
+$CS replay-floor "$WORK/cs-replay" > "$WORK/cs-replay.txt"
+"$WORK/compat-c" replay-floor "$WORK/c-replay" > "$WORK/c-replay.txt"
+for f in keepalive-max.bin request-1029.bin request-1030.bin request-1031.bin; do
+    cmp "$WORK/c-replay/$f" "$WORK/cs-replay/$f"
+done
+if ! diff -u "$WORK/c-replay.txt" "$WORK/cs-replay.txt"; then
+    echo "   replay/floor differential differed; first differing lines above"
+    exit 1
+fi
+echo "   replay/floor differential matched"
+
 echo "INTEROP GATE PASSED"
