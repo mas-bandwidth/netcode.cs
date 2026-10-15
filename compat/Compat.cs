@@ -949,11 +949,145 @@ internal static class Program
                 // The red implementation reaches ClientIndex[-1] after nested cleanup.
             }
             int connectedCount = server.NumConnectedClients;
-            int mappings = server.EncryptionMappingCountForTest;
+            int mappings = server.NumEncryptionMappings;
             string slot = server.ClientConnected(0) ? "connected" : "clear";
             Console.WriteLine($"{name} callbacks {callbacks} saw {(int)seenReason} {seenId} {seenUser} connected {connectedCount} mappings {mappings} slot {slot}");
             if (name == "stop") server.Start(1);
         }
+        return 0;
+    }
+
+    private static int DoTokenLifetimes()
+    {
+        NetcodeLog.Level = LogLevel.None;
+        byte[] sent = Array.Empty<byte>();
+        var config = new ServerConfig { ProtocolId = SessionProtocolId, OverrideSendAndReceive = true };
+        SessionPrivateKey.CopyTo(config.PrivateKey, 0);
+        config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => sent = data.ToArray();
+        config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+        using var server = new Server("127.0.0.1:40000", config, 0.0);
+        server.Start(4);
+        server.SetConnectTokenExpiryFloorForTest(1000);
+        Address x = Address.Parse("127.0.0.1:50000");
+
+        ConnectTokenData Token(int timeout)
+        {
+            ConnectTokenData token = ScenarioToken(0x1111, 0xA1, 1);
+            if (!ConnectTokenPrivate.Decrypt(token.PrivateData, token.VersionInfo, token.ProtocolId,
+                    token.ExpireTimestamp, token.Nonce, SessionPrivateKey)) throw new InvalidOperationException();
+            var privateToken = new ConnectTokenPrivate();
+            if (!privateToken.Read(token.PrivateData)) throw new InvalidOperationException();
+            privateToken.TimeoutSeconds = timeout;
+            privateToken.Write(token.PrivateData);
+            if (!ConnectTokenPrivate.Encrypt(token.PrivateData, token.VersionInfo, token.ProtocolId,
+                    token.ExpireTimestamp, token.Nonce, SessionPrivateKey)) throw new InvalidOperationException();
+            token.TimeoutSeconds = timeout;
+            return token;
+        }
+
+        void Request(in Address from, ConnectTokenData token, double logicalTime)
+        {
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteConnectionRequestPacket(wire, token.VersionInfo, token.ProtocolId,
+                token.ExpireTimestamp, token.Nonce, token.PrivateData);
+            server.ProcessPacketAtTimestamp(in from, wire.AsSpan(0, bytes), 1001, logicalTime);
+        }
+
+        foreach (int timeout in new[] { -1, 0, 1, 5, 30 })
+        {
+            ConnectTokenData token = Token(timeout);
+            Request(in x, token, 0.0);
+            int offset = -1;
+            for (int t = 0; t <= 40; t++)
+            {
+                server.Update(t);
+                if (server.NumEncryptionMappings == 0) { offset = t; break; }
+            }
+            Console.WriteLine($"timeout {timeout} -> {(offset < 0 ? "never" : offset.ToString())}");
+            server.Stop();
+            server.Start(4);
+            server.SetConnectTokenExpiryFloorForTest(1000);
+
+            Request(in x, token, 0.0);
+            byte[] challenge = (byte[])sent.Clone();
+            bool[] allowed = new bool[PacketType.NumPackets];
+            allowed[PacketType.ConnectionChallenge] = true;
+            ReadPacketResult packet = PacketIO.ReadPacket(challenge, true, token.ServerToClientKey,
+                SessionProtocolId, 1001, false, ReadOnlySpan<byte>.Empty, allowed, null);
+            if (packet.Type != PacketType.ConnectionChallenge) return 1;
+            byte[] responseData = challenge.AsSpan(packet.DataOffset, packet.DataLength).ToArray();
+            byte[] response = new byte[Defines.MaxPacketBytes];
+            int responseBytes = PacketIO.WriteEncryptedPacket(response, PacketType.ConnectionResponse,
+                responseData, 1, token.ClientToServerKey, SessionProtocolId);
+            server.Update(0.1);
+            server.ProcessPacketAtTimestamp(in x, response.AsSpan(0, responseBytes), 1001, 0.1);
+            Console.WriteLine($"response {timeout} -> {(server.NumConnectedClients == 1 ? "connects" : "refused")}");
+            server.Stop();
+            server.Start(4);
+            server.SetConnectTokenExpiryFloorForTest(1000);
+        }
+
+        ulong[] expiries = { ulong.MaxValue, 1060, 1031, 1030, 1030, 1001, 1000 };
+        ulong[] floors = { 1000, 1000, 1000, 1000, 1030, 1000, 1000 };
+        string[] expiryNames = { "max", "plus60", "plus31", "plus30", "floor", "plus1", "expired" };
+        ConnectTokenData expiryToken = Token(15);
+        for (int i = 0; i < expiries.Length; i++)
+        {
+            byte[] privateData = (byte[])expiryToken.PrivateData.Clone();
+            if (!ConnectTokenPrivate.Decrypt(privateData, expiryToken.VersionInfo, expiryToken.ProtocolId,
+                    expiryToken.ExpireTimestamp, expiryToken.Nonce, SessionPrivateKey)) return 1;
+            if (!ConnectTokenPrivate.Encrypt(privateData, expiryToken.VersionInfo, expiryToken.ProtocolId,
+                    expiries[i], expiryToken.Nonce, SessionPrivateKey)) return 1;
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteConnectionRequestPacket(wire, expiryToken.VersionInfo,
+                expiryToken.ProtocolId, expiries[i], expiryToken.Nonce, privateData);
+            bool[] allowed = new bool[PacketType.NumPackets];
+            allowed[PacketType.ConnectionRequest] = true;
+            ReadPacketResult packet = PacketIO.ReadPacket(wire.AsSpan(0, bytes), true,
+                ReadOnlySpan<byte>.Empty, SessionProtocolId, 1000, true,
+                SessionPrivateKey, allowed, null, floors[i], 30);
+            Console.WriteLine($"expiry {expiryNames[i]} -> {(packet.Type == PacketType.ConnectionRequest ? "accepted" : "refused")}");
+        }
+
+        return 0;
+    }
+
+    private static int DoClientAddress()
+    {
+        NetcodeLog.Level = LogLevel.None;
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> data) => 0,
+        };
+        using var client = new Client("0.0.0.0:50000", config, 0.0);
+        client.SocketAvailabilityOverride = type => Client.CanReach(type, true, false, false);
+
+        (string name, string[] addresses)[] cases =
+        {
+            ("v6", new[] { "[::1]:40000" }),
+            ("v6v4", new[] { "[::1]:40000", "127.0.0.1:40000" }),
+            ("v4", new[] { "127.0.0.1:40000" }),
+            ("v4v6", new[] { "127.0.0.1:40000", "[::1]:40000" }),
+        };
+        for (int i = 0; i < cases.Length; i++)
+        {
+            (string name, string[] addresses) = cases[i];
+            ConnectTokenData connectToken = ScenarioToken(0x1111, 0xA1, i + 1);
+            connectToken.NumServerAddresses = addresses.Length;
+            for (int j = 0; j < addresses.Length; j++)
+                connectToken.ServerAddresses[j] = Address.Parse(addresses[j]);
+            byte[] token = new byte[Protocol.ConnectTokenBytes];
+            connectToken.Write(token);
+            client.Connect(token);
+            if (name == "v4v6" && !client.ConnectToNextServer()) return 1;
+            int index = client.State == ClientState.SendingConnectionRequest
+                ? client.ServerAddressIndex
+                : -1;
+            Console.WriteLine($"{name} state {Client.StateName(client.State)} address {(index < 0 ? "none" : index.ToString())}");
+        }
+
         return 0;
     }
 
@@ -973,6 +1107,8 @@ internal static class Program
             ["nonces"] => DoNonces(),
             ["disconnect-reentry", var inputDir] => DoDisconnectReentry(inputDir),
             ["challenge-mapping", var inputDir] => DoChallengeMapping(inputDir),
+            ["token-lifetimes"] => DoTokenLifetimes(),
+            ["client-address"] => DoClientAddress(),
             _ => Usage(),
         };
     }

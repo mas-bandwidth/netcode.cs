@@ -4,7 +4,7 @@
 #   scripts/interop.sh [path-to-netcode-clone]
 #
 # Builds the C half of the compat harness against the REAL netcode.c (plus its
-# vendored libsodium), then runs four legs:
+# vendored libsodium), then runs ten legs:
 #
 #   1. golden byte identity — both sides write the same token/packet goldens from
 #      the same fixed keys/nonces/timestamps; every file must be byte identical.
@@ -37,6 +37,12 @@ fi
 
 if ! git -C "$NETCODE" merge-base --is-ancestor 1c58478d HEAD; then
     echo "INTEROP FAILED: C reference must contain random global sequence and reused-token refusal (1c58478d)."
+    exit 1
+fi
+
+if ! git -C "$NETCODE" merge-base --is-ancestor 067b1959 HEAD ||
+   ! git -C "$NETCODE" merge-base --is-ancestor 39f04965 HEAD; then
+    echo "INTEROP FAILED: C reference must contain both token-lifetime and socket-family fixes."
     exit 1
 fi
 
@@ -135,7 +141,25 @@ if ! diff -u "$WORK/c-nonces.txt" "$WORK/cs-nonces.txt"; then
 fi
 echo "   global nonce differential matched"
 
-echo "== leg 9: disconnect callback reentry differential (fixed packets, override transport)"
+echo "== leg 9: token-lifetimes differential (preconnect mapping lifetime)"
+$CS token-lifetimes > "$WORK/cs-lifetimes.txt"
+"$WORK/compat-c" token-lifetimes > "$WORK/c-lifetimes.txt"
+if ! diff -u "$WORK/c-lifetimes.txt" "$WORK/cs-lifetimes.txt"; then
+    echo "   token-lifetimes differential differed; first differing lines above"
+    exit 1
+fi
+echo "   token-lifetimes differential matched"
+
+echo "== leg 10: client-address differential (socket-family refusal)"
+$CS client-address > "$WORK/cs-client-address.txt"
+"$WORK/compat-c" client-address > "$WORK/c-client-address.txt"
+if ! diff -u "$WORK/c-client-address.txt" "$WORK/cs-client-address.txt"; then
+    echo "   client-address differential differed; first differing lines above"
+    exit 1
+fi
+echo "   client-address differential matched"
+
+echo "== leg 11: disconnect callback reentry differential (fixed packets, override transport)"
 mkdir "$WORK/c-reentry" "$WORK/cs-reentry"
 $CS disconnect-reentry "$WORK/cs-reentry" > "$WORK/cs-reentry.txt"
 "$WORK/compat-c" disconnect-reentry "$WORK/c-reentry" > "$WORK/c-reentry.txt"

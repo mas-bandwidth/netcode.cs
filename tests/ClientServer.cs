@@ -45,6 +45,16 @@ internal static class ClientServerTests
         return config;
     }
 
+    private static void StartServerForTests(Server server, int maxClients)
+    {
+        server.Start(maxClients);
+        // Session tests mint tokens in the server-start second. Place their test
+        // floor one second earlier so a 30-second token can exercise the session;
+        // the exact floor boundary has a separate packet-reader regression test.
+        server.SetConnectTokenExpiryFloorForTest(
+            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + Protocol.DefaultMaxConnectTokenLifetime - 1);
+    }
+
     private static Server OverrideServer(string address)
     {
         var config = new ServerConfig
@@ -147,7 +157,7 @@ internal static class ClientServerTests
 
         Check.That(server.GlobalSequence == 1UL << 63);
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         Check.That(server.GlobalSequence >= 1UL << 63);
 
@@ -155,7 +165,7 @@ internal static class ClientServerTests
 
         server.Stop();
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         Check.That(server.GlobalSequence >= 1UL << 63);
     }
@@ -169,7 +179,7 @@ internal static class ClientServerTests
         using var server1 = OverrideServer("127.0.0.1:40000");
         using var server2 = OverrideServer("127.0.0.1:40001");
         server1.Start(1);
-        server2.Start(1);
+        StartServerForTests(server2, 1);
 
         Check.That(server1.GlobalSequence != server2.GlobalSequence);
         Check.That(server1.GlobalSequence >= 1UL << 63);
@@ -230,7 +240,7 @@ internal static class ClientServerTests
         double deltaTime = 1.0 / 10.0;
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         byte[] connectToken = GenerateConnectToken("[::1]:40000", 0x1234);
         client.Connect(connectToken);
@@ -289,7 +299,7 @@ internal static class ClientServerTests
         config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => sent = data.ToArray();
         config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
         using var server = new Server("127.0.0.1:40000", config, 0.0);
-        server.Start(4);
+        StartServerForTests(server, 4);
         Address x = Address.Parse("127.0.0.1:50000");
         Address y = Address.Parse("127.0.0.1:50001");
 
@@ -369,7 +379,7 @@ internal static class ClientServerTests
         serverConfig.MaxConnectTokenLifetime = 30;
         using var server = new Server("[::1]:40000", serverConfig, time);
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x1234, expiry: 20));
         ConnectLoop(simulator, client, server, ref time, deltaTime);
@@ -393,7 +403,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         ulong clientId = new TestRng(0xC11E17).NextUInt64();
         client.Connect(GenerateConnectToken("[::1]:40000", clientId));
@@ -467,7 +477,7 @@ internal static class ClientServerTests
         using var client = new Client(clientAddress, clientAddress2, null, time);
         using var server = new Server(serverAddress, serverAddress2, CreateServerConfig(null), time);
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         ulong clientId = new TestRng((ulong)Environment.TickCount64 | 1).NextUInt64();
         client.Connect(GenerateConnectToken(connectAddress, clientId));
@@ -538,7 +548,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x1234));
 
@@ -581,7 +591,7 @@ internal static class ClientServerTests
 
         for (int i = 0; i < maxClients.Length; i++)
         {
-            server.Start(maxClients[i]);
+            StartServerForTests(server, maxClients[i]);
 
             var clients = new Client[maxClients[i]];
             for (int j = 0; j < maxClients[i]; j++)
@@ -717,7 +727,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         // the first two addresses point at servers that do not exist; the client works
         // through them and connects to the third
@@ -765,6 +775,68 @@ internal static class ClientServerTests
         Check.That(client.State == ClientState.InvalidConnectToken);
     }
 
+    public static void TestClientCanReach()
+    {
+        // a client bound for one address family has no socket for the other; a
+        // simulator or override client reaches every address
+
+        Check.That(Client.CanReach(AddressType.IPv4, true, false, false));
+        Check.That(!Client.CanReach(AddressType.IPv6, true, false, false));
+        Check.That(Client.CanReach(AddressType.IPv6, false, true, false));
+        Check.That(!Client.CanReach(AddressType.IPv4, false, true, false));
+        Check.That(Client.CanReach(AddressType.IPv4, false, false, true));
+        Check.That(Client.CanReach(AddressType.IPv6, false, false, true));
+        Check.That(!Client.CanReach(AddressType.None, true, true, false));
+    }
+
+    public static void TestClientRefusesServerAddressWithoutSocket()
+    {
+        // an IPv4-only client given a token whose only server address is IPv6 must
+        // refuse it; a token with a reachable IPv4 address must settle on it
+
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> data) => 0,
+        };
+        using var client = new Client("0.0.0.0:50000", config, 0.0);
+        client.SocketAvailabilityOverride = type => Client.CanReach(type, true, false, false);
+
+        byte[] Token(string[] addresses, ulong clientId)
+        {
+            Address[] parsed = Array.ConvertAll(addresses, Address.Parse);
+            byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
+            nonce[0] = (byte)clientId;
+            byte[] token = new byte[Protocol.ConnectTokenBytes];
+            Check.That(ConnectTokenGenerator.GenerateInternal(parsed, parsed, 1000, 1030, 15,
+                clientId, TestConstants.TestProtocolId, TestConstants.PrivateKey,
+                new byte[Protocol.UserDataBytes], nonce, token));
+            return token;
+        }
+
+        byte[] token6 = Token(new[] { "[::1]:40000" }, 0x1);
+        client.Connect(token6);
+        Check.That(client.State == ClientState.InvalidConnectToken);
+
+        byte[] tokenMixed = Token(new[] { "[::1]:40000", "127.0.0.1:40000" }, 0x2);
+        client.Connect(tokenMixed);
+        Check.That(client.State == ClientState.SendingConnectionRequest);
+        Check.That(client.ServerAddressIndex == 1);
+        Check.That(client.ServerAddress.Equals(Address.Parse("127.0.0.1:40000")));
+
+        byte[] token4 = Token(new[] { "127.0.0.1:40000" }, 0x3);
+        client.Connect(token4);
+        Check.That(client.State == ClientState.SendingConnectionRequest);
+        Check.That(client.ServerAddressIndex == 0);
+        Check.That(client.ServerAddress.Equals(Address.Parse("127.0.0.1:40000")));
+
+        byte[] token4Then6 = Token(new[] { "127.0.0.1:40000", "[::1]:40000" }, 0x4);
+        client.Connect(token4Then6);
+        Check.That(client.ConnectToNextServer());
+        Check.That(client.State == ClientState.InvalidConnectToken);
+    }
+
     public static void TestClientErrorConnectionTimedOut()
     {
         // connect a client to a server, then stop updating the server. the client
@@ -778,7 +850,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x2));
 
@@ -812,7 +884,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         // the server ignores connection response packets, so the client hangs in
         // SendingConnectionResponse until it times out
@@ -846,7 +918,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         // the server ignores connection request packets, so the client hangs in
         // SendingConnectionRequest until it times out
@@ -883,7 +955,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x5));
 
@@ -926,7 +998,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x7));
 
@@ -966,7 +1038,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x8));
 
@@ -1050,7 +1122,7 @@ internal static class ClientServerTests
             config.ReceivePacketOverride = script.Receive;
 
             using var server = new Server("127.0.0.1:40000", config, 0.0);
-            server.Start(1);
+            StartServerForTests(server, 1);
 
             server.Update(1.0);
 
@@ -1074,7 +1146,7 @@ internal static class ClientServerTests
             config.ReceivePacketOverride = script.Receive;
 
             using var server = new Server("127.0.0.1:40000", config, 0.0);
-            server.Start(1);
+            StartServerForTests(server, 1);
 
             server.Update(1.0);
 
@@ -1148,7 +1220,7 @@ internal static class ClientServerTests
         using var server = new Server("[::1]:40000", serverConfig, time);
         serverRef = server;
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         // server-side disconnect
 
@@ -1272,7 +1344,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         ulong clientId = 0xCAFE;
 
@@ -1329,7 +1401,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         // timeout of -1 disables timeouts entirely (dev only)
 
@@ -1378,6 +1450,79 @@ internal static class ClientServerTests
         Check.That(clientNumPacketsReceived >= 10 && serverNumPacketsReceived >= 10);
     }
 
+    public static void TestPreconnectMappingLifetime()
+    {
+        // a pre-connect encryption mapping has its own bounded lifetime: a negative
+        // timeout must not hold a slot forever, and a zero timeout must not expire the
+        // mapping before the response can arrive.
+
+        byte[] sent = Array.Empty<byte>();
+        var config = new ServerConfig { ProtocolId = TestConstants.TestProtocolId, OverrideSendAndReceive = true };
+        TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
+        config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => sent = data.ToArray();
+        config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+        using var server = new Server("127.0.0.1:40000", config, 0.0);
+        StartServerForTests(server, 4);
+        server.SetConnectTokenExpiryFloorForTest(1000);
+        Address x = Address.Parse("127.0.0.1:50000");
+
+        ConnectTokenData Token(int timeout)
+        {
+            byte[] bytes = new byte[Protocol.ConnectTokenBytes];
+            byte[] userData = new byte[Protocol.UserDataBytes];
+            Span<Address> addresses = stackalloc Address[1] { Address.Parse("127.0.0.1:40000") };
+            Span<byte> nonce = stackalloc byte[Defines.ConnectTokenNonceBytes];
+            new TestRng(0x51).Fill(nonce);
+            Check.That(ConnectTokenGenerator.GenerateInternal(addresses, addresses, 1000, 1030, timeout,
+                0x1111, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, nonce, bytes));
+            var token = new ConnectTokenData();
+            Check.That(token.Read(bytes));
+            return token;
+        }
+
+        void Request(in Address from, ConnectTokenData token, double logicalTime)
+        {
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteConnectionRequestPacket(wire, token.VersionInfo, token.ProtocolId,
+                token.ExpireTimestamp, token.Nonce, token.PrivateData);
+            server.ProcessPacketAtTimestamp(in from, wire.AsSpan(0, bytes), 1001, logicalTime);
+        }
+
+        byte[] Challenge(ConnectTokenData token)
+        {
+            byte[] wire = (byte[])sent.Clone();
+            bool[] allowed = new bool[PacketType.NumPackets];
+            allowed[PacketType.ConnectionChallenge] = true;
+            ReadPacketResult packet = PacketIO.ReadPacket(wire, true, token.ServerToClientKey,
+                TestConstants.TestProtocolId, 1001, false, ReadOnlySpan<byte>.Empty, allowed, null);
+            Check.That(packet.Type == PacketType.ConnectionChallenge);
+            return wire.AsSpan(packet.DataOffset, packet.DataLength).ToArray();
+        }
+
+        void Response(in Address from, ConnectTokenData token, byte[] challenge, double logicalTime)
+        {
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteEncryptedPacket(wire, PacketType.ConnectionResponse,
+                challenge, 1, token.ClientToServerKey, TestConstants.TestProtocolId);
+            server.ProcessPacketAtTimestamp(in from, wire.AsSpan(0, bytes), 1001, logicalTime);
+        }
+
+        // timeout -1: the mapping must expire after the preconnect lifetime, not never
+        ConnectTokenData a = Token(-1);
+        Request(in x, a, 0.0);
+        Check.That(server.NumEncryptionMappings == 1);
+        server.Update(11.0);
+        Check.That(server.NumEncryptionMappings == 0);
+
+        // timeout 0: the mapping must survive one update so the response connects
+        ConnectTokenData b = Token(0);
+        Request(in x, b, 0.0);
+        Check.That(server.NumEncryptionMappings == 1);
+        byte[] challengeB = Challenge(b);
+        Response(in x, b, challengeB, 0.1);
+        Check.That(server.NumConnectedClients == 1);
+    }
+
     public static void TestLoopback()
     {
         NetworkSimulator simulator = CreateSimulator();
@@ -1424,7 +1569,7 @@ internal static class ClientServerTests
         loopbackClientRef = loopbackClient;
         serverRef = server;
 
-        server.Start(2);
+        StartServerForTests(server, 2);
 
         // connect the loopback client to slot 0
 
@@ -1581,7 +1726,7 @@ internal static class ClientServerTests
         // in every build, rather than calling null on the next send.
 
         using var server = new Server("127.0.0.1:40000", CreateServerConfig(null));
-        server.Start(1);
+        StartServerForTests(server, 1);
 
         server.ConnectLoopbackClient(0, 0x11111111, ReadOnlySpan<byte>.Empty);
 
