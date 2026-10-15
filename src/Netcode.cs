@@ -71,6 +71,7 @@ namespace Netcode
         public const int SocketRcvbufSize = 4 * 1024 * 1024;
         public const double PacketSendRate = 10.0;
         public const int NumDisconnectPackets = 10;
+        public const int PreconnectMappingSeconds = 10;
 
         // "NETCODE 1.02" ASCII with null terminator — 13 bytes
         public static ReadOnlySpan<byte> VersionInfo => "NETCODE 1.02\0"u8;
@@ -1012,7 +1013,8 @@ namespace Netcode
             ReadOnlySpan<byte> privateKey,
             ReadOnlySpan<bool> allowedPackets,
             ReplayProtection? replayProtection,
-            ulong minConnectTokenExpireTimestamp = 0)
+            ulong minConnectTokenExpireTimestamp = 0,
+            ulong maxConnectTokenLifetime = 0)
         {
             ReadPacketResult result = default;
             result.Type = -1;
@@ -1066,9 +1068,15 @@ namespace Netcode
                     return result;
                 }
 
-                if (packetExpireTimestamp < minConnectTokenExpireTimestamp)
+                if (packetExpireTimestamp <= minConnectTokenExpireTimestamp)
                 {
                     NetcodeLog.Debug("ignored connection request packet. connect token predates the server start\n");
+                    return result;
+                }
+
+                if (maxConnectTokenLifetime > 0 && packetExpireTimestamp - currentTimestamp > maxConnectTokenLifetime)
+                {
+                    NetcodeLog.Debug("ignored connection request packet. connect token lifetime exceeds the maximum\n");
                     return result;
                 }
 
@@ -1681,6 +1689,20 @@ namespace Netcode
             if (index == -1)
                 return 0;
             return Timeout[index];
+        }
+
+        public int CountActive(double time)
+        {
+            int count = 0;
+            for (int i = 0; i < NumEncryptionMappings; i++)
+                if (Address[i].Type != AddressType.None && !EntryExpired(i, time))
+                    count++;
+            return count;
+        }
+
+        public static double PreconnectExpireTime(double time, int timeoutSeconds)
+        {
+            return time + (timeoutSeconds > 0 ? timeoutSeconds : Defines.PreconnectMappingSeconds);
         }
     }
 

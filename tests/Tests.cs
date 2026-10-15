@@ -141,6 +141,8 @@ internal static class Program
         RunTest("test_client_server_multiple_servers", ClientServerTests.TestClientServerMultipleServers);
         RunTest("test_client_error_connect_token_expired", ClientServerTests.TestClientErrorConnectTokenExpired);
         RunTest("test_client_error_invalid_connect_token", ClientServerTests.TestClientErrorInvalidConnectToken);
+        RunTest("test_client_can_reach", ClientServerTests.TestClientCanReach);
+        RunTest("test_client_refuses_server_address_without_socket", ClientServerTests.TestClientRefusesServerAddressWithoutSocket);
         RunTest("test_client_error_connection_timed_out", ClientServerTests.TestClientErrorConnectionTimedOut);
         RunTest("test_client_error_connection_response_timeout", ClientServerTests.TestClientErrorConnectionResponseTimeout);
         RunTest("test_client_error_connection_request_timeout", ClientServerTests.TestClientErrorConnectionRequestTimeout);
@@ -151,6 +153,7 @@ internal static class Program
         RunTest("test_receive_drain_skips_empty_and_stops_at_cap", ClientServerTests.TestReceiveDrainSkipsEmptyAndStopsAtCap);
         RunTest("test_client_reconnect", ClientServerTests.TestClientReconnect);
         RunTest("test_disable_timeout", ClientServerTests.TestDisableTimeout);
+        RunTest("test_preconnect_mapping_lifetime", ClientServerTests.TestPreconnectMappingLifetime);
         RunTest("test_loopback", ClientServerTests.TestLoopback);
         RunTest("test_client_create_missing_override_callback", ClientServerTests.TestClientCreateMissingOverrideCallback);
         RunTest("test_server_create_missing_override_callback", ClientServerTests.TestServerCreateMissingOverrideCallback);
@@ -752,6 +755,38 @@ internal static class CoreTests
         var outputToken = new ConnectTokenPrivate();
         Check.That(outputToken.Read(buffer.AsSpan(result.DataOffset, result.DataLength)));
         Check.That(outputToken.ClientId == TestConstants.TestClientId);
+
+        // a never-expiring or over-long token must be refused by the lifetime check,
+        // not accepted because its expiry passes the restart floor
+
+        ulong currentTimestamp = 1000;
+        const ulong MaxLifetime = Protocol.DefaultMaxConnectTokenLifetime;
+
+        int ReadRequest(ulong expire, ulong maxLifetime, ulong minExpire = 0)
+        {
+            byte[] enc = (byte[])connectTokenData.Clone();
+            Check.That(ConnectTokenPrivate.Encrypt(enc, Defines.VersionInfo, TestConstants.TestProtocolId, expire, nonce, key));
+            byte[] req = new byte[2048];
+            int n = PacketIO.WriteConnectionRequestPacket(req, Defines.VersionInfo, TestConstants.TestProtocolId, expire, nonce, enc);
+            ReadPacketResult r = PacketIO.ReadPacket(
+                req.AsSpan(0, n),
+                hasReadPacketKey: true, new byte[Protocol.KeyBytes],
+                TestConstants.TestProtocolId,
+                currentTimestamp,
+                hasPrivateKey: true, key,
+                AllAllowed, null,
+                minConnectTokenExpireTimestamp: minExpire,
+                maxConnectTokenLifetime: maxLifetime);
+            return r.Type;
+        }
+
+        Check.That(ReadRequest(ulong.MaxValue, MaxLifetime) == -1);
+        Check.That(ReadRequest(currentTimestamp + 2 * MaxLifetime, MaxLifetime) == -1);
+        Check.That(ReadRequest(currentTimestamp + MaxLifetime + 1, MaxLifetime) == -1);
+        Check.That(ReadRequest(currentTimestamp + MaxLifetime, MaxLifetime) == PacketType.ConnectionRequest);
+        Check.That(ReadRequest(currentTimestamp + MaxLifetime, MaxLifetime, currentTimestamp + MaxLifetime) == -1);
+        Check.That(ReadRequest(currentTimestamp + 1, MaxLifetime) == PacketType.ConnectionRequest);
+        Check.That(ReadRequest(currentTimestamp, MaxLifetime) == -1);
     }
 
     public static void TestEmptyPacket(int packetType)
@@ -1048,6 +1083,15 @@ internal static class CoreTests
         encryptionManager.SetExpireTime(index, -1.0);
 
         Check.That(encryptionManager.FindEncryptionMapping(in addresses[0], time) == index);
+
+        // preconnect expire time: a positive timeout is the mapping lifetime, otherwise
+        // the bounded preconnect lifetime applies
+
+        Check.That(EncryptionManager.PreconnectExpireTime(100.0, -1) == 110.0);
+        Check.That(EncryptionManager.PreconnectExpireTime(100.0, 0) == 110.0);
+        Check.That(EncryptionManager.PreconnectExpireTime(100.0, 1) == 101.0);
+        Check.That(EncryptionManager.PreconnectExpireTime(100.0, 5) == 105.0);
+        Check.That(EncryptionManager.PreconnectExpireTime(100.0, 30) == 130.0);
     }
 
     public static void TestReplayProtection()
