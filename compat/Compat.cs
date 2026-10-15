@@ -873,6 +873,86 @@ internal static class Program
         return 0;
     }
 
+    private static int DoTokenLifetimes()
+    {
+        NetcodeLog.Level = LogLevel.None;
+        byte[] sent = Array.Empty<byte>();
+        var config = new ServerConfig { ProtocolId = SessionProtocolId, OverrideSendAndReceive = true };
+        SessionPrivateKey.CopyTo(config.PrivateKey, 0);
+        config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => sent = data.ToArray();
+        config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+        using var server = new Server("127.0.0.1:40000", config, 0.0);
+        server.Start(4);
+        server.SetConnectTokenExpiryFloorForTest(1000);
+        Address x = Address.Parse("127.0.0.1:50000");
+
+        ConnectTokenData Token(int timeout)
+        {
+            byte[] bytes = new byte[Protocol.ConnectTokenBytes];
+            byte[] userData = new byte[Protocol.UserDataBytes];
+            Span<Address> addresses = stackalloc Address[1] { Address.Parse("127.0.0.1:40000") };
+            Span<byte> nonce = stackalloc byte[Defines.ConnectTokenNonceBytes];
+            FillPattern(nonce, 9);
+            ConnectTokenGenerator.GenerateInternal(addresses, addresses, 1000, 1030, timeout,
+                0x1111, SessionProtocolId, SessionPrivateKey, userData, nonce, bytes);
+            var token = new ConnectTokenData();
+            token.Read(bytes);
+            return token;
+        }
+
+        void Request(in Address from, ConnectTokenData token, double logicalTime)
+        {
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteConnectionRequestPacket(wire, token.VersionInfo, token.ProtocolId,
+                token.ExpireTimestamp, token.Nonce, token.PrivateData);
+            server.ProcessPacketAtTimestamp(in from, wire.AsSpan(0, bytes), 1001, logicalTime);
+        }
+
+        foreach (int timeout in new[] { -1, 0, 1, 5, 30 })
+        {
+            ConnectTokenData token = Token(timeout);
+            Request(in x, token, 0.0);
+            int offset = -1;
+            for (int t = 0; t <= 40; t++)
+            {
+                server.Update(t);
+                if (server.NumEncryptionMappings == 0) { offset = t; break; }
+            }
+            Console.WriteLine($"timeout {timeout} -> {(offset < 0 ? "never" : offset.ToString())}");
+            server.Stop();
+            server.Start(4);
+            server.SetConnectTokenExpiryFloorForTest(1000);
+        }
+
+        return 0;
+    }
+
+    private static int DoClientAddress()
+    {
+        NetcodeLog.Level = LogLevel.None;
+        using var client = new Client("0.0.0.0:50000", null, 0.0);
+
+        foreach ((string name, string[] addresses) in new[]
+        {
+            ("v6", new[] { "[::1]:40000" }),
+            ("v6v4", new[] { "[::1]:40000", "127.0.0.1:40000" }),
+            ("v4", new[] { "127.0.0.1:40000" }),
+        })
+        {
+            byte[] token = new byte[Protocol.ConnectTokenBytes];
+            byte[] userData = new byte[Protocol.UserDataBytes];
+            ConnectTokenGenerator.Generate(addresses, addresses, 30, 15, 0x1111,
+                SessionProtocolId, SessionPrivateKey, userData, token);
+            client.Connect(token);
+            int index = client.State == ClientState.SendingConnectionRequest
+                ? (client.ServerAddress.Equals(Address.Parse("127.0.0.1:40000")) ? 1 : 0)
+                : -1;
+            Console.WriteLine($"{name} state {Client.StateName(client.State)} address {(index < 0 ? "none" : index.ToString())}");
+        }
+
+        return 0;
+    }
+
     private static int Main(string[] args)
     {
         NetcodeLog.Level = LogLevel.Error;
@@ -888,6 +968,8 @@ internal static class Program
             ["drain"] => DoDrain(),
             ["nonces"] => DoNonces(),
             ["challenge-mapping", var inputDir] => DoChallengeMapping(inputDir),
+            ["token-lifetimes"] => DoTokenLifetimes(),
+            ["client-address"] => DoClientAddress(),
             _ => Usage(),
         };
     }

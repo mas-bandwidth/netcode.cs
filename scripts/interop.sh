@@ -135,4 +135,22 @@ if ! diff -u "$WORK/c-nonces.txt" "$WORK/cs-nonces.txt"; then
 fi
 echo "   global nonce differential matched"
 
+echo "== leg 9: token-lifetimes differential (preconnect mapping lifetime)"
+$CS token-lifetimes > "$WORK/cs-lifetimes.txt"
+"$WORK/compat-c" token-lifetimes > "$WORK/c-lifetimes.txt"
+if ! diff -u "$WORK/c-lifetimes.txt" "$WORK/cs-lifetimes.txt"; then
+    echo "   token-lifetimes differential differed; first differing lines above"
+    exit 1
+fi
+echo "   token-lifetimes differential matched"
+
+echo "== leg 10: client-address differential (socket-family refusal)"
+$CS client-address > "$WORK/cs-client-address.txt"
+"$WORK/compat-c" client-address > "$WORK/c-client-address.txt"
+if ! diff -u "$WORK/c-client-address.txt" "$WORK/cs-client-address.txt"; then
+    echo "   client-address differential differed; first differing lines above"
+    exit 1
+fi
+echo "   client-address differential matched"
+
 echo "INTEROP GATE PASSED"

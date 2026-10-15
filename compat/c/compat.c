@@ -1289,6 +1289,73 @@ static int do_nonces( void )
     return 1;
 }
 
+static int do_token_lifetimes( void )
+{
+    struct netcode_server_config_t config;
+    netcode_default_server_config( &config );
+    config.protocol_id = SESSION_PROTOCOL_ID;
+    config.override_send_and_receive = 1;
+    config.send_packet_override = scenario_send;
+    config.receive_packet_override = scenario_receive;
+    memcpy( config.private_key, session_private_key, NETCODE_KEY_BYTES );
+    struct netcode_server_t * server = netcode_server_create( "127.0.0.1:40000", &config, 0.0 );
+    if ( !server ) return 0;
+    netcode_server_start( server, 4 );
+    server->min_connect_token_expire_timestamp = 1000;
+    struct netcode_address_t x;
+    netcode_parse_address( "127.0.0.1:50000", &x );
+
+    int timeouts[] = { -1, 0, 1, 5, 30 };
+    for ( int i = 0; i < 5; i++ )
+    {
+        struct netcode_connect_token_t token;
+        scenario_token( &token, 0x1111, 0xa1, 1 );
+        token.timeout_seconds = timeouts[i];
+        scenario_request( server, &x, &token, 0.0, NULL, NULL );
+        int offset = -1;
+        for ( int t = 0; t <= 40; t++ )
+        {
+            netcode_server_update( server, (double) t );
+            if ( server->num_encryption_mappings == 0 ) { offset = t; break; }
+        }
+        printf( "timeout %d -> %d\n", timeouts[i], offset );
+        netcode_server_stop( server );
+        netcode_server_start( server, 4 );
+        server->min_connect_token_expire_timestamp = 1000;
+    }
+    netcode_server_destroy( server );
+    return 1;
+}
+
+static int do_client_address( void )
+{
+    struct netcode_client_config_t config;
+    netcode_default_client_config( &config );
+    struct netcode_client_t * client = netcode_client_create( "0.0.0.0:50000", &config, 0.0 );
+    if ( !client ) return 0;
+
+    const char * lists[3][2] = { { "[::1]:40000", NULL }, { "[::1]:40000", "127.0.0.1:40000" }, { "127.0.0.1:40000", NULL } };
+    const char * names[3] = { "v6", "v6v4", "v4" };
+    for ( int i = 0; i < 3; i++ )
+    {
+        uint8_t connect_token[NETCODE_CONNECT_TOKEN_BYTES];
+        uint8_t user_data[NETCODE_USER_DATA_BYTES];
+        memset( user_data, 0, sizeof( user_data ) );
+        int num = lists[i][1] ? 2 : 1;
+        const char * addrs[2];
+        addrs[0] = lists[i][0];
+        addrs[1] = lists[i][1];
+        if ( netcode_generate_connect_token( num, addrs, addrs, 30, 15, 0x1111, SESSION_PROTOCOL_ID, session_private_key, user_data, connect_token ) != NETCODE_OK )
+            return 0;
+        netcode_client_connect( client, connect_token );
+        int state = netcode_client_state( client );
+        printf( "%s state %s address %s\n", names[i], netcode_client_state_name( state ),
+                state == NETCODE_CLIENT_STATE_SENDING_CONNECTION_REQUEST ? "0" : "none" );
+    }
+    netcode_client_destroy( client );
+    return 1;
+}
+
 int main( int argc, char ** argv )
 {
     if ( netcode_init() != NETCODE_OK )
@@ -1319,6 +1386,10 @@ int main( int argc, char ** argv )
         ok = do_nonces();
     else if ( argc == 3 && strcmp( argv[1], "challenge-mapping" ) == 0 )
         ok = do_challenge_mapping( argv[2] );
+    else if ( argc == 2 && strcmp( argv[1], "token-lifetimes" ) == 0 )
+        ok = do_token_lifetimes();
+    else if ( argc == 2 && strcmp( argv[1], "client-address" ) == 0 )
+        ok = do_client_address();
     else
         printf( "usage: compat-c goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token> | diffpackets | drain | nonces\n" );
 
