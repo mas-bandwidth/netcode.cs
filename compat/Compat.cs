@@ -873,6 +873,90 @@ internal static class Program
         return 0;
     }
 
+    private static int DoDisconnectReentry(string inputDir)
+    {
+        NetcodeLog.Level = LogLevel.None;
+        foreach (string name in new[] { "same", "stop", "timeout", "loopback" })
+        {
+            byte[] sent = Array.Empty<byte>();
+            int callbacks = 0;
+            DisconnectReason seenReason = DisconnectReason.None;
+            ulong seenId = 0;
+            byte seenUser = 0;
+            Server? serverRef = null;
+            var config = new ServerConfig { ProtocolId = SessionProtocolId, OverrideSendAndReceive = true };
+            SessionPrivateKey.CopyTo(config.PrivateKey, 0);
+            config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => sent = data.ToArray();
+            config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+            config.SendLoopbackPacket = (int slot, ReadOnlySpan<byte> data, ulong sequence) => { };
+            config.OnClientConnectDisconnect = (slot, connected) =>
+            {
+                if (connected) return;
+                callbacks++;
+                if (callbacks != 1) return;
+                seenReason = serverRef!.ClientDisconnectReason(slot);
+                seenId = serverRef.ClientId(slot);
+                seenUser = serverRef.ClientUserData(slot)[0];
+                if (name == "same") serverRef.DisconnectClient(slot);
+                else if (name == "loopback") serverRef.DisconnectLoopbackClient(slot);
+                else serverRef.Stop();
+            };
+            using var server = new Server("127.0.0.1:40000", config, 0.0);
+            serverRef = server;
+            server.Start(1);
+            if (name == "loopback")
+            {
+                byte[] user = new byte[Protocol.UserDataBytes];
+                user[0] = 0x5A;
+                server.ConnectLoopbackClient(0, 0x1111, user);
+            }
+            else
+            {
+                server.SetConnectTokenExpiryFloorForTest(1000);
+                byte[] challengeKey = new byte[Protocol.KeyBytes];
+                FillPattern(challengeKey, 77);
+                server.SetChallengeKeyForTest(challengeKey);
+                Address from = Address.Parse("127.0.0.1:50000");
+                ConnectTokenData token = ScenarioToken(0x1111, 0x5A, 1);
+                byte[] wire = new byte[Defines.MaxPacketBytes];
+                int bytes = PacketIO.WriteConnectionRequestPacket(wire, token.VersionInfo,
+                    token.ProtocolId, token.ExpireTimestamp, token.Nonce, token.PrivateData);
+                File.WriteAllBytes(Path.Combine(inputDir, $"{name}-request.bin"), wire.AsSpan(0, bytes).ToArray());
+                server.ProcessPacketAtTimestamp(in from, wire.AsSpan(0, bytes), 1001, 0.0);
+                bool[] allowed = new bool[PacketType.NumPackets];
+                allowed[PacketType.ConnectionChallenge] = true;
+                byte[] challengeWire = (byte[])sent.Clone();
+                ReadPacketResult challenge = PacketIO.ReadPacket(challengeWire, true,
+                    token.ServerToClientKey, SessionProtocolId, 1001, false,
+                    ReadOnlySpan<byte>.Empty, allowed, null);
+                if (challenge.Type != PacketType.ConnectionChallenge)
+                    throw new InvalidOperationException("reentry challenge was not received");
+                byte[] payload = challengeWire.AsSpan(challenge.DataOffset, challenge.DataLength).ToArray();
+                bytes = PacketIO.WriteEncryptedPacket(wire, PacketType.ConnectionResponse,
+                    payload, 1, token.ClientToServerKey, SessionProtocolId);
+                File.WriteAllBytes(Path.Combine(inputDir, $"{name}-response.bin"), wire.AsSpan(0, bytes).ToArray());
+                server.ProcessPacketAtTimestamp(in from, wire.AsSpan(0, bytes), 1001, 0.1);
+                if (!server.ClientConnected(0)) throw new InvalidOperationException("reentry client was not admitted");
+            }
+            try
+            {
+                if (name == "loopback") server.DisconnectLoopbackClient(0);
+                else if (name == "timeout") server.Update(16.2);
+                else server.DisconnectClient(0);
+            }
+            catch (IndexOutOfRangeException)
+            {
+                // The red implementation reaches ClientIndex[-1] after nested cleanup.
+            }
+            int connectedCount = server.NumConnectedClients;
+            int mappings = server.EncryptionMappingCountForTest;
+            string slot = server.ClientConnected(0) ? "connected" : "clear";
+            Console.WriteLine($"{name} callbacks {callbacks} saw {(int)seenReason} {seenId} {seenUser} connected {connectedCount} mappings {mappings} slot {slot}");
+            if (name == "stop") server.Start(1);
+        }
+        return 0;
+    }
+
     private static int Main(string[] args)
     {
         NetcodeLog.Level = LogLevel.Error;
@@ -887,6 +971,7 @@ internal static class Program
             ["diffpackets"] => DoDiffPackets(),
             ["drain"] => DoDrain(),
             ["nonces"] => DoNonces(),
+            ["disconnect-reentry", var inputDir] => DoDisconnectReentry(inputDir),
             ["challenge-mapping", var inputDir] => DoChallengeMapping(inputDir),
             _ => Usage(),
         };

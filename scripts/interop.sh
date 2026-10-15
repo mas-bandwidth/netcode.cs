@@ -135,4 +135,18 @@ if ! diff -u "$WORK/c-nonces.txt" "$WORK/cs-nonces.txt"; then
 fi
 echo "   global nonce differential matched"
 
+echo "== leg 9: disconnect callback reentry differential (fixed packets, override transport)"
+mkdir "$WORK/c-reentry" "$WORK/cs-reentry"
+$CS disconnect-reentry "$WORK/cs-reentry" > "$WORK/cs-reentry.txt"
+"$WORK/compat-c" disconnect-reentry "$WORK/c-reentry" > "$WORK/c-reentry.txt"
+for case_name in same stop timeout; do
+    cmp "$WORK/c-reentry/$case_name-request.bin" "$WORK/cs-reentry/$case_name-request.bin"
+    cmp "$WORK/c-reentry/$case_name-response.bin" "$WORK/cs-reentry/$case_name-response.bin"
+done
+if ! diff -u "$WORK/c-reentry.txt" "$WORK/cs-reentry.txt"; then
+    echo "   disconnect callback reentry differential differed; first differing lines above"
+    exit 1
+fi
+echo "   disconnect callback reentry differential matched"
+
 echo "INTEROP GATE PASSED"

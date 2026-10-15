@@ -965,6 +965,8 @@ namespace Netcode
             _minConnectTokenExpireTimestamp = timestamp;
         }
 
+        internal int EncryptionMappingCountForTest => _encryptionManager.NumEncryptionMappings;
+
         internal void SetChallengeKeyForTest(ReadOnlySpan<byte> key)
         {
             if (key.Length != Protocol.KeyBytes)
