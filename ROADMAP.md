@@ -6,12 +6,18 @@ Planned work for netcode.cs. Each item below was an open sprint card, moved out 
 
 ## Contents
 
-- [Moved from GitHub issues on 2026-10-14](#moved-from-github-issues-on-2026-10-14) (1)
+- [Moved from GitHub issues on 2026-10-14](#moved-from-github-issues-on-2026-10-14) (2)
 - [Moved out of the sprint on 2026-10-14: netcode-cs-port](#moved-out-of-the-sprint-on-2026-10-14-netcode-cs-port) (5)
 
 ## Moved from GitHub issues on 2026-10-14
 
 Open GitHub issues of mas-bandwidth/netcode.cs, recorded here on 2026-10-14 when roadmaps became the standard for future work (Glenn, 2026-10-14). Each item names its issue; the issue is closed with a pointer here.
+
+### Port still has the pre-1.4.5 connect-token reuse (GHSA-v29p-3vj4-vg4f)
+
+C netcode 1.4.5 (advisory GHSA-v29p-3vj4-vg4f) spends a connect token when the client is installed. A consumed token admits nothing, from any address. History-full refuses instead of evicting. Tokens that could have been issued before this server process started are refused.
+
+From: mas-bandwidth/netcode.cs issue #6, opened 2026-09-07 by gafferongames; moved here 2026-10-14, added 2026-10-16
 
 ### Mirror #191: two new create-time error codes and the unchecked callback class
 

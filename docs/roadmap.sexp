@@ -20,6 +20,13 @@
 
  :items
  (
+  (item "issue-6" :group "github-issues" :area "netcode.cs"
+   :title "Port still has the pre-1.4.5 connect-token reuse (GHSA-v29p-3vj4-vg4f)"
+   :text "C netcode 1.4.5 (advisory GHSA-v29p-3vj4-vg4f) spends a connect token when the client is installed. A consumed token admits nothing, from any address. History-full refuses instead of evicting. Tokens that could have been issued before this server process started are refused."
+   :date "2026-10-14"
+   :origin "mas-bandwidth/netcode.cs issue #6, opened 2026-09-07 by gafferongames; moved here 2026-10-14, added 2026-10-16"
+   :kept (:github-issue "6" :labels ""))
+
   (item "issue-7" :group "github-issues" :area "netcode.cs"
    :title "Mirror #191: two new create-time error codes and the unchecked callback class"
    :text "The C reference landed a robustness batch in mas-bandwidth/netcode#191 (from netcode#190). Two pieces of it are mirrored surface in this port and should land here too. No wire format change in either. netcode.h gained:"
