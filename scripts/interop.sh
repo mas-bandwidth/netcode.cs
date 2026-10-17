@@ -4,7 +4,7 @@
 #   scripts/interop.sh [path-to-netcode-clone]
 #
 # Builds the C half of the compat harness against the REAL netcode.c (plus its
-# vendored libsodium), then runs four legs:
+# vendored libsodium), then runs ten legs:
 #
 #   1. golden byte identity — both sides write the same token/packet goldens from
 #      the same fixed keys/nonces/timestamps; every file must be byte identical.
@@ -37,6 +37,12 @@ fi
 
 if ! git -C "$NETCODE" merge-base --is-ancestor 1c58478d HEAD; then
     echo "INTEROP FAILED: C reference must contain random global sequence and reused-token refusal (1c58478d)."
+    exit 1
+fi
+
+if ! git -C "$NETCODE" merge-base --is-ancestor 067b1959 HEAD ||
+   ! git -C "$NETCODE" merge-base --is-ancestor 39f04965 HEAD; then
+    echo "INTEROP FAILED: C reference must contain both token-lifetime and socket-family fixes."
     exit 1
 fi
 

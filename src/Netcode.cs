@@ -1068,7 +1068,7 @@ namespace Netcode
                     return result;
                 }
 
-                if (packetExpireTimestamp < minConnectTokenExpireTimestamp)
+                if (packetExpireTimestamp <= minConnectTokenExpireTimestamp)
                 {
                     NetcodeLog.Debug("ignored connection request packet. connect token predates the server start\n");
                     return result;
@@ -1682,7 +1682,7 @@ namespace Netcode
             if (index == -1)
                 return Span<byte>.Empty;
             return ReceiveKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes);
-}
+        }
 
         public int GetTimeout(int index)
         {
