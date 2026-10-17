@@ -765,6 +765,51 @@ internal static class ClientServerTests
         Check.That(client.State == ClientState.InvalidConnectToken);
     }
 
+    public static void TestClientCanReach()
+    {
+        // a client bound for one address family has no socket for the other; a
+        // simulator or override client reaches every address
+
+        Check.That(Client.CanReach(AddressType.IPv4, true, false, false));
+        Check.That(!Client.CanReach(AddressType.IPv6, true, false, false));
+        Check.That(Client.CanReach(AddressType.IPv6, false, true, false));
+        Check.That(!Client.CanReach(AddressType.IPv4, false, true, false));
+        Check.That(Client.CanReach(AddressType.IPv4, false, false, true));
+        Check.That(Client.CanReach(AddressType.IPv6, false, false, true));
+        Check.That(!Client.CanReach(AddressType.None, true, true, false));
+    }
+
+    public static void TestClientRefusesServerAddressWithoutSocket()
+    {
+        // an IPv4-only client given a token whose only server address is IPv6 must
+        // refuse it; a token with a reachable IPv4 address must settle on it
+
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> data) => 0,
+        };
+        using var client = new Client("0.0.0.0:50000", config, 0.0);
+        client.SocketAvailabilityOverride = type => Client.CanReach(type, true, false, false);
+
+        byte[] token6 = GenerateConnectToken("[::1]:40000", 0x1);
+        client.Connect(token6);
+        Check.That(client.State == ClientState.InvalidConnectToken);
+
+        byte[] tokenMixed = GenerateConnectToken(new[] { "[::1]:40000", "127.0.0.1:40000" }, 0x2);
+        client.Connect(tokenMixed);
+        Check.That(client.State == ClientState.SendingConnectionRequest);
+        Check.That(client.ServerAddressIndex == 1);
+        Check.That(client.ServerAddress.Equals(Address.Parse("127.0.0.1:40000")));
+
+        byte[] token4 = GenerateConnectToken("127.0.0.1:40000", 0x3);
+        client.Connect(token4);
+        Check.That(client.State == ClientState.SendingConnectionRequest);
+        Check.That(client.ServerAddressIndex == 0);
+        Check.That(client.ServerAddress.Equals(Address.Parse("127.0.0.1:40000")));
+    }
+
     public static void TestClientErrorConnectionTimedOut()
     {
         // connect a client to a server, then stop updating the server. the client

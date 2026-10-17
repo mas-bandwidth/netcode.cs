@@ -251,6 +251,16 @@ namespace Netcode
         public ulong NextPacketSequence => _sequence;
         /// <summary>The server address the client is connecting or connected to.</summary>
         public Address ServerAddress => _serverAddress;
+        internal int ServerAddressIndex => _serverAddressIndex;
+        internal Func<AddressType, bool>? SocketAvailabilityOverride { get; set; }
+
+        internal static bool CanReach(AddressType addressType, bool hasIpv4Socket, bool hasIpv6Socket, bool socketless)
+        {
+            if (socketless)
+                return true;
+            return addressType == AddressType.IPv4 ? hasIpv4Socket :
+                   addressType == AddressType.IPv6 ? hasIpv6Socket : false;
+        }
 
         /// <summary>The port the client socket is bound to.</summary>
         public ushort Port =>
