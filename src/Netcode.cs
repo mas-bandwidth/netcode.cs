@@ -1833,7 +1833,8 @@ namespace Netcode
                 if (type == AddressType.IPv6)
                 {
                     int optname = Ipv6TrafficClassOption(CurrentOS());
-                    socket.SetRawSocketOption(41 /* IPPROTO_IPV6 */, optname, BitConverter.GetBytes(46));
+                    if (optname >= 0)
+                        socket.SetRawSocketOption(41 /* IPPROTO_IPV6 */, optname, BitConverter.GetBytes(46));
                 }
                 else
                 {
@@ -1861,7 +1862,15 @@ namespace Netcode
             return SocketOS.Other;
         }
 
-        internal static int Ipv6TrafficClassOption(SocketOS os) => os == SocketOS.Linux ? 67 : 36;
+        // IPV6_TCLASS as each OS's headers define it (the C reference uses the header
+        // constant); -1 where it is not known, and IPv6 tagging is skipped there
+        internal static int Ipv6TrafficClassOption(SocketOS os) => os switch
+        {
+            SocketOS.Linux or SocketOS.Android => 67,
+            SocketOS.MacOS or SocketOS.IOS or SocketOS.MacCatalyst or SocketOS.TvOS => 36,
+            SocketOS.FreeBSD => 61,
+            _ => -1,
+        };
 
         private static IPEndPoint ToEndPoint(in Address address)
         {
