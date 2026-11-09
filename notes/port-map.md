@@ -70,6 +70,9 @@ draft-irtf-cfrg-xchacha KAT + the exact golden vectors from
 `test_crypto_aead_vectors()` in netcode.c, tamper-rejection, and a
 differential test against `System.Security.Cryptography.ChaCha20Poly1305`
 whenever `IsSupported` (macOS/.NET10 and Linux CI both exercise it).
+Poly1305 is also checked directly by `test_crypto_poly1305_vectors`
+(RFC 8439 Section 2.5.2 and all eleven Appendix A.3 vectors, including the
+limb-carry and 2^130 - 5 final-reduction cases) through `Aead.Poly1305Mac`.
 
 Alternatives considered:
 - **.NET `ChaCha20Poly1305` as the production IETF path** (+ managed HChaCha20
