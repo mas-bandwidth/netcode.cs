@@ -1073,6 +1073,62 @@ internal static class CoreTests
         // while packets that fell out of the window are rejected as before
 
         Check.That(replayProtection.AlreadyReceived(ulong.MaxValue - 1 - Defines.ReplayProtectionBufferSize));
+
+        // the empty-slot sentinel value ulong.MaxValue is reserved and rejected
+
+        Check.That(replayProtection.AlreadyReceived(ulong.MaxValue));
+
+        replayProtection.Reset();
+
+        for (ulong sequence = 1; sequence <= 4; sequence++)
+        {
+            Check.That(!replayProtection.AlreadyReceived(sequence));
+            replayProtection.AdvanceSequence(sequence);
+        }
+
+        Check.That(replayProtection.AlreadyReceived(ulong.MaxValue));
+        replayProtection.AdvanceSequence(ulong.MaxValue);
+        Check.That(replayProtection.MostRecentSequence == 4);
+        Check.That(!replayProtection.AlreadyReceived(5));
+
+        byte[] packetData = new byte[8];
+        byte[] buffer = new byte[Defines.MaxPacketBytes];
+        byte[] packetKey = new byte[Protocol.KeyBytes];
+        Rng.GenerateKey(packetKey);
+
+        int sentinelBytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionKeepAlive, packetData, ulong.MaxValue, packetKey, TestConstants.TestProtocolId);
+        Check.That(sentinelBytes > 0);
+
+        ReadPacketResult sentinelResult = PacketIO.ReadPacket(
+            buffer.AsSpan(0, sentinelBytes),
+            hasReadPacketKey: true, packetKey,
+            TestConstants.TestProtocolId,
+            0,
+            hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
+            AllAllowed, replayProtection);
+        Check.That(sentinelResult.Type == -1);
+
+        ReadPacketResult sentinelNoReplayResult = PacketIO.ReadPacket(
+            buffer.AsSpan(0, sentinelBytes),
+            hasReadPacketKey: true, packetKey,
+            TestConstants.TestProtocolId,
+            0,
+            hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
+            AllAllowed, null);
+        Check.That(sentinelNoReplayResult.Type == -1);
+
+        int nextBytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionKeepAlive, packetData, 5, packetKey, TestConstants.TestProtocolId);
+        Check.That(nextBytes > 0);
+
+        ReadPacketResult nextResult = PacketIO.ReadPacket(
+            buffer.AsSpan(0, nextBytes),
+            hasReadPacketKey: true, packetKey,
+            TestConstants.TestProtocolId,
+            0,
+            hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
+            AllAllowed, replayProtection);
+        Check.That(nextResult.Type == PacketType.ConnectionKeepAlive);
+        Check.That(nextResult.Sequence == 5);
     }
 
     public static void TestNetworkSimulatorDeterminism()
