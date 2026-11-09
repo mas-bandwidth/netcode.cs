@@ -1737,14 +1737,12 @@ namespace Netcode
                 {
                     // stop hard client disconnects surfacing as recvfrom errors (ICMP port unreachable)
                     const int SIO_UDP_CONNRESET = unchecked((int)0x9800000C);
-                    try
+                    CreateError controlError = ConfigureConnectionReset(socket, () =>
                     {
                         socket.IOControl(SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
-                    }
-                    catch (SocketException)
-                    {
-                        // best effort; matches the spirit, not the letter, of the C code path
-                    }
+                    });
+                    if (controlError != CreateError.None)
+                        return controlError;
                 }
 
                 if (address.Type == AddressType.IPv6)
@@ -1819,6 +1817,21 @@ namespace Netcode
                 socket.Dispose();
                 throw;
             }
+        }
+
+        internal static CreateError ConfigureConnectionReset(IDisposable handle, Action control)
+        {
+            try
+            {
+                control();
+            }
+            catch (SocketException)
+            {
+                handle.Dispose();
+                NetcodeLog.Error("error: failed to configure socket connection reset handling\n");
+                return CreateError.CreateFailed;
+            }
+            return CreateError.None;
         }
 
         private static bool TryEnablePacketTagging(Socket socket, AddressType type)
