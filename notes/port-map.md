@@ -128,21 +128,26 @@ connect_token (private), generate_connect_token_out_of_range (runtime check,
 not assert), challenge_token, all 7 packet read/write tests,
 connect_token_public, encryption_manager, replay_protection,
 init_and_defaults (adapted), client/server create + create-error (adapted:
-managed socket errors), network_simulator_determinism,
+managed socket errors; the port-already-in-use blocks are
+test_client_create_port_in_use / test_server_create_port_in_use, on
+ephemeral ports), network_simulator_determinism,
 server_restart_global_sequence, client_server_connect (simulator),
 ipv4/ipv6/dual socket connect (real UDP loopback), keep_alive,
 multiple_clients, multiple_servers, all client error-state tests,
 client/server side disconnect, disconnect_reason, reconnect,
-disable_timeout, loopback. Dropped: test_endian (no endian-dependent code —
-explicit little-endian byte IO), test_runtime_guards' assert-machinery parts
-(no assert hooks in C#; the runtime guards themselves are tested),
-packet_tagging (socket-option smoke only).
+disable_timeout, loopback, packet_tagging (also reads IP_TOS / IPV6_TCLASS
+back from each socket; not checked on Windows, where tagging is a no-op).
+Dropped: test_endian (no endian-dependent code — explicit little-endian byte
+IO), test_runtime_guards' assert-machinery parts (no assert hooks in C#; the
+runtime guards themselves are tested).
 
 Added beyond the C suite: hostile fuzz (seeded, deterministic) over every
 parse path — ReadPacket raw + round-trip-with-corruption (ports the libFuzzer
 harnesses' logic), connect token public/private hostile reads, address parse
 corpus from `netcode/fuzz/corpus`; zero-allocation assertions on the
-steady-state packet paths; managed-vs-BCL crypto differential.
+steady-state packet paths; managed-vs-BCL crypto differential; replay
+protection through `ReadPacket` within one session (the same datagram read
+twice, and datagrams that fail authentication leaving the window unchanged).
 
 ## Interop gate
 
