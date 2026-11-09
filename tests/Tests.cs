@@ -106,6 +106,7 @@ internal static class Program
         RunTest("test_crypto_differential_bcl", Hostile.TestCryptoDifferentialBcl);
         RunTest("test_queue", CoreTests.TestQueue);
         RunTest("test_sequence", CoreTests.TestSequence);
+        RunTest("test_socket_buffer_size_back_off", CoreTests.TestSocketBufferSizeBackOff);
         RunTest("test_address", CoreTests.TestAddress);
         RunTest("test_connect_token", CoreTests.TestConnectToken);
         RunTest("test_generate_connect_token_out_of_range", CoreTests.TestGenerateConnectTokenOutOfRange);
@@ -375,6 +376,45 @@ internal static class CoreTests
         Check.That(PacketIO.SequenceNumberBytesRequired(0x112233445566) == 6);
         Check.That(PacketIO.SequenceNumberBytesRequired(0x11223344556677) == 7);
         Check.That(PacketIO.SequenceNumberBytesRequired(0x1122334455667788) == 8);
+    }
+
+    public static void TestSocketBufferSizeBackOff()
+    {
+        const int requested = 4 * 1024 * 1024;
+
+        // an OS that accepts the request (or clamps it, as linux and windows do) takes it on the first try
+
+        {
+            var tried = new System.Collections.Generic.List<int>();
+            Check.That(NetcodeSocket.BufferSizeBackOff(requested, size => { tried.Add(size); return size <= requested; }) == requested);
+            Check.That(tried.Count == 1);
+        }
+
+        // an OS that refuses anything over 227 KiB refuses 4M, 2M, 1M, 512K and 256K, and takes 128K
+
+        {
+            var tried = new System.Collections.Generic.List<int>();
+            Check.That(NetcodeSocket.BufferSizeBackOff(requested, size => { tried.Add(size); return size <= 227 * 1024; }) == 128 * 1024);
+            Check.That(string.Join(",", tried) == "4194304,2097152,1048576,524288,262144,131072");
+        }
+
+        // an OS that refuses every request down to the minimum keeps its default: not an error, and never a request below the minimum
+
+        {
+            var tried = new System.Collections.Generic.List<int>();
+            Check.That(NetcodeSocket.BufferSizeBackOff(requested, size => { tried.Add(size); return false; }) == 0);
+            Check.That(tried.Count == 7);
+            Check.That(tried[tried.Count - 1] == NetcodeSocket.BufferSizeMinimum);
+            Check.That(NetcodeSocket.BufferSizeMinimum == 64 * 1024);
+        }
+
+        // a request already below the minimum is not made at all
+
+        {
+            var tried = new System.Collections.Generic.List<int>();
+            Check.That(NetcodeSocket.BufferSizeBackOff(32 * 1024, size => { tried.Add(size); return true; }) == 0);
+            Check.That(tried.Count == 0);
+        }
     }
 
     public static void TestAddress()
