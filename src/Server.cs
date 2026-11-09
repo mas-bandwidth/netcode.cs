@@ -1145,6 +1145,9 @@ namespace Netcode
         /// </summary>
         public int ReceivePacket(int clientIndex, Span<byte> payload, out ulong sequence)
         {
+            if (payload.Length < Protocol.MaxPacketSize)
+                throw new ArgumentException($"payload must be at least {Protocol.MaxPacketSize} bytes", nameof(payload));
+
             sequence = 0;
 
             if (!_running)
