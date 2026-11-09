@@ -261,9 +261,10 @@ namespace Netcode
             if (NetcodeLog.Enabled(LogLevel.Debug))
                 NetcodeLog.Debug($"client changed state from '{StateName(_state)}' to '{StateName(state)}'\n");
 
-            _config.OnStateChange?.Invoke(_state, state);
-
+            ClientState oldState = _state;
             _state = state;
+            if (oldState != state)
+                _config.OnStateChange?.Invoke(oldState, state);
         }
 
         /// <summary>Human-readable name for a client state (matches the C library's strings).</summary>
