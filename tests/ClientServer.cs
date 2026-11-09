@@ -588,7 +588,7 @@ internal static class ClientServerTests
 
         string[] serverAddresses = { "10.10.10.10:1000", "100.100.100.100:50000", "[::1]:40000" };
 
-        client.Connect(GenerateConnectToken(serverAddresses, 0x8877));
+        client.Connect(GenerateConnectToken(serverAddresses, 0x8877, expiry: 60));
 
         ConnectLoop(simulator, client, server, ref time, deltaTime);
 
@@ -613,6 +613,36 @@ internal static class ClientServerTests
         client.Update(time);
 
         Check.That(client.State == ClientState.ConnectTokenExpired);
+
+        TestClientErrorConnectTokenExpiredMultipleServers();
+    }
+
+    public static void TestClientErrorConnectTokenExpiredMultipleServers()
+    {
+        NetworkSimulator simulator = CreateSimulator();
+
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+
+        using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
+
+        string[] serverAddresses = { "10.10.10.10:1000", "100.100.100.100:50000" };
+
+        client.Connect(GenerateConnectToken(serverAddresses, 0x8878, expiry: 20));
+
+        while (true)
+        {
+            simulator.Update(time);
+            client.Update(time);
+
+            if (client.State <= ClientState.Disconnected)
+                break;
+
+            time += deltaTime;
+        }
+
+        Check.That(client.State == ClientState.ConnectTokenExpired);
+        Check.That(time < 25.0);
     }
 
     public static void TestClientErrorInvalidConnectToken()

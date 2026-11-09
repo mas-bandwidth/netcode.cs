@@ -284,7 +284,6 @@ namespace Netcode
 
         private void ResetBeforeNextConnect()
         {
-            _connectStartTime = _time;
             _lastPacketSendTime = _time - 1.0;
             _lastPacketReceiveTime = _time;
             _shouldDisconnect = false;
@@ -358,6 +357,8 @@ namespace Netcode
 
             _connectToken.ServerToClientKey.CopyTo(_readPacketKey.AsSpan());
             _connectToken.ClientToServerKey.CopyTo(_writePacketKey.AsSpan());
+
+            _connectStartTime = _time;
 
             ResetBeforeNextConnect();
 
