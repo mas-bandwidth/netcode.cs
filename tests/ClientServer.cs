@@ -63,6 +63,7 @@ internal static class ClientServerTests
 
     public static void TestClientCreate()
     {
+        TestClientServerAddressFamilies();
         {
             using var client = new Client("127.0.0.1:40000");
             Check.That(client.Port == 40000);
@@ -89,6 +90,60 @@ internal static class ClientServerTests
         catch (NetcodeException e)
         {
             Check.That(e.ErrorCode == (int)ClientCreateError.ParseAddressFailed);
+        }
+    }
+
+    private static void TestClientServerAddressFamilies()
+    {
+        static byte[] Token(params string[] addresses)
+        {
+            var parsed = new Address[addresses.Length];
+            for (int i = 0; i < addresses.Length; i++)
+                Check.That(Address.TryParse(addresses[i], out parsed[i]));
+            byte[] token = new byte[Protocol.ConnectTokenBytes];
+            Check.That(ConnectTokenGenerator.GenerateInternal(parsed, parsed, 1000, 2000,
+                TestConstants.TestTimeoutSeconds, 1, TestConstants.TestProtocolId,
+                TestConstants.PrivateKey, new byte[Protocol.UserDataBytes], new byte[Defines.ConnectTokenNonceBytes], token));
+            return token;
+        }
+
+        foreach (bool ipv6 in new[] { false, true })
+        {
+            string matching = ipv6 ? "[::1]:50000" : "127.0.0.1:50000";
+            string mismatched = ipv6 ? "127.0.0.1:50001" : "[::1]:50001";
+            var config = new ClientConfig
+            {
+                OverrideSendAndReceive = true,
+                SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+                ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0,
+            };
+            using var client = new Client(matching, config, 1000.0);
+            var socketField = typeof(Client).GetField(ipv6 ? "_socketIpv6" : "_socketIpv4",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            // Only socket presence is read by address selection. A sentinel exercises
+            // that path without opening a socket or sending/receiving any packets.
+            socketField.SetValue(client, System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(NetcodeSocket)));
+            config.OverrideSendAndReceive = false;
+            try
+            {
+                client.Connect(Token(mismatched));
+                Check.That(client.State == ClientState.InvalidConnectToken);
+
+                client.Connect(Token(mismatched, matching, mismatched, matching, mismatched));
+                Check.That(client.State == ClientState.SendingConnectionRequest);
+                Check.That(client.ServerAddress.ToString() == matching);
+                var next = typeof(Client).GetMethod("ConnectToNextServer",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+                Check.That((bool)next.Invoke(client, null)!);
+                Check.That(client.ServerAddress.ToString() == matching);
+                Check.That(!(bool)next.Invoke(client, null)!);
+            }
+            finally
+            {
+                // The sentinel has no underlying socket and must never be disposed.
+                socketField.SetValue(client, null);
+                config.OverrideSendAndReceive = true;
+            }
         }
     }
 
