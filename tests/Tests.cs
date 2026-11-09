@@ -300,7 +300,6 @@ internal static class CoreTests
 
         // add some packets to the queue and make sure they pop off in the correct order
 
-        var rng = new TestRng(0x1234);
         const int NumPackets = 100;
         byte[] payload = new byte[Protocol.MaxPacketSize];
 
@@ -360,8 +359,6 @@ internal static class CoreTests
 
         Check.That(queue.Count == 0);
         Check.That(queue.Pop(popped, out _) == -1);
-
-        _ = rng;
     }
 
     public static void TestSequence()

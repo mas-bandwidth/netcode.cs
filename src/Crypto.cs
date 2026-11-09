@@ -39,7 +39,6 @@ namespace Netcode
         public const int KeyBytes = 32;
         public const int MacBytes = 16;
         public const int NonceBytesIetf = 12;
-        public const int NonceBytesX = 24;
 
         // ------------------------------------------------------------------
         // ChaCha20 core (RFC 8439). 32-bit counter, 96-bit nonce.

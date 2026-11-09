@@ -185,6 +185,8 @@ namespace Netcode
         private NetcodeSocket? _socketIpv6;
         private Address _address;
         private Address _address2;
+        // Test seam: tests set FlagIgnoreConnectionRequestPackets or
+        // FlagIgnoreConnectionResponsePackets to drive the client's timeout paths.
         internal uint Flags;
         private double _time;
         private bool _running;

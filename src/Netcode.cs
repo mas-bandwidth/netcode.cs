@@ -146,14 +146,12 @@ namespace Netcode
         }
 
         public int Position => _position;
-        public int Remaining => _buffer.Length - _position;
 
         public byte U8() { byte v = _buffer[_position]; _position += 1; return v; }
         public ushort U16() { ushort v = BinaryPrimitives.ReadUInt16LittleEndian(_buffer.Slice(_position, 2)); _position += 2; return v; }
         public uint U32() { uint v = BinaryPrimitives.ReadUInt32LittleEndian(_buffer.Slice(_position, 4)); _position += 4; return v; }
         public ulong U64() { ulong v = BinaryPrimitives.ReadUInt64LittleEndian(_buffer.Slice(_position, 8)); _position += 8; return v; }
         public void Bytes(Span<byte> destination) { _buffer.Slice(_position, destination.Length).CopyTo(destination); _position += destination.Length; }
-        public void Skip(int count) { _position += count; }
     }
 
     internal static class Rng
@@ -571,8 +569,6 @@ namespace Netcode
             byte type = reader.U8();
             if (type == (byte)AddressType.IPv4)
             {
-                if (reader.Remaining < 6)
-                    return false;
                 byte a = reader.U8(), b = reader.U8(), c = reader.U8(), d = reader.U8();
                 address.SetIPv4(a, b, c, d);
                 address.Port = reader.U16();
@@ -580,8 +576,6 @@ namespace Netcode
             }
             if (type == (byte)AddressType.IPv6)
             {
-                if (reader.Remaining < 18)
-                    return false;
                 address.Type = AddressType.IPv6;
                 for (int j = 0; j < 8; j++)
                     address.SetIPv6Group(j, reader.U16());
