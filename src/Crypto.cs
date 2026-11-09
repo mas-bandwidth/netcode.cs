@@ -298,6 +298,18 @@ namespace Netcode
             st.Pad0 = 0; st.Pad1 = 0;
         }
 
+        /// <summary>One-shot Poly1305 MAC (RFC 8439 Section 2.5) of a message
+        /// under a 32-byte one-time key r ‖ s.</summary>
+        internal static void Poly1305Mac(Span<byte> mac16, ReadOnlySpan<byte> message, ReadOnlySpan<byte> key32)
+        {
+            Poly1305State st = default;
+            Poly1305Init(ref st, key32);
+            Span<byte> scratch = stackalloc byte[16];
+            int scratchLen = 0;
+            Poly1305Update(ref st, message, scratch, ref scratchLen);
+            Poly1305Finish(ref st, scratch, scratchLen, mac16);
+        }
+
         // ------------------------------------------------------------------
         // AEAD construction (RFC 8439 / libsodium chacha20poly1305_ietf)
         // ------------------------------------------------------------------
