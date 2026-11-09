@@ -481,4 +481,87 @@ internal static class Hostile
             Console.WriteLine($"  steady state allocated {allocated} bytes over 2000 frames");
         Check.That(allocated == 0);
     }
+
+    public static void TestZeroAllocationSocketSteadyState()
+    {
+        var serverConfig = new ServerConfig
+        {
+            ProtocolId = TestConstants.TestProtocolId,
+        };
+        TestConstants.PrivateKey.CopyTo(serverConfig.PrivateKey, 0);
+
+        double time = 0.0;
+        double deltaTime = 1.0 / 60.0;
+
+        using var client = new Client("127.0.0.1:50001", new ClientConfig(), time);
+        using var server = new Server("127.0.0.1:40001", serverConfig, time);
+
+        server.Start(1);
+
+        byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
+        byte[] userData = new byte[Protocol.UserDataBytes];
+        string[] address = { "127.0.0.1:40001" };
+        Check.That(ConnectTokenGenerator.Generate(address, address, 60, 15, 0x1234, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken));
+
+        client.Connect(connectToken);
+
+        while (client.State != ClientState.Connected)
+        {
+            Check.That(client.State > ClientState.Disconnected);
+            client.Update(time);
+            server.Update(time);
+            System.Threading.Thread.Sleep(10);
+            time += deltaTime;
+        }
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server.ClientConnected(0));
+
+        byte[] payload = new byte[Protocol.MaxPacketSize];
+        byte[] received = new byte[Protocol.MaxPacketSize];
+
+        void IdleFrame()
+        {
+            client.Update(time);
+            server.Update(time);
+            while (client.ReceivePacket(received, out _) >= 0) { }
+            while (server.ReceivePacket(0, received, out _) >= 0) { }
+            time += deltaTime;
+        }
+
+        void PayloadFrame()
+        {
+            client.SendPacket(payload);
+            server.SendPacket(0, payload);
+            client.Update(time);
+            server.Update(time);
+            while (client.ReceivePacket(received, out _) >= 0) { }
+            while (server.ReceivePacket(0, received, out _) >= 0) { }
+            time += deltaTime;
+        }
+
+        // warm up: fills queue pools, promotes jitted code
+        for (int i = 0; i < 2000; i++)
+        {
+            IdleFrame();
+            PayloadFrame();
+        }
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+
+        for (int i = 0; i < 200; i++)
+        {
+            IdleFrame();
+            PayloadFrame();
+        }
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server.ClientConnected(0));
+
+        if (allocated != 0)
+            Console.WriteLine($"  socket steady state allocated {allocated} bytes over 400 frames");
+        Check.That(allocated == 0);
+    }
 }
