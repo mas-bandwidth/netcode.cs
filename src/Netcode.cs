@@ -1568,7 +1568,7 @@ namespace Netcode
         {
             bool expired = (Timeout[index] > 0 && LastAccessTime[index] + Timeout[index] < time) ||
                            (ExpireTime[index] >= 0.0 && ExpireTime[index] < time);
-            if (expired)
+            if (expired && ClientIndex[index] == -1)
             {
                 CryptographicOperations.ZeroMemory(SendKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));
                 CryptographicOperations.ZeroMemory(ReceiveKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));

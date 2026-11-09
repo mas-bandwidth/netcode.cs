@@ -923,6 +923,21 @@ internal static class CoreTests
         Check.That(ownedKey.AsSpan().IndexOfAnyExcept((byte)0) == -1);
         Check.That(key.AsSpan().SequenceEqual(TestConstants.PrivateKey));
 
+        var ownedManager = new EncryptionManager();
+        Check.That(ownedManager.AddEncryptionMapping(in serverAddress, key, key, 1000, 1001, 15));
+        ownedManager.SetExpireTime(0, -1);
+        ownedManager.ClientIndex[0] = 0;
+        Check.That(ownedManager.AddEncryptionMapping(in clientAddress, key, key, 1030, -1, 15));
+        Check.That(ownedManager.SendKey.AsSpan(0, Protocol.KeyBytes).SequenceEqual(key));
+        Check.That(ownedManager.ReceiveKey.AsSpan(0, Protocol.KeyBytes).SequenceEqual(key));
+        Check.That(ownedManager.RemoveEncryptionMapping(in clientAddress, 1030));
+        Check.That(ownedManager.SendKey.AsSpan(0, Protocol.KeyBytes).SequenceEqual(key));
+        Check.That(ownedManager.ReceiveKey.AsSpan(0, Protocol.KeyBytes).SequenceEqual(key));
+        Check.That(ownedManager.Touch(0, in serverAddress, 1030));
+        Check.That(ownedManager.FindEncryptionMapping(in serverAddress, 1030) == 0);
+        Check.That(ownedManager.GetSendKey(0).SequenceEqual(key));
+        Check.That(ownedManager.GetReceiveKey(0).SequenceEqual(key));
+
         var manager = new EncryptionManager();
         Check.That(manager.AddEncryptionMapping(in serverAddress, key, key, 1000, 1001, 15));
         Check.That(manager.AddEncryptionMapping(in clientAddress, key, key, 1000, -1, 15));
