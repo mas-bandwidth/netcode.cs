@@ -151,6 +151,15 @@ internal static class Program
         RunTest("test_server_create_missing_override_callback", ClientServerTests.TestServerCreateMissingOverrideCallback);
         RunTest("test_client_loopback_requires_callback", ClientServerTests.TestClientLoopbackRequiresCallback);
         RunTest("test_server_loopback_requires_callback", ClientServerTests.TestServerLoopbackRequiresCallback);
+
+        // replay protection within a session (unit), port-in-use create errors and
+        // packet tagging (functional: real loopback sockets on ephemeral ports)
+        RunTest("test_replay_protection_duplicate_packet", SessionReplayTests.TestReplayProtectionDuplicatePacket);
+        RunTest("test_replay_protection_failed_decrypt", SessionReplayTests.TestReplayProtectionFailedDecrypt);
+        RunTest("test_client_create_port_in_use", ClientServerTests.TestClientCreatePortInUse);
+        RunTest("test_server_create_port_in_use", ClientServerTests.TestServerCreatePortInUse);
+        RunTest("test_packet_tagging", ClientServerTests.TestPacketTagging);
+
         RunTest("test_fuzz_read_packet_raw", Hostile.TestFuzzReadPacketRaw);
         RunTest("test_fuzz_packet_round_trip_corruption", Hostile.TestFuzzPacketRoundTripCorruption);
         RunTest("test_fuzz_connect_token", Hostile.TestFuzzConnectToken);
@@ -1178,5 +1187,147 @@ internal static class CoreTests
         }
 
         Check.That(totalReceived > 0);
+    }
+}
+
+// replay protection through PacketIO.ReadPacket within one session: the same
+// encrypted datagram read twice, and a datagram that fails authentication.
+// unit tests: no sockets, no real time (timestamps are fixed, starting at 1000).
+internal static class SessionReplayTests
+{
+    private const ulong TestTimestamp = 1000;
+
+    private static readonly bool[] Allowed = CreateAllowed();
+
+    private static bool[] CreateAllowed()
+    {
+        var allowed = new bool[PacketType.NumPackets];
+        allowed[PacketType.ConnectionKeepAlive] = true;
+        allowed[PacketType.ConnectionPayload] = true;
+        allowed[PacketType.ConnectionDisconnect] = true;
+        return allowed;
+    }
+
+    private static byte[] WritePacket(int packetType, byte[] packetData, ulong sequence, byte[] key)
+    {
+        byte[] buffer = new byte[Defines.MaxPacketBytes];
+        int bytes = PacketIO.WriteEncryptedPacket(buffer, packetType, packetData, sequence, key, TestConstants.TestProtocolId);
+        Check.That(bytes > 0);
+        return buffer.AsSpan(0, bytes).ToArray();
+    }
+
+    // ReadPacket decrypts in place, so every read gets its own copy of the datagram
+    private static ReadPacketResult Read(byte[] datagram, byte[] receiveBuffer, byte[] key, ReplayProtection replayProtection)
+    {
+        datagram.CopyTo(receiveBuffer, 0);
+        return PacketIO.ReadPacket(
+            receiveBuffer.AsSpan(0, datagram.Length),
+            hasReadPacketKey: true, key,
+            TestConstants.TestProtocolId,
+            TestTimestamp,
+            hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
+            Allowed, replayProtection);
+    }
+
+    public static void TestReplayProtectionDuplicatePacket()
+    {
+        var rng = new TestRng(0x5EED1000);
+
+        byte[] key = new byte[Protocol.KeyBytes];
+        rng.Fill(key);
+
+        byte[] payload = new byte[64];
+        rng.Fill(payload);
+
+        byte[] keepAliveData = new byte[8];
+
+        byte[] receiveBuffer = new byte[Defines.MaxPacketBytes];
+
+        var replayProtection = new ReplayProtection();
+
+        byte[] payloadPacket = WritePacket(PacketType.ConnectionPayload, payload, 1000, key);
+
+        // the first read of the datagram is accepted
+
+        ReadPacketResult first = Read(payloadPacket, receiveBuffer, key, replayProtection);
+        Check.That(first.Type == PacketType.ConnectionPayload);
+        Check.That(first.Sequence == 1000);
+        Check.That(first.DataLength == payload.Length);
+        Check.That(receiveBuffer.AsSpan(first.DataOffset, first.DataLength).SequenceEqual(payload));
+        Check.That(replayProtection.MostRecentSequence == 1000);
+
+        // the identical datagram read again in the same session is ignored
+
+        ReadPacketResult second = Read(payloadPacket, receiveBuffer, key, replayProtection);
+        Check.That(second.Type == -1);
+
+        // the next sequence is still accepted, and its duplicate ignored too
+
+        byte[] keepAlivePacket = WritePacket(PacketType.ConnectionKeepAlive, keepAliveData, 1001, key);
+
+        ReadPacketResult third = Read(keepAlivePacket, receiveBuffer, key, replayProtection);
+        Check.That(third.Type == PacketType.ConnectionKeepAlive);
+        Check.That(third.Sequence == 1001);
+
+        Check.That(Read(keepAlivePacket, receiveBuffer, key, replayProtection).Type == -1);
+
+        // an older sequence inside the window that was never received is still accepted once
+
+        byte[] olderPacket = WritePacket(PacketType.ConnectionPayload, payload, 999, key);
+
+        Check.That(Read(olderPacket, receiveBuffer, key, replayProtection).Type == PacketType.ConnectionPayload);
+        Check.That(Read(olderPacket, receiveBuffer, key, replayProtection).Type == -1);
+        Check.That(Read(payloadPacket, receiveBuffer, key, replayProtection).Type == -1);
+    }
+
+    public static void TestReplayProtectionFailedDecrypt()
+    {
+        var rng = new TestRng(0x5EED2000);
+
+        byte[] key = new byte[Protocol.KeyBytes];
+        rng.Fill(key);
+
+        byte[] wrongKey = new byte[Protocol.KeyBytes];
+        rng.Fill(wrongKey);
+
+        byte[] payload = new byte[64];
+        rng.Fill(payload);
+
+        byte[] receiveBuffer = new byte[Defines.MaxPacketBytes];
+
+        var replayProtection = new ReplayProtection();
+
+        byte[] authentic = WritePacket(PacketType.ConnectionPayload, payload, 1000, key);
+
+        // the same datagram with one byte of its tag changed fails authentication
+
+        byte[] tampered = (byte[])authentic.Clone();
+        tampered[tampered.Length - 1] ^= 0x01;
+
+        Check.That(Read(tampered, receiveBuffer, key, replayProtection).Type == -1);
+        Check.That(replayProtection.MostRecentSequence == 0);
+        Check.That(!replayProtection.AlreadyReceived(1000));
+
+        // so does a datagram at a much higher sequence under the wrong key
+
+        byte[] forgedAhead = WritePacket(PacketType.ConnectionPayload, payload, 1000 + Defines.ReplayProtectionBufferSize * 4, wrongKey);
+
+        Check.That(Read(forgedAhead, receiveBuffer, key, replayProtection).Type == -1);
+        Check.That(replayProtection.MostRecentSequence == 0);
+        Check.That(!replayProtection.AlreadyReceived(1000));
+
+        // neither moved the window: the authentic datagram at that sequence is accepted
+
+        ReadPacketResult result = Read(authentic, receiveBuffer, key, replayProtection);
+        Check.That(result.Type == PacketType.ConnectionPayload);
+        Check.That(result.Sequence == 1000);
+        Check.That(receiveBuffer.AsSpan(result.DataOffset, result.DataLength).SequenceEqual(payload));
+        Check.That(replayProtection.MostRecentSequence == 1000);
+
+        // and once accepted, the tampered copy and the authentic copy are both ignored
+
+        Check.That(Read(tampered, receiveBuffer, key, replayProtection).Type == -1);
+        Check.That(Read(authentic, receiveBuffer, key, replayProtection).Type == -1);
+        Check.That(replayProtection.MostRecentSequence == 1000);
     }
 }

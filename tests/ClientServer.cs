@@ -1296,6 +1296,159 @@ internal static class ClientServerTests
         Check.That(!server.ClientConnected(0));
         Check.That(server.NumConnectedClients == 0);
     }
+
+    // functional tests below: real loopback sockets. each binds an ephemeral port
+    // first and reuses the port the OS gave it, so nothing depends on a fixed port
+    // being free, and no packets are exchanged.
+
+    public static void TestClientCreatePortInUse()
+    {
+        // functional. port of the "port already in use" blocks of test_client_create_error:
+        // a second client bound to a port in use fails at socket creation, per family.
+
+        {
+            using var first = new Client("127.0.0.1:0");
+            Check.That(first.Port != 0);
+            try
+            {
+                using var second = new Client($"127.0.0.1:{first.Port}");
+                Check.That(false);
+            }
+            catch (NetcodeException e)
+            {
+                Check.That(e.ErrorCode == (int)ClientCreateError.CreateSocketIpv4Failed);
+            }
+        }
+
+        {
+            using var first = new Client("[::1]:0");
+            Check.That(first.Port != 0);
+            try
+            {
+                using var second = new Client($"[::1]:{first.Port}");
+                Check.That(false);
+            }
+            catch (NetcodeException e)
+            {
+                Check.That(e.ErrorCode == (int)ClientCreateError.CreateSocketIpv6Failed);
+            }
+        }
+    }
+
+    public static void TestServerCreatePortInUse()
+    {
+        // functional. port of the "port already in use" blocks of test_server_create_error:
+        // a port in use is reported as a bind failure, distinct from other socket errors,
+        // per family.
+
+        {
+            using var first = new Server("127.0.0.1:0", CreateServerConfig(null));
+            Check.That(first.Port != 0);
+            try
+            {
+                using var second = new Server($"127.0.0.1:{first.Port}", CreateServerConfig(null));
+                Check.That(false);
+            }
+            catch (NetcodeException e)
+            {
+                Check.That(e.ErrorCode == (int)ServerCreateError.BindSocketIpv4Failed);
+            }
+        }
+
+        {
+            using var first = new Server("[::1]:0", CreateServerConfig(null));
+            Check.That(first.Port != 0);
+            try
+            {
+                using var second = new Server($"[::1]:{first.Port}", CreateServerConfig(null));
+                Check.That(false);
+            }
+            catch (NetcodeException e)
+            {
+                Check.That(e.ErrorCode == (int)ServerCreateError.BindSocketIpv6Failed);
+            }
+        }
+    }
+
+    private static System.Net.Sockets.Socket UnderlyingSocket(object owner, string field)
+    {
+        const System.Reflection.BindingFlags Flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+
+        object? netcodeSocket = owner.GetType().GetField(field, Flags)?.GetValue(owner);
+        Check.That(netcodeSocket is NetcodeSocket);
+
+        object? socket = typeof(NetcodeSocket).GetField("_socket", Flags)?.GetValue(netcodeSocket);
+        Check.That(socket is System.Net.Sockets.Socket);
+
+        return (System.Net.Sockets.Socket)socket!;
+    }
+
+    private static int TrafficClass(System.Net.Sockets.Socket socket)
+    {
+        if (socket.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+        {
+            // IPV6_TCLASS: 67 on linux, 36 on macOS/BSD
+            int optname = OperatingSystem.IsLinux() ? 67 : 36;
+            byte[] value = new byte[4];
+            int bytes = socket.GetRawSocketOption(41 /* IPPROTO_IPV6 */, optname, value);
+            Check.That(bytes == 4);
+            return BitConverter.ToInt32(value, 0);
+        }
+
+        object? tos = socket.GetSocketOption(System.Net.Sockets.SocketOptionLevel.IP, System.Net.Sockets.SocketOptionName.TypeOfService);
+        Check.That(tos is int);
+        return (int)tos!;
+    }
+
+    public static void TestPacketTagging()
+    {
+        // functional. port of test_packet_tagging: create a server and a client with
+        // packet tagging on and connect, over ipv4 and ipv6. beyond the C smoke test,
+        // read the option back from each socket: DSCP EF (46) as IP_TOS / IPV6_TCLASS
+        // when tagging is on, and not 46 when it is off. tagging is a documented no-op
+        // on Windows, so the option is only checked elsewhere.
+
+        string[] bindAddresses = { "127.0.0.1", "[::1]" };
+        string[] socketFields = { "_socketIpv4", "_socketIpv6" };
+
+        for (int i = 0; i < bindAddresses.Length; i++)
+        {
+            foreach (bool tagging in new[] { true, false })
+            {
+                var serverConfig = CreateServerConfig(null);
+                serverConfig.EnablePacketTagging = tagging;
+
+                using var server = new Server($"{bindAddresses[i]}:0", serverConfig);
+                Check.That(server.Port != 0);
+
+                using var client = new Client($"{bindAddresses[i]}:0", new ClientConfig { EnablePacketTagging = tagging });
+                Check.That(client.Port != 0);
+
+                byte[] connectToken = GenerateConnectToken($"{bindAddresses[i]}:{server.Port}", TestConstants.TestClientId);
+
+                server.Start(1);
+                client.Connect(connectToken);
+                Check.That(client.State == ClientState.SendingConnectionRequest);
+
+                if (OperatingSystem.IsWindows())
+                    continue;
+
+                int serverTrafficClass = TrafficClass(UnderlyingSocket(server, socketFields[i]));
+                int clientTrafficClass = TrafficClass(UnderlyingSocket(client, socketFields[i]));
+
+                if (tagging)
+                {
+                    Check.That(serverTrafficClass == 46);
+                    Check.That(clientTrafficClass == 46);
+                }
+                else
+                {
+                    Check.That(serverTrafficClass != 46);
+                    Check.That(clientTrafficClass != 46);
+                }
+            }
+        }
+    }
 }
 
 internal static class Soak
