@@ -1942,6 +1942,9 @@ namespace Netcode
             int result;
             try
             {
+                if (!_socket.Poll(0, SelectMode.SelectRead))
+                    return 0;
+
                 result = _socket.ReceiveFrom(packetData, SocketFlags.None, _receiveAddress);
             }
             catch (SocketException e)
