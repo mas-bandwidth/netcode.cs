@@ -105,6 +105,7 @@ internal static class Program
         RunTest("test_crypto_aead_vectors", CoreTests.TestCryptoAeadVectors);
         RunTest("test_crypto_differential_bcl", Hostile.TestCryptoDifferentialBcl);
         RunTest("test_queue", CoreTests.TestQueue);
+        RunTest("test_unused_members_removed", CoreTests.TestUnusedMembersRemoved);
         RunTest("test_sequence", CoreTests.TestSequence);
         RunTest("test_address", CoreTests.TestAddress);
         RunTest("test_connect_token", CoreTests.TestConnectToken);
@@ -359,6 +360,23 @@ internal static class CoreTests
 
         Check.That(queue.Count == 0);
         Check.That(queue.Pop(popped, out _) == -1);
+    }
+
+    public static void TestUnusedMembersRemoved()
+    {
+        const System.Reflection.BindingFlags Declared =
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.Static |
+            System.Reflection.BindingFlags.DeclaredOnly;
+
+        Check.That(typeof(ByteReader).GetMethod("Skip", Declared) == null);
+        Check.That(typeof(ByteReader).GetProperty("Remaining", Declared) == null);
+        Check.That(typeof(Aead).GetField("NonceBytesX", Declared) == null);
+        Check.That(typeof(ConnectTokenHistory).GetMethod("State", Declared) == null);
+        Check.That(typeof(ConnectTokenHistory).GetMethod("EntryTime", Declared) == null);
+        Check.That(typeof(ConnectTokenHistory).GetField("_time", Declared) == null);
     }
 
     public static void TestSequence()

@@ -30,7 +30,6 @@ namespace Netcode
         public const int Full = -2;
 
         private readonly ConnectTokenEntryState[] _state = new ConnectTokenEntryState[MaxEntries];
-        private readonly double[] _time = new double[MaxEntries];
         private readonly ulong[] _expireTimestamp = new ulong[MaxEntries];
         private readonly byte[] _mac = new byte[MaxEntries * Protocol.MacBytes];
         private readonly Address[] _address = new Address[MaxEntries];
@@ -43,8 +42,6 @@ namespace Netcode
             Array.Clear(_expireTimestamp);
             Array.Clear(_mac);
             Array.Clear(_address);
-            for (int i = 0; i < MaxEntries; i++)
-                _time[i] = -1000.0;
         }
 
         public int FindOrAdd(in Address address, ReadOnlySpan<byte> mac, ulong expireTimestamp, ulong currentTimestamp, double time)
@@ -69,7 +66,6 @@ namespace Netcode
                     return Full;
 
                 _state[freeTokenIndex] = ConnectTokenEntryState.Pending;
-                _time[freeTokenIndex] = time;
                 _expireTimestamp[freeTokenIndex] = expireTimestamp;
                 _address[freeTokenIndex] = address;
                 mac.CopyTo(_mac.AsSpan(freeTokenIndex * Protocol.MacBytes, Protocol.MacBytes));
@@ -89,9 +85,6 @@ namespace Netcode
                 throw new ArgumentOutOfRangeException(nameof(index));
             _state[index] = ConnectTokenEntryState.Consumed;
         }
-
-        public ConnectTokenEntryState State(int index) => _state[index];
-        public double EntryTime(int index) => _time[index];
     }
 
     /// <summary>Why server creation failed (carried by NetcodeException.ErrorCode). Bind failures
