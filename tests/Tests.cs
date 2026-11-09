@@ -15,6 +15,7 @@
 */
 
 using System;
+using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 
 namespace Netcode.Tests;
@@ -102,6 +103,8 @@ internal static class Program
 
         Console.WriteLine("[netcode.cs tests]\n");
 
+        RunTest("test_socket_connection_reset_control", CoreTests.TestSocketConnectionResetControl);
+
         RunTest("test_crypto_aead_vectors", CoreTests.TestCryptoAeadVectors);
         RunTest("test_crypto_differential_bcl", Hostile.TestCryptoDifferentialBcl);
         RunTest("test_queue", CoreTests.TestQueue);
@@ -176,6 +179,32 @@ internal static class Program
 
 internal static class CoreTests
 {
+    private sealed class ControlHandle : IDisposable
+    {
+        public int DisposeCount;
+        public void Dispose() => DisposeCount++;
+    }
+
+    public static void TestSocketConnectionResetControl()
+    {
+        var failedHandle = new ControlHandle();
+        int controlCalls = 0;
+        NetcodeSocket.CreateError error = NetcodeSocket.ConfigureConnectionReset(failedHandle, () =>
+        {
+            controlCalls++;
+            throw new SocketException((int)SocketError.OperationNotSupported);
+        });
+        Check.That(error == NetcodeSocket.CreateError.CreateFailed);
+        Check.That(controlCalls == 1);
+        Check.That(failedHandle.DisposeCount == 1);
+
+        var successfulHandle = new ControlHandle();
+        error = NetcodeSocket.ConfigureConnectionReset(successfulHandle, () => controlCalls++);
+        Check.That(error == NetcodeSocket.CreateError.None);
+        Check.That(controlCalls == 2);
+        Check.That(successfulHandle.DisposeCount == 0);
+    }
+
     // Canary inputs for FloatMultiplyAddRoundsTwice. Deliberately mutable static
     // fields, not constants: the JIT must not be able to fold the test expression
     // at compile time, or the canary would prove nothing about the runtime.
