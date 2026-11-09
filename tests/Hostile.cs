@@ -324,7 +324,26 @@ internal static class Hostile
 
     public static void TestFuzzParseAddress()
     {
-        // the C repo's fuzz corpus seeds, when present (reused across implementations)
+        // embedded seeds keep corpus coverage available in standalone checkouts
+
+        string[] corpus =
+        {
+            "", "0.0.0.0", "127.0.0.1:0", "255.255.255.255:65535",
+            "::", "::1", "[::1]:40000", "[2001:db8::1]:65535",
+            "1:2:3:4:5:6:7:8", "[::ffff:192.0.2.1]:0",
+            "256.0.0.1", "127.1", "127.0.0.1:", "127.0.0.1:65536",
+            "127.0.0.1:-1", "127.0.0.1:port", "127.0.0.1\0:40000",
+            "[", "[::1", "[::1]:", "[::1]:65536", "[::1]:-1",
+            "1::2::3", "fe80::1%eth0", "[::1]:99999999999999999999"
+        };
+        int exercised = 0;
+        foreach (string text in corpus)
+        {
+            ExerciseParse(text);
+            exercised++;
+        }
+
+        // also reuse the C repo's fuzz corpus seeds when present
 
         string corpusDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "netcode", "fuzz", "corpus", "fuzz_parse_address");
         string? envCorpus = Environment.GetEnvironmentVariable("NETCODE_FUZZ_CORPUS");
@@ -339,9 +358,12 @@ internal static class Hostile
                 string text = File.ReadAllText(file);
                 ExerciseParse(text);
                 corpusFiles++;
+                exercised++;
             }
         }
         Console.WriteLine($"  (corpus files exercised: {corpusFiles})");
+        Console.WriteLine($"  (corpus inputs exercised: {exercised})");
+        Check.That(exercised > 0);
 
         // seeded random strings over the parser's alphabet
 
