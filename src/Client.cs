@@ -799,10 +799,10 @@ namespace Netcode
             }
 
             NetcodeLog.Info($"client connected to server via loopback as client {clientIndex}\n");
-            _state = ClientState.Connected;
             _clientIndex = clientIndex;
             _maxClients = maxClients;
             _loopback = true;
+            SetState(ClientState.Connected);
         }
 
         /// <summary>Disconnect a loopback client.</summary>
