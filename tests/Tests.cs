@@ -156,6 +156,7 @@ internal static class Program
         RunTest("test_fuzz_connect_token", Hostile.TestFuzzConnectToken);
         RunTest("test_fuzz_parse_address", Hostile.TestFuzzParseAddress);
         RunTest("test_zero_allocation_steady_state", Hostile.TestZeroAllocationSteadyState);
+        RunTest("test_zero_allocation_socket_steady_state", Hostile.TestZeroAllocationSocketSteadyState);
 
         Console.WriteLine("\nAll tests passed.");
         return 0;
