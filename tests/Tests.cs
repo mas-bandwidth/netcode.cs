@@ -122,6 +122,7 @@ internal static class Program
         RunTest("test_replay_protection", CoreTests.TestReplayProtection);
         RunTest("test_network_simulator_determinism", CoreTests.TestNetworkSimulatorDeterminism);
         RunTest("FloatMultiplyAddRoundsTwice", CoreTests.FloatMultiplyAddRoundsTwice);
+        RunTest("test_ipv6_traffic_class_option", CoreTests.TestIpv6TrafficClassOption);
         RunTest("test_client_create", ClientServerTests.TestClientCreate);
         RunTest("test_server_create", ClientServerTests.TestServerCreate);
         RunTest("test_server_restart_global_sequence", ClientServerTests.TestServerRestartGlobalSequence);
@@ -194,6 +195,21 @@ internal static class CoreTests
         double db = _canaryDoubleA;
         double dc = _canaryDoubleC;
         Check.That(BitConverter.DoubleToInt64Bits(da * db + dc) == 0L);
+    }
+
+    public static void TestIpv6TrafficClassOption()
+    {
+        // IPV6_TCLASS as each OS's own headers define it
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.Linux) == 67);
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.Android) == 67);
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.MacOS) == 36);
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.IOS) == 36);
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.MacCatalyst) == 36);
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.TvOS) == 36);
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.FreeBSD) == 61);
+
+        // no known option number: IPv6 tagging is skipped
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.Other) == -1);
     }
 
     public static void TestCryptoAeadVectors()
