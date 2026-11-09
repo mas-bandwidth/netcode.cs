@@ -1714,6 +1714,43 @@ namespace Netcode
             _sendAddress = sendAddress;
         }
 
+        internal const int BufferSizeMinimum = 64 * 1024;
+
+        // linux and windows clamp a socket buffer request that exceeds the OS limit, but the BSDs reject it
+        // instead (a stock NetBSD rejects anything over about 227 KiB). halve the request until one is accepted.
+        // a larger buffer is an optimisation, never a requirement: if no request down to the minimum is accepted,
+        // the socket keeps the OS default. returns the size accepted, or 0 if the OS default was kept.
+
+        internal static int BufferSizeBackOff(int requestedSize, Func<int, bool> trySize)
+        {
+            for (int size = requestedSize; size >= BufferSizeMinimum; size /= 2)
+            {
+                if (trySize(size))
+                    return size;
+            }
+            return 0;
+        }
+
+        private static void IncreaseBufferSize(Socket socket, SocketOptionName option, int requestedSize, string name)
+        {
+            int size = BufferSizeBackOff(requestedSize, trySize =>
+            {
+                try
+                {
+                    socket.SetSocketOption(SocketOptionLevel.Socket, option, trySize);
+                    return true;
+                }
+                catch (SocketException)
+                {
+                    return false;
+                }
+            });
+            if (size == 0)
+                NetcodeLog.Info($"socket {name} buffer size kept at the OS default ({requestedSize} was not accepted)\n");
+            else if (size != requestedSize)
+                NetcodeLog.Info($"socket {name} buffer size reduced from {requestedSize} to {size}\n");
+        }
+
         public static CreateError Create(in Address address, int sendBufferSize, int receiveBufferSize, bool enablePacketTagging, out NetcodeSocket? result)
         {
             result = null;
@@ -1750,27 +1787,8 @@ namespace Netcode
                 if (address.Type == AddressType.IPv6)
                     socket.DualMode = false; // force IPv6 only, like the C library
 
-                try
-                {
-                    socket.SendBufferSize = sendBufferSize;
-                }
-                catch (SocketException)
-                {
-                    socket.Dispose();
-                    NetcodeLog.Error("error: failed to set socket send buffer size\n");
-                    return CreateError.SockoptSndbufFailed;
-                }
-
-                try
-                {
-                    socket.ReceiveBufferSize = receiveBufferSize;
-                }
-                catch (SocketException)
-                {
-                    socket.Dispose();
-                    NetcodeLog.Error("error: failed to set socket receive buffer size\n");
-                    return CreateError.SockoptRcvbufFailed;
-                }
+                IncreaseBufferSize(socket, SocketOptionName.SendBuffer, sendBufferSize, "send");
+                IncreaseBufferSize(socket, SocketOptionName.ReceiveBuffer, receiveBufferSize, "receive");
 
                 try
                 {
