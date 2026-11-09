@@ -275,6 +275,7 @@ namespace Netcode
             if (s.Length > 0 && s[0] == '[')
             {
                 // probably "[addr6]:port"
+                bool hasPort = false;
                 int baseIndex = s.Length - 1;
                 for (int i = 0; i < 6; i++) // ":65535" is the longest possible port suffix
                 {
@@ -286,17 +287,24 @@ namespace Netcode
                         if (!TryParsePort(s.Slice(index + 1), out port))
                             return false;
                         s = s.Slice(0, index - 1);
+                        hasPort = true;
                         break;
                     }
                 }
 
-                // if a port is omitted, strip a trailing ']' so "[addr]" parses as the address.
+                // strip at most one ']': the one removed above with a port, or a
+                // trailing one when a port is omitted so "[addr]" parses as the address.
                 // NOTE: like the C library, a missing ']' is tolerated ("[::1" parses as ::1)
-                if (s[s.Length - 1] == ']')
+                if (!hasPort && s.Length > 0 && s[s.Length - 1] == ']')
                     s = s.Slice(0, s.Length - 1);
 
                 s = s.Slice(1);
             }
+
+            // any bracket or zone marker left in the address part is not a valid
+            // address for IPAddress.TryParse to reinterpret on our behalf
+            if (s.IndexOf('[') >= 0 || s.IndexOf(']') >= 0 || s.IndexOf('%') >= 0)
+                return false;
 
             if (TryParseIpv6(s, ref address))
             {
