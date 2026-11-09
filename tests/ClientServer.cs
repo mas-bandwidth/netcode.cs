@@ -63,6 +63,7 @@ internal static class ClientServerTests
 
     public static void TestClientCreate()
     {
+        TestClientServerAddressFamilies();
         {
             using var client = new Client("127.0.0.1:40000");
             Check.That(client.Port == 40000);
@@ -89,6 +90,60 @@ internal static class ClientServerTests
         catch (NetcodeException e)
         {
             Check.That(e.ErrorCode == (int)ClientCreateError.ParseAddressFailed);
+        }
+    }
+
+    private static void TestClientServerAddressFamilies()
+    {
+        static byte[] Token(params string[] addresses)
+        {
+            var parsed = new Address[addresses.Length];
+            for (int i = 0; i < addresses.Length; i++)
+                Check.That(Address.TryParse(addresses[i], out parsed[i]));
+            byte[] token = new byte[Protocol.ConnectTokenBytes];
+            Check.That(ConnectTokenGenerator.GenerateInternal(parsed, parsed, 1000, 2000,
+                TestConstants.TestTimeoutSeconds, 1, TestConstants.TestProtocolId,
+                TestConstants.PrivateKey, new byte[Protocol.UserDataBytes], new byte[Defines.ConnectTokenNonceBytes], token));
+            return token;
+        }
+
+        foreach (bool ipv6 in new[] { false, true })
+        {
+            string matching = ipv6 ? "[::1]:50000" : "127.0.0.1:50000";
+            string mismatched = ipv6 ? "127.0.0.1:50001" : "[::1]:50001";
+            var config = new ClientConfig
+            {
+                OverrideSendAndReceive = true,
+                SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+                ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0,
+            };
+            using var client = new Client(matching, config, 1000.0);
+            var socketField = typeof(Client).GetField(ipv6 ? "_socketIpv6" : "_socketIpv4",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            // Only socket presence is read by address selection. A sentinel exercises
+            // that path without opening a socket or sending/receiving any packets.
+            socketField.SetValue(client, System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(NetcodeSocket)));
+            config.OverrideSendAndReceive = false;
+            try
+            {
+                client.Connect(Token(mismatched));
+                Check.That(client.State == ClientState.InvalidConnectToken);
+
+                client.Connect(Token(mismatched, matching, mismatched, matching, mismatched));
+                Check.That(client.State == ClientState.SendingConnectionRequest);
+                Check.That(client.ServerAddress.ToString() == matching);
+                var next = typeof(Client).GetMethod("ConnectToNextServer",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+                Check.That((bool)next.Invoke(client, null)!);
+                Check.That(client.ServerAddress.ToString() == matching);
+                Check.That(!(bool)next.Invoke(client, null)!);
+            }
+            finally
+            {
+                // The sentinel has no underlying socket and must never be disposed.
+                socketField.SetValue(client, null);
+                config.OverrideSendAndReceive = true;
+            }
         }
     }
 
@@ -1080,6 +1135,8 @@ internal static class ClientServerTests
 
     public static void TestLoopback()
     {
+        TestClientStateChangeNotification();
+
         NetworkSimulator simulator = CreateSimulator();
 
         double time = 0.0;
@@ -1191,6 +1248,49 @@ internal static class ClientServerTests
         Check.That(loopbackClient.State == ClientState.Disconnected);
     }
 
+    private static void TestClientStateChangeNotification()
+    {
+        Client? clientRef = null;
+        bool observedNewState = false;
+        int disconnectNotifications = 0;
+        var callbackException = new InvalidOperationException("state notification");
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0,
+            SendLoopbackPacket = (clientIndex, payload, sequence) => { },
+            OnStateChange = (previous, next) =>
+            {
+                if (next != ClientState.Disconnected)
+                    return;
+                Check.That(previous == ClientState.Connected);
+                observedNewState = clientRef!.State == next;
+                disconnectNotifications++;
+                throw callbackException;
+            },
+        };
+        using var client = new Client("127.0.0.1:40000", config, 1000.0);
+        clientRef = client;
+        client.ConnectLoopback(0, 1);
+
+        try
+        {
+            client.Disconnect();
+            Check.That(false);
+        }
+        catch (InvalidOperationException exception)
+        {
+            Check.That(ReferenceEquals(exception, callbackException));
+        }
+
+        Check.That(observedNewState);
+        Check.That(client.State == ClientState.Disconnected);
+        Check.That(disconnectNotifications == 1);
+        client.Disconnect();
+        Check.That(disconnectNotifications == 1);
+    }
+
     public static void TestClientCreateMissingOverrideCallback()
     {
         // override_send_and_receive with either override callback missing is refused at
@@ -1291,6 +1391,159 @@ internal static class ClientServerTests
         Check.That(!server.ClientLoopback(0));
         Check.That(!server.ClientConnected(0));
         Check.That(server.NumConnectedClients == 0);
+    }
+
+    // functional tests below: real loopback sockets. each binds an ephemeral port
+    // first and reuses the port the OS gave it, so nothing depends on a fixed port
+    // being free, and no packets are exchanged.
+
+    public static void TestClientCreatePortInUse()
+    {
+        // functional. port of the "port already in use" blocks of test_client_create_error:
+        // a second client bound to a port in use fails at socket creation, per family.
+
+        {
+            using var first = new Client("127.0.0.1:0");
+            Check.That(first.Port != 0);
+            try
+            {
+                using var second = new Client($"127.0.0.1:{first.Port}");
+                Check.That(false);
+            }
+            catch (NetcodeException e)
+            {
+                Check.That(e.ErrorCode == (int)ClientCreateError.CreateSocketIpv4Failed);
+            }
+        }
+
+        {
+            using var first = new Client("[::1]:0");
+            Check.That(first.Port != 0);
+            try
+            {
+                using var second = new Client($"[::1]:{first.Port}");
+                Check.That(false);
+            }
+            catch (NetcodeException e)
+            {
+                Check.That(e.ErrorCode == (int)ClientCreateError.CreateSocketIpv6Failed);
+            }
+        }
+    }
+
+    public static void TestServerCreatePortInUse()
+    {
+        // functional. port of the "port already in use" blocks of test_server_create_error:
+        // a port in use is reported as a bind failure, distinct from other socket errors,
+        // per family.
+
+        {
+            using var first = new Server("127.0.0.1:0", CreateServerConfig(null));
+            Check.That(first.Port != 0);
+            try
+            {
+                using var second = new Server($"127.0.0.1:{first.Port}", CreateServerConfig(null));
+                Check.That(false);
+            }
+            catch (NetcodeException e)
+            {
+                Check.That(e.ErrorCode == (int)ServerCreateError.BindSocketIpv4Failed);
+            }
+        }
+
+        {
+            using var first = new Server("[::1]:0", CreateServerConfig(null));
+            Check.That(first.Port != 0);
+            try
+            {
+                using var second = new Server($"[::1]:{first.Port}", CreateServerConfig(null));
+                Check.That(false);
+            }
+            catch (NetcodeException e)
+            {
+                Check.That(e.ErrorCode == (int)ServerCreateError.BindSocketIpv6Failed);
+            }
+        }
+    }
+
+    private static System.Net.Sockets.Socket UnderlyingSocket(object owner, string field)
+    {
+        const System.Reflection.BindingFlags Flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+
+        object? netcodeSocket = owner.GetType().GetField(field, Flags)?.GetValue(owner);
+        Check.That(netcodeSocket is NetcodeSocket);
+
+        object? socket = typeof(NetcodeSocket).GetField("_socket", Flags)?.GetValue(netcodeSocket);
+        Check.That(socket is System.Net.Sockets.Socket);
+
+        return (System.Net.Sockets.Socket)socket!;
+    }
+
+    private static int TrafficClass(System.Net.Sockets.Socket socket)
+    {
+        if (socket.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+        {
+            // IPV6_TCLASS: 67 on linux, 36 on macOS/BSD
+            int optname = OperatingSystem.IsLinux() ? 67 : 36;
+            byte[] value = new byte[4];
+            int bytes = socket.GetRawSocketOption(41 /* IPPROTO_IPV6 */, optname, value);
+            Check.That(bytes == 4);
+            return BitConverter.ToInt32(value, 0);
+        }
+
+        object? tos = socket.GetSocketOption(System.Net.Sockets.SocketOptionLevel.IP, System.Net.Sockets.SocketOptionName.TypeOfService);
+        Check.That(tos is int);
+        return (int)tos!;
+    }
+
+    public static void TestPacketTagging()
+    {
+        // functional. port of test_packet_tagging: create a server and a client with
+        // packet tagging on and connect, over ipv4 and ipv6. beyond the C smoke test,
+        // read the option back from each socket: DSCP EF (46) as IP_TOS / IPV6_TCLASS
+        // when tagging is on, and not 46 when it is off. tagging is a documented no-op
+        // on Windows, so the option is only checked elsewhere.
+
+        string[] bindAddresses = { "127.0.0.1", "[::1]" };
+        string[] socketFields = { "_socketIpv4", "_socketIpv6" };
+
+        for (int i = 0; i < bindAddresses.Length; i++)
+        {
+            foreach (bool tagging in new[] { true, false })
+            {
+                var serverConfig = CreateServerConfig(null);
+                serverConfig.EnablePacketTagging = tagging;
+
+                using var server = new Server($"{bindAddresses[i]}:0", serverConfig);
+                Check.That(server.Port != 0);
+
+                using var client = new Client($"{bindAddresses[i]}:0", new ClientConfig { EnablePacketTagging = tagging });
+                Check.That(client.Port != 0);
+
+                byte[] connectToken = GenerateConnectToken($"{bindAddresses[i]}:{server.Port}", TestConstants.TestClientId);
+
+                server.Start(1);
+                client.Connect(connectToken);
+                Check.That(client.State == ClientState.SendingConnectionRequest);
+
+                if (OperatingSystem.IsWindows())
+                    continue;
+
+                int serverTrafficClass = TrafficClass(UnderlyingSocket(server, socketFields[i]));
+                int clientTrafficClass = TrafficClass(UnderlyingSocket(client, socketFields[i]));
+
+                if (tagging)
+                {
+                    Check.That(serverTrafficClass == 46);
+                    Check.That(clientTrafficClass == 46);
+                }
+                else
+                {
+                    Check.That(serverTrafficClass != 46);
+                    Check.That(clientTrafficClass != 46);
+                }
+            }
+        }
     }
 }
 

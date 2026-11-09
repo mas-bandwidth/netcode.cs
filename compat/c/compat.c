@@ -10,6 +10,7 @@
         goldens <dir>            write golden files (fixed keys/nonces/timestamps)
         verify <dir>             read + decrypt + validate golden files (either side's)
         mint <file> <address>    mint a connect token with the shared test key
+        check-addresses          check address parsing verdicts against a fixed table
         server <port>            run a server session leg (connect/exchange/disconnect)
         client <port> <token>    run a client session leg against a server
 
@@ -437,6 +438,50 @@ static int do_verify( const char * dir )
     return 1;
 }
 
+static int do_check_addresses( void )
+{
+    /* the same inputs and verdicts as DoCheckAddresses in compat/Compat.cs:
+       both parsers must agree on every row. Zone-id inputs are covered by the
+       C# unit tests only; inet_pton zone handling varies by platform. */
+    static const struct { const char * input; int valid; int type; int port; } cases[] = {
+        { "[[::1]]", 0, 0, 0 },
+        { "[::1]]:80", 0, 0, 0 },
+        { "[::1]:80]", 0, 0, 0 },
+        { "[::1]]", 0, 0, 0 },
+        { "127.0.0.1", 1, NETCODE_ADDRESS_IPV4, 0 },
+        { "127.0.0.1:80", 1, NETCODE_ADDRESS_IPV4, 80 },
+        { "::1", 1, NETCODE_ADDRESS_IPV6, 0 },
+        { "[::1]", 1, NETCODE_ADDRESS_IPV6, 0 },
+        { "[::1]:80", 1, NETCODE_ADDRESS_IPV6, 80 },
+        { "fe80::1", 1, NETCODE_ADDRESS_IPV6, 0 },
+        { "[fe80::202:b3ff:fe1e:8329]:40000", 1, NETCODE_ADDRESS_IPV6, 40000 },
+    };
+
+    int i;
+    for ( i = 0; i < (int) ( sizeof( cases ) / sizeof( cases[0] ) ); i++ )
+    {
+        struct netcode_address_t address;
+        int parsed = netcode_parse_address( cases[i].input, &address ) == NETCODE_OK;
+        if ( parsed != cases[i].valid )
+        {
+            printf( "verify failed: address check '%s' validity\n", cases[i].input );
+            return 0;
+        }
+        if ( cases[i].valid && ( (int) address.type != cases[i].type || (int) address.port != cases[i].port ) )
+        {
+            printf( "verify failed: address check '%s' type/port\n", cases[i].input );
+            return 0;
+        }
+        if ( parsed )
+            printf( "address check: '%s' -> %s:%d\n", cases[i].input, address.type == NETCODE_ADDRESS_IPV6 ? "IPv6" : "IPv4", (int) address.port );
+        else
+            printf( "address check: '%s' -> invalid\n", cases[i].input );
+    }
+
+    printf( "address checks passed\n" );
+    return 1;
+}
+
 static int do_mint( const char * filename, const char * server_address )
 {
     uint8_t connect_token[NETCODE_CONNECT_TOKEN_BYTES];
@@ -665,6 +710,8 @@ int main( int argc, char ** argv )
         ok = do_goldens( argv[2] );
     else if ( argc == 3 && strcmp( argv[1], "verify" ) == 0 )
         ok = do_verify( argv[2] );
+    else if ( argc == 2 && strcmp( argv[1], "check-addresses" ) == 0 )
+        ok = do_check_addresses();
     else if ( argc == 4 && strcmp( argv[1], "mint" ) == 0 )
         ok = do_mint( argv[2], argv[3] );
     else if ( argc == 3 && strcmp( argv[1], "server" ) == 0 )
@@ -672,7 +719,7 @@ int main( int argc, char ** argv )
     else if ( argc == 4 && strcmp( argv[1], "client" ) == 0 )
         ok = do_client( atoi( argv[2] ), argv[3] );
     else
-        printf( "usage: compat-c goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token>\n" );
+        printf( "usage: compat-c goldens <dir> | verify <dir> | mint <file> <address> | check-addresses | server <port> | client <port> <token>\n" );
 
     netcode_term();
 

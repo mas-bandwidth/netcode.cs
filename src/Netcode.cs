@@ -273,6 +273,7 @@ namespace Netcode
             if (s.Length > 0 && s[0] == '[')
             {
                 // probably "[addr6]:port"
+                bool hasPort = false;
                 int baseIndex = s.Length - 1;
                 for (int i = 0; i < 6; i++) // ":65535" is the longest possible port suffix
                 {
@@ -284,17 +285,24 @@ namespace Netcode
                         if (!TryParsePort(s.Slice(index + 1), out port))
                             return false;
                         s = s.Slice(0, index - 1);
+                        hasPort = true;
                         break;
                     }
                 }
 
-                // if a port is omitted, strip a trailing ']' so "[addr]" parses as the address.
+                // strip at most one ']': the one removed above with a port, or a
+                // trailing one when a port is omitted so "[addr]" parses as the address.
                 // NOTE: like the C library, a missing ']' is tolerated ("[::1" parses as ::1)
-                if (s[s.Length - 1] == ']')
+                if (!hasPort && s.Length > 0 && s[s.Length - 1] == ']')
                     s = s.Slice(0, s.Length - 1);
 
                 s = s.Slice(1);
             }
+
+            // any bracket or zone marker left in the address part is not a valid
+            // address for IPAddress.TryParse to reinterpret on our behalf
+            if (s.IndexOf('[') >= 0 || s.IndexOf(']') >= 0 || s.IndexOf('%') >= 0)
+                return false;
 
             if (TryParseIpv6(s, ref address))
             {
@@ -841,27 +849,38 @@ namespace Netcode
             connectTokenPrivate.Generate(clientId, timeoutSeconds, internalAddresses, userData);
 
             Span<byte> privateData = stackalloc byte[Defines.ConnectTokenPrivateBytes];
-            connectTokenPrivate.Write(privateData);
-
-            if (!ConnectTokenPrivate.Encrypt(privateData, Defines.VersionInfo, protocolId, expireTimestamp, nonce, privateKey))
-                return false;
-
             var connectToken = new ConnectTokenData();
-            Defines.VersionInfo.CopyTo(connectToken.VersionInfo);
-            connectToken.ProtocolId = protocolId;
-            connectToken.CreateTimestamp = createTimestamp;
-            connectToken.ExpireTimestamp = expireTimestamp;
-            nonce.CopyTo(connectToken.Nonce);
-            privateData.CopyTo(connectToken.PrivateData);
-            connectToken.NumServerAddresses = publicAddresses.Length;
-            for (int i = 0; i < publicAddresses.Length; i++)
-                connectToken.ServerAddresses[i] = publicAddresses[i];
-            connectTokenPrivate.ClientToServerKey.CopyTo(connectToken.ClientToServerKey, 0);
-            connectTokenPrivate.ServerToClientKey.CopyTo(connectToken.ServerToClientKey, 0);
-            connectToken.TimeoutSeconds = timeoutSeconds;
+            try
+            {
+                connectTokenPrivate.Write(privateData);
 
-            connectToken.Write(output);
-            return true;
+                if (!ConnectTokenPrivate.Encrypt(privateData, Defines.VersionInfo, protocolId, expireTimestamp, nonce, privateKey))
+                    return false;
+
+                Defines.VersionInfo.CopyTo(connectToken.VersionInfo);
+                connectToken.ProtocolId = protocolId;
+                connectToken.CreateTimestamp = createTimestamp;
+                connectToken.ExpireTimestamp = expireTimestamp;
+                nonce.CopyTo(connectToken.Nonce);
+                privateData.CopyTo(connectToken.PrivateData);
+                connectToken.NumServerAddresses = publicAddresses.Length;
+                for (int i = 0; i < publicAddresses.Length; i++)
+                    connectToken.ServerAddresses[i] = publicAddresses[i];
+                connectTokenPrivate.ClientToServerKey.CopyTo(connectToken.ClientToServerKey, 0);
+                connectTokenPrivate.ServerToClientKey.CopyTo(connectToken.ServerToClientKey, 0);
+                connectToken.TimeoutSeconds = timeoutSeconds;
+
+                connectToken.Write(output);
+                return true;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(privateData);
+                CryptographicOperations.ZeroMemory(connectTokenPrivate.ClientToServerKey);
+                CryptographicOperations.ZeroMemory(connectTokenPrivate.ServerToClientKey);
+                CryptographicOperations.ZeroMemory(connectToken.ClientToServerKey);
+                CryptographicOperations.ZeroMemory(connectToken.ServerToClientKey);
+            }
         }
     }
 
@@ -1543,14 +1562,20 @@ namespace Netcode
             }
 
             Array.Clear(Timeout);
-            Array.Clear(SendKey);
-            Array.Clear(ReceiveKey);
+            CryptographicOperations.ZeroMemory(SendKey);
+            CryptographicOperations.ZeroMemory(ReceiveKey);
         }
 
         public bool EntryExpired(int index, double time)
         {
-            return (Timeout[index] > 0 && LastAccessTime[index] + Timeout[index] < time) ||
-                   (ExpireTime[index] >= 0.0 && ExpireTime[index] < time);
+            bool expired = (Timeout[index] > 0 && LastAccessTime[index] + Timeout[index] < time) ||
+                           (ExpireTime[index] >= 0.0 && ExpireTime[index] < time);
+            if (expired && ClientIndex[index] == -1)
+            {
+                CryptographicOperations.ZeroMemory(SendKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));
+                CryptographicOperations.ZeroMemory(ReceiveKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));
+            }
+            return expired;
         }
 
         public bool AddEncryptionMapping(in Address address, ReadOnlySpan<byte> sendKey, ReadOnlySpan<byte> receiveKey, double time, double expireTime, int timeout, int connectTokenEntryIndex = -1)
@@ -1600,8 +1625,8 @@ namespace Netcode
                     LastAccessTime[i] = -1000.0;
                     ConnectTokenEntryIndex[i] = -1;
                     Address[i] = default;
-                    SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes).Clear();
-                    ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes).Clear();
+                    CryptographicOperations.ZeroMemory(SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
+                    CryptographicOperations.ZeroMemory(ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
 
                     if (i + 1 == NumEncryptionMappings)
                     {
@@ -1708,6 +1733,43 @@ namespace Netcode
             _sendAddress = sendAddress;
         }
 
+        internal const int BufferSizeMinimum = 64 * 1024;
+
+        // linux and windows clamp a socket buffer request that exceeds the OS limit, but the BSDs reject it
+        // instead (a stock NetBSD rejects anything over about 227 KiB). halve the request until one is accepted.
+        // a larger buffer is an optimisation, never a requirement: if no request down to the minimum is accepted,
+        // the socket keeps the OS default. returns the size accepted, or 0 if the OS default was kept.
+
+        internal static int BufferSizeBackOff(int requestedSize, Func<int, bool> trySize)
+        {
+            for (int size = requestedSize; size >= BufferSizeMinimum; size /= 2)
+            {
+                if (trySize(size))
+                    return size;
+            }
+            return 0;
+        }
+
+        private static void IncreaseBufferSize(Socket socket, SocketOptionName option, int requestedSize, string name)
+        {
+            int size = BufferSizeBackOff(requestedSize, trySize =>
+            {
+                try
+                {
+                    socket.SetSocketOption(SocketOptionLevel.Socket, option, trySize);
+                    return true;
+                }
+                catch (SocketException)
+                {
+                    return false;
+                }
+            });
+            if (size == 0)
+                NetcodeLog.Info($"socket {name} buffer size kept at the OS default ({requestedSize} was not accepted)\n");
+            else if (size != requestedSize)
+                NetcodeLog.Info($"socket {name} buffer size reduced from {requestedSize} to {size}\n");
+        }
+
         public static CreateError Create(in Address address, int sendBufferSize, int receiveBufferSize, bool enablePacketTagging, out NetcodeSocket? result)
         {
             result = null;
@@ -1731,40 +1793,19 @@ namespace Netcode
                 {
                     // stop hard client disconnects surfacing as recvfrom errors (ICMP port unreachable)
                     const int SIO_UDP_CONNRESET = unchecked((int)0x9800000C);
-                    try
+                    CreateError controlError = ConfigureConnectionReset(socket, () =>
                     {
                         socket.IOControl(SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
-                    }
-                    catch (SocketException)
-                    {
-                        // best effort; matches the spirit, not the letter, of the C code path
-                    }
+                    });
+                    if (controlError != CreateError.None)
+                        return controlError;
                 }
 
                 if (address.Type == AddressType.IPv6)
                     socket.DualMode = false; // force IPv6 only, like the C library
 
-                try
-                {
-                    socket.SendBufferSize = sendBufferSize;
-                }
-                catch (SocketException)
-                {
-                    socket.Dispose();
-                    NetcodeLog.Error("error: failed to set socket send buffer size\n");
-                    return CreateError.SockoptSndbufFailed;
-                }
-
-                try
-                {
-                    socket.ReceiveBufferSize = receiveBufferSize;
-                }
-                catch (SocketException)
-                {
-                    socket.Dispose();
-                    NetcodeLog.Error("error: failed to set socket receive buffer size\n");
-                    return CreateError.SockoptRcvbufFailed;
-                }
+                IncreaseBufferSize(socket, SocketOptionName.SendBuffer, sendBufferSize, "send");
+                IncreaseBufferSize(socket, SocketOptionName.ReceiveBuffer, receiveBufferSize, "receive");
 
                 try
                 {
@@ -1815,6 +1856,21 @@ namespace Netcode
             }
         }
 
+        internal static CreateError ConfigureConnectionReset(IDisposable handle, Action control)
+        {
+            try
+            {
+                control();
+            }
+            catch (SocketException)
+            {
+                handle.Dispose();
+                NetcodeLog.Error("error: failed to configure socket connection reset handling\n");
+                return CreateError.CreateFailed;
+            }
+            return CreateError.None;
+        }
+
         private static bool TryEnablePacketTagging(Socket socket, AddressType type)
         {
             // DSCP EF (46): low latency. best effort per platform; Windows would need
@@ -1826,9 +1882,9 @@ namespace Netcode
             {
                 if (type == AddressType.IPv6)
                 {
-                    // IPV6_TCLASS: 67 on linux, 36 on macOS/BSD
-                    int optname = OperatingSystem.IsLinux() ? 67 : 36;
-                    socket.SetRawSocketOption(41 /* IPPROTO_IPV6 */, optname, BitConverter.GetBytes(46));
+                    int optname = Ipv6TrafficClassOption(CurrentOS());
+                    if (optname >= 0)
+                        socket.SetRawSocketOption(41 /* IPPROTO_IPV6 */, optname, BitConverter.GetBytes(46));
                 }
                 else
                 {
@@ -1841,6 +1897,30 @@ namespace Netcode
                 return false;
             }
         }
+
+        internal enum SocketOS { Other, Linux, Android, MacOS, IOS, MacCatalyst, TvOS, FreeBSD }
+
+        private static SocketOS CurrentOS()
+        {
+            if (OperatingSystem.IsAndroid()) return SocketOS.Android;
+            if (OperatingSystem.IsLinux()) return SocketOS.Linux;
+            if (OperatingSystem.IsMacCatalyst()) return SocketOS.MacCatalyst;
+            if (OperatingSystem.IsMacOS()) return SocketOS.MacOS;
+            if (OperatingSystem.IsTvOS()) return SocketOS.TvOS;
+            if (OperatingSystem.IsIOS()) return SocketOS.IOS;
+            if (OperatingSystem.IsFreeBSD()) return SocketOS.FreeBSD;
+            return SocketOS.Other;
+        }
+
+        // IPV6_TCLASS as each OS's headers define it (the C reference uses the header
+        // constant); -1 where it is not known, and IPv6 tagging is skipped there
+        internal static int Ipv6TrafficClassOption(SocketOS os) => os switch
+        {
+            SocketOS.Linux or SocketOS.Android => 67,
+            SocketOS.MacOS or SocketOS.IOS or SocketOS.MacCatalyst or SocketOS.TvOS => 36,
+            SocketOS.FreeBSD => 61,
+            _ => -1,
+        };
 
         private static IPEndPoint ToEndPoint(in Address address)
         {
