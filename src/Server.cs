@@ -560,8 +560,6 @@ namespace Netcode
             // record why before the callback fires, so the reason can be queried from inside it
             _clientDisconnectReason[clientIndex] = disconnectReason;
 
-            _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
-
             if (sendDisconnectPackets)
             {
                 NetcodeLog.Debug($"server sent disconnect packets to client {clientIndex}\n");
@@ -582,6 +580,8 @@ namespace Netcode
             _encryptionManager.RemoveEncryptionMapping(in _clientAddress[clientIndex], _time);
 
             ResetClientSlot(clientIndex);
+
+            _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
         }
 
         /// <summary>Disconnect one client, sending redundant disconnect packets.</summary>
