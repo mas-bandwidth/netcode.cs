@@ -1127,6 +1127,12 @@ namespace Netcode
                 for (int i = 0; i < sequenceBytes; i++)
                     sequence |= (ulong)buffer[1 + i] << (8 * i);
 
+                if (sequence == ulong.MaxValue)
+                {
+                    NetcodeLog.Debug("ignored encrypted packet. sequence number is out of range\n");
+                    return result;
+                }
+
                 // ignore the packet if it has already been received
 
                 if (replayProtection != null && packetType >= PacketType.ConnectionKeepAlive)
@@ -1255,6 +1261,9 @@ namespace Netcode
 
         public bool AlreadyReceived(ulong sequence)
         {
+            if (sequence == ulong.MaxValue)
+                return true;
+
             // written so it cannot overflow: "sequence + BUFFER_SIZE <= most_recent"
             // wraps for sequence values near UINT64_MAX and falsely rejects them
 
@@ -1275,6 +1284,9 @@ namespace Netcode
 
         public void AdvanceSequence(ulong sequence)
         {
+            if (sequence == ulong.MaxValue)
+                return;
+
             if (sequence > MostRecentSequence)
                 MostRecentSequence = sequence;
 
