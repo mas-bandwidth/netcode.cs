@@ -1084,6 +1084,8 @@ internal static class ClientServerTests
 
     public static void TestLoopback()
     {
+        TestClientStateChangeNotification();
+
         NetworkSimulator simulator = CreateSimulator();
 
         double time = 0.0;
@@ -1193,6 +1195,49 @@ internal static class ClientServerTests
         Check.That(server.ClientConnected(1));
         Check.That(server.NumConnectedClients == 1);
         Check.That(loopbackClient.State == ClientState.Disconnected);
+    }
+
+    private static void TestClientStateChangeNotification()
+    {
+        Client? clientRef = null;
+        bool observedNewState = false;
+        int disconnectNotifications = 0;
+        var callbackException = new InvalidOperationException("state notification");
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0,
+            SendLoopbackPacket = (clientIndex, payload, sequence) => { },
+            OnStateChange = (previous, next) =>
+            {
+                if (next != ClientState.Disconnected)
+                    return;
+                Check.That(previous == ClientState.Connected);
+                observedNewState = clientRef!.State == next;
+                disconnectNotifications++;
+                throw callbackException;
+            },
+        };
+        using var client = new Client("127.0.0.1:40000", config, 1000.0);
+        clientRef = client;
+        client.ConnectLoopback(0, 1);
+
+        try
+        {
+            client.Disconnect();
+            Check.That(false);
+        }
+        catch (InvalidOperationException exception)
+        {
+            Check.That(ReferenceEquals(exception, callbackException));
+        }
+
+        Check.That(observedNewState);
+        Check.That(client.State == ClientState.Disconnected);
+        Check.That(disconnectNotifications == 1);
+        client.Disconnect();
+        Check.That(disconnectNotifications == 1);
     }
 
     public static void TestClientCreateMissingOverrideCallback()
