@@ -730,11 +730,11 @@ namespace Netcode
             BinaryPrimitives.WriteUInt64LittleEndian(challengePacketData.Slice(0, 8), _challengeSequence);
 
             Span<byte> challengeTokenBuffer = challengePacketData.Slice(8, Defines.ChallengeTokenBytes);
-            challengeTokenBuffer.Clear();
             {
-                var writer = new ByteWriter(challengeTokenBuffer);
-                writer.U64(connectTokenPrivate.ClientId);
-                writer.Bytes(connectTokenPrivate.UserData);
+                var challengeToken = new ChallengeToken();
+                challengeToken.ClientId = connectTokenPrivate.ClientId;
+                connectTokenPrivate.UserData.AsSpan().CopyTo(challengeToken.UserData);
+                challengeToken.Write(challengeTokenBuffer);
             }
             ChallengeToken.Encrypt(challengeTokenBuffer, _challengeSequence, _challengeKey);
 
@@ -756,9 +756,15 @@ namespace Netcode
                 return;
             }
 
-            var challengeReader = new ByteReader(challengeTokenBuffer);
-            ulong challengeClientId = challengeReader.U64();
-            ReadOnlySpan<byte> challengeUserData = challengeTokenBuffer.Slice(8, Protocol.UserDataBytes);
+            var challengeToken = new ChallengeToken();
+            if (!challengeToken.Read(challengeTokenBuffer))
+            {
+                NetcodeLog.Debug("server ignored connection response. failed to read challenge token\n");
+                return;
+            }
+
+            ulong challengeClientId = challengeToken.ClientId;
+            ReadOnlySpan<byte> challengeUserData = challengeToken.UserData;
 
             ReadOnlySpan<byte> packetSendKey = _encryptionManager.GetSendKey(encryptionIndex);
 

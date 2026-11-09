@@ -15,6 +15,7 @@
 */
 
 using System;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 
 namespace Netcode.Tests;
@@ -110,6 +111,7 @@ internal static class Program
         RunTest("test_connect_token", CoreTests.TestConnectToken);
         RunTest("test_generate_connect_token_out_of_range", CoreTests.TestGenerateConnectTokenOutOfRange);
         RunTest("test_challenge_token", CoreTests.TestChallengeToken);
+        RunTest("test_challenge_token_server_serialization", CoreTests.TestChallengeTokenServerSerialization);
         RunTest("test_connection_request_packet", CoreTests.TestConnectionRequestPacket);
         RunTest("test_connection_denied_packet", () => CoreTests.TestEmptyPacket(PacketType.ConnectionDenied));
         RunTest("test_connection_challenge_packet", () => CoreTests.TestChallengeResponsePacket(PacketType.ConnectionChallenge));
@@ -657,6 +659,47 @@ internal static class CoreTests
 
         Check.That(outputToken.ClientId == inputToken.ClientId);
         Check.That(outputToken.UserData.AsSpan().SequenceEqual(inputToken.UserData));
+    }
+
+    public static void TestChallengeTokenServerSerialization()
+    {
+        // the server and the tests must share one challenge token serialization
+        // path, so this pins that the server calls ChallengeToken.Write/Read.
+
+        MethodInfo write = typeof(ChallengeToken).GetMethod("Write", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
+        MethodInfo read = typeof(ChallengeToken).GetMethod("Read", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
+
+        bool serverWrites = false;
+        bool serverReads = false;
+
+        foreach (MethodInfo method in typeof(Server).GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic))
+        {
+            byte[]? il = method.GetMethodBody()?.GetILAsByteArray();
+            if (il == null)
+                continue;
+            for (int i = 0; i + 4 < il.Length; i++)
+            {
+                if (il[i] != 0x28 && il[i] != 0x6F) // call / callvirt
+                    continue;
+                int token = BitConverter.ToInt32(il, i + 1);
+                MethodBase? called;
+                try
+                {
+                    called = method.Module.ResolveMethod(token);
+                }
+                catch (Exception e) when (e is ArgumentException or BadImageFormatException)
+                {
+                    continue;
+                }
+                if (called?.MetadataToken == write.MetadataToken)
+                    serverWrites = true;
+                else if (called?.MetadataToken == read.MetadataToken)
+                    serverReads = true;
+            }
+        }
+
+        Check.That(serverWrites);
+        Check.That(serverReads);
     }
 
     private static readonly bool[] AllAllowed = CreateAllAllowed();
