@@ -147,6 +147,7 @@ internal static class Program
         RunTest("test_client_reconnect", ClientServerTests.TestClientReconnect);
         RunTest("test_disable_timeout", ClientServerTests.TestDisableTimeout);
         RunTest("test_loopback", ClientServerTests.TestLoopback);
+        RunTest("test_receive_packet_short_buffer", ReceiveBufferTests.TestReceivePacketShortBuffer);
         RunTest("test_client_create_missing_override_callback", ClientServerTests.TestClientCreateMissingOverrideCallback);
         RunTest("test_server_create_missing_override_callback", ClientServerTests.TestServerCreateMissingOverrideCallback);
         RunTest("test_client_loopback_requires_callback", ClientServerTests.TestClientLoopbackRequiresCallback);
@@ -1178,5 +1179,101 @@ internal static class CoreTests
         }
 
         Check.That(totalReceived > 0);
+    }
+}
+
+internal static class ReceiveBufferTests
+{
+    public static void TestReceivePacketShortBuffer()
+    {
+        byte[] queued = new byte[500];
+        for (int i = 0; i < queued.Length; i++)
+            queued[i] = (byte)(i % 251);
+
+        byte[] shortBuffer = new byte[Protocol.MaxPacketSize - 1];
+        byte[] fullBuffer = new byte[Protocol.MaxPacketSize];
+
+        var clientConfig = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0,
+            SendLoopbackPacket = (int clientIndex, ReadOnlySpan<byte> payload, ulong sequence) => { },
+        };
+        using var client = new Client("127.0.0.1:40000", clientConfig, 1000.0);
+        client.ConnectLoopback(0, 1);
+        Check.That(client.State == ClientState.Connected);
+        client.ProcessLoopbackPacket(queued, 42);
+
+        ArgumentException? clientError = null;
+        try
+        {
+            client.ReceivePacket(shortBuffer, out _);
+        }
+        catch (ArgumentException e)
+        {
+            clientError = e;
+        }
+        Check.That(clientError != null);
+        Check.That(clientError!.ParamName == "payload");
+
+        int clientLength = client.ReceivePacket(fullBuffer, out ulong clientSequence);
+        Check.That(clientLength == queued.Length);
+        Check.That(clientSequence == 42UL);
+        Check.That(fullBuffer.AsSpan(0, clientLength).SequenceEqual(queued));
+
+        bool clientThrewWhenEmpty = false;
+        try
+        {
+            client.ReceivePacket(shortBuffer, out _);
+        }
+        catch (ArgumentException)
+        {
+            clientThrewWhenEmpty = true;
+        }
+        Check.That(clientThrewWhenEmpty);
+
+        var serverConfig = new ServerConfig
+        {
+            ProtocolId = TestConstants.TestProtocolId,
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0,
+            SendLoopbackPacket = (int clientIndex, ReadOnlySpan<byte> payload, ulong sequence) => { },
+        };
+        TestConstants.PrivateKey.CopyTo(serverConfig.PrivateKey, 0);
+        using var server = new Server("127.0.0.1:40001", serverConfig, 1000.0);
+        server.Start(1);
+        server.ConnectLoopbackClient(0, 0x11111111, ReadOnlySpan<byte>.Empty);
+        Check.That(server.ClientConnected(0));
+        server.ProcessLoopbackPacket(0, queued, 43);
+
+        ArgumentException? serverError = null;
+        try
+        {
+            server.ReceivePacket(0, shortBuffer, out _);
+        }
+        catch (ArgumentException e)
+        {
+            serverError = e;
+        }
+        Check.That(serverError != null);
+        Check.That(serverError!.ParamName == "payload");
+
+        int serverLength = server.ReceivePacket(0, fullBuffer, out ulong serverSequence);
+        Check.That(serverLength == queued.Length);
+        Check.That(serverSequence == 43UL);
+        Check.That(fullBuffer.AsSpan(0, serverLength).SequenceEqual(queued));
+
+        bool serverThrewWhenEmpty = false;
+        try
+        {
+            server.ReceivePacket(0, shortBuffer, out _);
+        }
+        catch (ArgumentException)
+        {
+            serverThrewWhenEmpty = true;
+        }
+        Check.That(serverThrewWhenEmpty);
     }
 }
