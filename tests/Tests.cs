@@ -1232,7 +1232,21 @@ internal static class ConfigSnapshotTests
         client.Connect(GenerateConnectToken("[::1]:40000", clientId));
 
         clientConfig.Simulator = null;
+        clientConfig.OnStateChange = null;
+        clientConfig.SendLoopbackPacket = null;
+        clientConfig.OverrideSendAndReceive = true;
+        clientConfig.SendPacketOverride = null;
+        clientConfig.ReceivePacketOverride = null;
+        clientConfig.EnablePacketTagging = true;
+
         serverConfig.Simulator = null;
+        serverConfig.OnClientConnectDisconnect = null;
+        serverConfig.SendLoopbackPacket = null;
+        serverConfig.OverrideSendAndReceive = true;
+        serverConfig.SendPacketOverride = null;
+        serverConfig.ReceivePacketOverride = null;
+        serverConfig.MaxConnectTokenLifetime = 1;
+        serverConfig.EnablePacketTagging = true;
         serverConfig.ProtocolId = 0;
         Array.Clear(serverConfig.PrivateKey);
 
