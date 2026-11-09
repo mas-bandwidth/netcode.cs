@@ -119,6 +119,7 @@ internal static class Program
         RunTest("test_connection_payload_packet", CoreTests.TestConnectionPayloadPacket);
         RunTest("test_connection_disconnect_packet", () => CoreTests.TestEmptyPacket(PacketType.ConnectionDisconnect));
         RunTest("test_connect_token_public", CoreTests.TestConnectTokenPublic);
+        RunTest("test_key_cleanup", CoreTests.TestKeyCleanup);
         RunTest("test_encryption_manager", CoreTests.TestEncryptionManager);
         RunTest("test_replay_protection", CoreTests.TestReplayProtection);
         RunTest("test_network_simulator_determinism", CoreTests.TestNetworkSimulatorDeterminism);
@@ -930,6 +931,72 @@ internal static class CoreTests
         Check.That(outputConnectToken.ClientToServerKey.AsSpan().SequenceEqual(inputConnectToken.ClientToServerKey));
         Check.That(outputConnectToken.ServerToClientKey.AsSpan().SequenceEqual(inputConnectToken.ServerToClientKey));
         Check.That(outputConnectToken.TimeoutSeconds == inputConnectToken.TimeoutSeconds);
+    }
+
+    private delegate void ProcessAtTime(in Address from, Span<byte> packet, ulong timestamp);
+
+    public static void TestKeyCleanup()
+    {
+        const System.Reflection.BindingFlags Fields = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var key = (byte[])TestConstants.PrivateKey.Clone();
+        var config = new ServerConfig
+        {
+            ProtocolId = TestConstants.TestProtocolId,
+            PrivateKey = key,
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> packet) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> packet) => 0,
+        };
+        using var server = new Server("127.0.0.1:40000", config, 1000);
+        var ownedKey = (byte[])typeof(Server).GetField("_privateKey", Fields)!.GetValue(server)!;
+        Check.That(ownedKey.AsSpan().SequenceEqual(key));
+        typeof(Server).GetField("_running", Fields)!.SetValue(server, true);
+        var process = typeof(Server).GetMethod("ReadAndProcessPacket", Fields)!.CreateDelegate<ProcessAtTime>(server);
+        Address.TryParse("127.0.0.1:40000", out Address serverAddress);
+        Address.TryParse("127.0.0.1:50000", out Address clientAddress);
+        foreach (int mode in new[] { 0, 1, 2 })
+        {
+            server.Flags = mode == 2 ? Server.FlagIgnoreConnectionRequestPackets : 0;
+            var token = new ConnectTokenPrivate();
+            token.Generate(1, 15, new[] { mode != 1 ? serverAddress : clientAddress }, new byte[Protocol.UserDataBytes]);
+            byte[] privateData = new byte[Defines.ConnectTokenPrivateBytes];
+            token.Write(privateData);
+            byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
+            Check.That(ConnectTokenPrivate.Encrypt(privateData, Defines.VersionInfo, config.ProtocolId, 1030, nonce, key));
+            byte[] packet = new byte[PacketIO.ConnectionRequestPacketBytes];
+            Check.That(PacketIO.WriteConnectionRequestPacket(packet, Defines.VersionInfo, config.ProtocolId, 1030, nonce, privateData) == packet.Length);
+            process(in clientAddress, packet, 1000);
+            Check.That(packet.AsSpan(packet.Length - Defines.ConnectTokenPrivateBytes).IndexOfAnyExcept((byte)0) == -1);
+        }
+        server.Dispose();
+        Check.That(ownedKey.AsSpan().IndexOfAnyExcept((byte)0) == -1);
+        Check.That(key.AsSpan().SequenceEqual(TestConstants.PrivateKey));
+
+        var ownedManager = new EncryptionManager();
+        Check.That(ownedManager.AddEncryptionMapping(in serverAddress, key, key, 1000, 1001, 15));
+        ownedManager.SetExpireTime(0, -1);
+        ownedManager.ClientIndex[0] = 0;
+        Check.That(ownedManager.AddEncryptionMapping(in clientAddress, key, key, 1030, -1, 15));
+        Check.That(ownedManager.SendKey.AsSpan(0, Protocol.KeyBytes).SequenceEqual(key));
+        Check.That(ownedManager.ReceiveKey.AsSpan(0, Protocol.KeyBytes).SequenceEqual(key));
+        Check.That(ownedManager.RemoveEncryptionMapping(in clientAddress, 1030));
+        Check.That(ownedManager.SendKey.AsSpan(0, Protocol.KeyBytes).SequenceEqual(key));
+        Check.That(ownedManager.ReceiveKey.AsSpan(0, Protocol.KeyBytes).SequenceEqual(key));
+        Check.That(ownedManager.Touch(0, in serverAddress, 1030));
+        Check.That(ownedManager.FindEncryptionMapping(in serverAddress, 1030) == 0);
+        Check.That(ownedManager.GetSendKey(0).SequenceEqual(key));
+        Check.That(ownedManager.GetReceiveKey(0).SequenceEqual(key));
+
+        var manager = new EncryptionManager();
+        Check.That(manager.AddEncryptionMapping(in serverAddress, key, key, 1000, 1001, 15));
+        Check.That(manager.AddEncryptionMapping(in clientAddress, key, key, 1000, -1, 15));
+        Check.That(manager.RemoveEncryptionMapping(in clientAddress, 1002));
+        Check.That(manager.SendKey.AsSpan(0, 2 * Protocol.KeyBytes).IndexOfAnyExcept((byte)0) == -1);
+        Check.That(manager.ReceiveKey.AsSpan(0, 2 * Protocol.KeyBytes).IndexOfAnyExcept((byte)0) == -1);
+        Check.That(manager.AddEncryptionMapping(in serverAddress, key, key, 1000, 1001, 15));
+        Check.That(manager.FindEncryptionMapping(in serverAddress, 1002) == -1);
+        Check.That(manager.SendKey.AsSpan(0, Protocol.KeyBytes).IndexOfAnyExcept((byte)0) == -1);
+        Check.That(manager.ReceiveKey.AsSpan(0, Protocol.KeyBytes).IndexOfAnyExcept((byte)0) == -1);
     }
 
     public static void TestEncryptionManager()

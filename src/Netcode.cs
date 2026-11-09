@@ -847,27 +847,38 @@ namespace Netcode
             connectTokenPrivate.Generate(clientId, timeoutSeconds, internalAddresses, userData);
 
             Span<byte> privateData = stackalloc byte[Defines.ConnectTokenPrivateBytes];
-            connectTokenPrivate.Write(privateData);
-
-            if (!ConnectTokenPrivate.Encrypt(privateData, Defines.VersionInfo, protocolId, expireTimestamp, nonce, privateKey))
-                return false;
-
             var connectToken = new ConnectTokenData();
-            Defines.VersionInfo.CopyTo(connectToken.VersionInfo);
-            connectToken.ProtocolId = protocolId;
-            connectToken.CreateTimestamp = createTimestamp;
-            connectToken.ExpireTimestamp = expireTimestamp;
-            nonce.CopyTo(connectToken.Nonce);
-            privateData.CopyTo(connectToken.PrivateData);
-            connectToken.NumServerAddresses = publicAddresses.Length;
-            for (int i = 0; i < publicAddresses.Length; i++)
-                connectToken.ServerAddresses[i] = publicAddresses[i];
-            connectTokenPrivate.ClientToServerKey.CopyTo(connectToken.ClientToServerKey, 0);
-            connectTokenPrivate.ServerToClientKey.CopyTo(connectToken.ServerToClientKey, 0);
-            connectToken.TimeoutSeconds = timeoutSeconds;
+            try
+            {
+                connectTokenPrivate.Write(privateData);
 
-            connectToken.Write(output);
-            return true;
+                if (!ConnectTokenPrivate.Encrypt(privateData, Defines.VersionInfo, protocolId, expireTimestamp, nonce, privateKey))
+                    return false;
+
+                Defines.VersionInfo.CopyTo(connectToken.VersionInfo);
+                connectToken.ProtocolId = protocolId;
+                connectToken.CreateTimestamp = createTimestamp;
+                connectToken.ExpireTimestamp = expireTimestamp;
+                nonce.CopyTo(connectToken.Nonce);
+                privateData.CopyTo(connectToken.PrivateData);
+                connectToken.NumServerAddresses = publicAddresses.Length;
+                for (int i = 0; i < publicAddresses.Length; i++)
+                    connectToken.ServerAddresses[i] = publicAddresses[i];
+                connectTokenPrivate.ClientToServerKey.CopyTo(connectToken.ClientToServerKey, 0);
+                connectTokenPrivate.ServerToClientKey.CopyTo(connectToken.ServerToClientKey, 0);
+                connectToken.TimeoutSeconds = timeoutSeconds;
+
+                connectToken.Write(output);
+                return true;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(privateData);
+                CryptographicOperations.ZeroMemory(connectTokenPrivate.ClientToServerKey);
+                CryptographicOperations.ZeroMemory(connectTokenPrivate.ServerToClientKey);
+                CryptographicOperations.ZeroMemory(connectToken.ClientToServerKey);
+                CryptographicOperations.ZeroMemory(connectToken.ServerToClientKey);
+            }
         }
     }
 
@@ -1549,14 +1560,20 @@ namespace Netcode
             }
 
             Array.Clear(Timeout);
-            Array.Clear(SendKey);
-            Array.Clear(ReceiveKey);
+            CryptographicOperations.ZeroMemory(SendKey);
+            CryptographicOperations.ZeroMemory(ReceiveKey);
         }
 
         public bool EntryExpired(int index, double time)
         {
-            return (Timeout[index] > 0 && LastAccessTime[index] + Timeout[index] < time) ||
-                   (ExpireTime[index] >= 0.0 && ExpireTime[index] < time);
+            bool expired = (Timeout[index] > 0 && LastAccessTime[index] + Timeout[index] < time) ||
+                           (ExpireTime[index] >= 0.0 && ExpireTime[index] < time);
+            if (expired && ClientIndex[index] == -1)
+            {
+                CryptographicOperations.ZeroMemory(SendKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));
+                CryptographicOperations.ZeroMemory(ReceiveKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));
+            }
+            return expired;
         }
 
         public bool AddEncryptionMapping(in Address address, ReadOnlySpan<byte> sendKey, ReadOnlySpan<byte> receiveKey, double time, double expireTime, int timeout, int connectTokenEntryIndex = -1)
@@ -1606,8 +1623,8 @@ namespace Netcode
                     LastAccessTime[i] = -1000.0;
                     ConnectTokenEntryIndex[i] = -1;
                     Address[i] = default;
-                    SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes).Clear();
-                    ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes).Clear();
+                    CryptographicOperations.ZeroMemory(SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
+                    CryptographicOperations.ZeroMemory(ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
 
                     if (i + 1 == NumEncryptionMappings)
                     {
