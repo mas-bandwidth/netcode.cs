@@ -1888,9 +1888,9 @@ namespace Netcode
             {
                 if (type == AddressType.IPv6)
                 {
-                    // IPV6_TCLASS: 67 on linux, 36 on macOS/BSD
-                    int optname = OperatingSystem.IsLinux() ? 67 : 36;
-                    socket.SetRawSocketOption(41 /* IPPROTO_IPV6 */, optname, BitConverter.GetBytes(46));
+                    int optname = Ipv6TrafficClassOption(CurrentOS());
+                    if (optname >= 0)
+                        socket.SetRawSocketOption(41 /* IPPROTO_IPV6 */, optname, BitConverter.GetBytes(46));
                 }
                 else
                 {
@@ -1903,6 +1903,30 @@ namespace Netcode
                 return false;
             }
         }
+
+        internal enum SocketOS { Other, Linux, Android, MacOS, IOS, MacCatalyst, TvOS, FreeBSD }
+
+        private static SocketOS CurrentOS()
+        {
+            if (OperatingSystem.IsAndroid()) return SocketOS.Android;
+            if (OperatingSystem.IsLinux()) return SocketOS.Linux;
+            if (OperatingSystem.IsMacCatalyst()) return SocketOS.MacCatalyst;
+            if (OperatingSystem.IsMacOS()) return SocketOS.MacOS;
+            if (OperatingSystem.IsTvOS()) return SocketOS.TvOS;
+            if (OperatingSystem.IsIOS()) return SocketOS.IOS;
+            if (OperatingSystem.IsFreeBSD()) return SocketOS.FreeBSD;
+            return SocketOS.Other;
+        }
+
+        // IPV6_TCLASS as each OS's headers define it (the C reference uses the header
+        // constant); -1 where it is not known, and IPv6 tagging is skipped there
+        internal static int Ipv6TrafficClassOption(SocketOS os) => os switch
+        {
+            SocketOS.Linux or SocketOS.Android => 67,
+            SocketOS.MacOS or SocketOS.IOS or SocketOS.MacCatalyst or SocketOS.TvOS => 36,
+            SocketOS.FreeBSD => 61,
+            _ => -1,
+        };
 
         private static IPEndPoint ToEndPoint(in Address address)
         {
