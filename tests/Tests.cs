@@ -494,6 +494,32 @@ internal static class CoreTests
             Check.That(!Address.TryParse("[::1]:40k", out _));
         }
 
+        // brackets and zone ids: at most one bracket pair is stripped, and any
+        // bracket or zone marker left in the address part must be rejected
+
+        {
+            Check.That(!Address.TryParse("[[::1]]", out _));
+            Check.That(!Address.TryParse("[::1]]:80", out _));
+            Check.That(!Address.TryParse("[::1]:80]", out _));
+            Check.That(!Address.TryParse("[::1]]", out _));
+            Check.That(!Address.TryParse("fe80::1%eth0", out _));
+            Check.That(!Address.TryParse("[fe80::1%eth0]", out _));
+            Check.That(!Address.TryParse("[fe80::1%eth0]:80", out _));
+
+            Check.That(Address.TryParse("127.0.0.1", out Address address));
+            Check.That(address.Type == AddressType.IPv4 && address.Port == 0);
+            Check.That(Address.TryParse("127.0.0.1:80", out address));
+            Check.That(address.Type == AddressType.IPv4 && address.Port == 80);
+            Check.That(Address.TryParse("::1", out address));
+            Check.That(address.Type == AddressType.IPv6 && address.Port == 0);
+            Check.That(Address.TryParse("[::1]", out address));
+            Check.That(address.Type == AddressType.IPv6 && address.Port == 0);
+            Check.That(Address.TryParse("[::1]:80", out address));
+            Check.That(address.Type == AddressType.IPv6 && address.Port == 80);
+            Check.That(Address.TryParse("fe80::1", out address));
+            Check.That(address.Type == AddressType.IPv6 && address.Port == 0);
+        }
+
         {
             Check.That(Address.TryParse("107.77.207.77", out Address address));
             Check.That(address.Type == AddressType.IPv4);
