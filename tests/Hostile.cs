@@ -216,21 +216,42 @@ internal static class Hostile
     {
         var rng = new TestRng(0x70CE);
 
-        // hostile public connect tokens: must never throw, and mostly reject.
-        // when read succeeds (version bytes + field ranges can line up only if we
-        // plant them), the parsed fields must be within their documented ranges.
+        // Alternate random buffers with structured headers, leaving address
+        // contents, keys and other payload bytes random.
+        void PlantAddresses(Span<byte> buffer)
+        {
+            int count = 1 + rng.Next(Protocol.MaxServersPerConnect);
+            var writer = new ByteWriter(buffer);
+            writer.U32((uint)count);
+            int offset = writer.Position;
+            for (int i = 0; i < count; i++)
+            {
+                bool ipv6 = rng.Next(2) != 0;
+                buffer[offset] = (byte)(ipv6 ? AddressType.IPv6 : AddressType.IPv4);
+                offset += ipv6 ? 19 : 7;
+            }
+        }
 
         byte[] publicBuffer = new byte[Protocol.ConnectTokenBytes];
         var publicToken = new ConnectTokenData();
+        int publicReads = 0;
 
         for (int iteration = 0; iteration < 5000; iteration++)
         {
             rng.Fill(publicBuffer);
-            if (rng.Next(2) == 0)
+            if (iteration % 2 == 0)
+            {
                 Defines.VersionInfo.CopyTo(publicBuffer.AsSpan(0, Defines.VersionInfoBytes));
+                ulong first = rng.NextUInt64(), second = rng.NextUInt64();
+                var timestamps = new ByteWriter(publicBuffer.AsSpan(Defines.VersionInfoBytes + 8));
+                timestamps.U64(Math.Min(first, second));
+                timestamps.U64(Math.Max(first, second));
+                PlantAddresses(publicBuffer.AsSpan(Defines.VersionInfoBytes + 24 + Defines.ConnectTokenNonceBytes + Defines.ConnectTokenPrivateBytes + 4));
+            }
 
             if (publicToken.Read(publicBuffer))
             {
+                publicReads++;
                 Check.That(publicToken.NumServerAddresses >= 1 && publicToken.NumServerAddresses <= Protocol.MaxServersPerConnect);
                 Check.That(publicToken.CreateTimestamp <= publicToken.ExpireTimestamp);
             }
@@ -243,18 +264,25 @@ internal static class Hostile
 
         byte[] privateBuffer = new byte[Defines.ConnectTokenPrivateBytes];
         var privateToken = new ConnectTokenPrivate();
+        int privateReads = 0;
 
         for (int iteration = 0; iteration < 5000; iteration++)
         {
             rng.Fill(privateBuffer);
+            if (iteration % 2 == 0)
+                PlantAddresses(privateBuffer.AsSpan(8 + 4));
 
             if (privateToken.Read(privateBuffer))
             {
+                privateReads++;
                 Check.That(privateToken.NumServerAddresses >= 1 && privateToken.NumServerAddresses <= Protocol.MaxServersPerConnect);
                 for (int i = 0; i < privateToken.NumServerAddresses; i++)
                     Check.That(privateToken.ServerAddresses[i].Type == AddressType.IPv4 || privateToken.ServerAddresses[i].Type == AddressType.IPv6);
             }
         }
+
+        Check.That(publicReads > 0);
+        Check.That(privateReads > 0);
 
         // write/read round trip over the private token with random address mixes
 
