@@ -151,6 +151,7 @@ internal static class Program
         RunTest("test_server_create_missing_override_callback", ClientServerTests.TestServerCreateMissingOverrideCallback);
         RunTest("test_client_loopback_requires_callback", ClientServerTests.TestClientLoopbackRequiresCallback);
         RunTest("test_server_loopback_requires_callback", ClientServerTests.TestServerLoopbackRequiresCallback);
+        RunTest("test_client_server_config_snapshot", ConfigSnapshotTests.TestClientServerConfigSnapshot);
         RunTest("test_fuzz_read_packet_raw", Hostile.TestFuzzReadPacketRaw);
         RunTest("test_fuzz_packet_round_trip_corruption", Hostile.TestFuzzPacketRoundTripCorruption);
         RunTest("test_fuzz_connect_token", Hostile.TestFuzzConnectToken);
@@ -1178,5 +1179,114 @@ internal static class CoreTests
         }
 
         Check.That(totalReceived > 0);
+    }
+}
+
+internal static class ConfigSnapshotTests
+{
+    private static byte[] GenerateConnectToken(string serverAddress, ulong clientId)
+    {
+        byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
+        byte[] userData = new byte[Protocol.UserDataBytes];
+        new TestRng(0xC0FFEE).Fill(userData);
+        Check.That(ConnectTokenGenerator.Generate(
+            new[] { serverAddress },
+            new[] { serverAddress },
+            TestConstants.TestConnectTokenExpiry,
+            TestConstants.TestTimeoutSeconds,
+            clientId,
+            TestConstants.TestProtocolId,
+            TestConstants.PrivateKey,
+            userData,
+            connectToken));
+        return connectToken;
+    }
+
+    public static void TestClientServerConfigSnapshot()
+    {
+        var simulator = new NetworkSimulator
+        {
+            LatencyMilliseconds = 250,
+            JitterMilliseconds = 250,
+            PacketLossPercent = 5,
+            DuplicatePacketPercent = 10,
+        };
+
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+
+        var clientConfig = new ClientConfig { Simulator = simulator };
+        var serverConfig = new ServerConfig
+        {
+            ProtocolId = TestConstants.TestProtocolId,
+            Simulator = simulator,
+        };
+        TestConstants.PrivateKey.CopyTo(serverConfig.PrivateKey, 0);
+
+        using var client = new Client("[::]:50000", clientConfig, time);
+        using var server = new Server("[::1]:40000", serverConfig, time);
+
+        server.Start(1);
+
+        ulong clientId = new TestRng(0xC11E17).NextUInt64();
+        client.Connect(GenerateConnectToken("[::1]:40000", clientId));
+
+        clientConfig.Simulator = null;
+        serverConfig.Simulator = null;
+        serverConfig.ProtocolId = 0;
+        Array.Clear(serverConfig.PrivateKey);
+
+        for (int i = 0; i < 1000 && client.State > ClientState.Disconnected && client.State != ClientState.Connected; i++)
+        {
+            simulator.Update(time);
+            client.Update(time);
+            server.Update(time);
+            time += deltaTime;
+        }
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server.ClientConnected(0));
+
+        var payload = new byte[Protocol.MaxPacketSize];
+        for (int i = 0; i < payload.Length; i++)
+            payload[i] = (byte)i;
+        var received = new byte[Protocol.MaxPacketSize];
+
+        bool clientReceived = false;
+        bool serverReceived = false;
+        for (int i = 0; i < 1000 && !(clientReceived && serverReceived); i++)
+        {
+            simulator.Update(time);
+            client.Update(time);
+            server.Update(time);
+
+            client.SendPacket(payload);
+            server.SendPacket(0, payload);
+
+            while (true)
+            {
+                int bytes = client.ReceivePacket(received, out _);
+                if (bytes < 0)
+                    break;
+                Check.That(bytes == Protocol.MaxPacketSize);
+                Check.That(received.AsSpan(0, bytes).SequenceEqual(payload));
+                clientReceived = true;
+            }
+
+            while (true)
+            {
+                int bytes = server.ReceivePacket(0, received, out _);
+                if (bytes < 0)
+                    break;
+                Check.That(bytes == Protocol.MaxPacketSize);
+                Check.That(received.AsSpan(0, bytes).SequenceEqual(payload));
+                serverReceived = true;
+            }
+
+            time += deltaTime;
+        }
+
+        Check.That(clientReceived);
+        Check.That(serverReceived);
     }
 }

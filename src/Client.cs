@@ -152,7 +152,17 @@ namespace Netcode
         /// </summary>
         public Client(string bindAddress1, string? bindAddress2, ClientConfig? config, double time)
         {
-            _config = config ?? new ClientConfig();
+            ClientConfig source = config ?? new ClientConfig();
+            _config = new ClientConfig
+            {
+                Simulator = source.Simulator,
+                OnStateChange = source.OnStateChange,
+                SendLoopbackPacket = source.SendLoopbackPacket,
+                OverrideSendAndReceive = source.OverrideSendAndReceive,
+                SendPacketOverride = source.SendPacketOverride,
+                ReceivePacketOverride = source.ReceivePacketOverride,
+                EnablePacketTagging = source.EnablePacketTagging,
+            };
             _simulatorReceiveHandler = ProcessPacketFromSimulator;
 
             // the overrides are called on the update path with no null check. a missing one is a
