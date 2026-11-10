@@ -317,8 +317,116 @@ internal static class ClientServerTests
         Check.That(clientNumPacketsReceived >= 10 && serverNumPacketsReceived >= 10);
     }
 
+    public static void TestKeepAliveClientIndexOutOfRange()
+    {
+        Console.WriteLine("test_keep_alive_client_index_out_of_range");
+
+        TestConnectedKeepAliveClientIndexOutOfRange();
+
+        const string serverAddress = "127.0.0.1:40000";
+        using var client = OpenRespondingClient(serverAddress, out Address from, out byte[] serverToClientKey);
+
+        // Each of these is stored on the unfixed path: uint.MaxValue casts to -1,
+        // 5000 is past any server, 0 is not a slot count, and MaxClients is the ceiling.
+        (uint clientIndex, uint maxClients)[] rejected =
+        {
+            (uint.MaxValue, 32),
+            (5000, 32),
+            (1, 0),
+            (0, (uint)Protocol.MaxClients + 1),
+        };
+
+        ulong sequence = 2;
+        foreach (var rejectedPacket in rejected)
+        {
+            DeliverKeepAlive(client, in from, serverToClientKey, sequence, rejectedPacket.clientIndex, rejectedPacket.maxClients);
+            sequence++;
+            Console.WriteLine($"rejected keep-alive wire clientIndex={rejectedPacket.clientIndex} maxClients={rejectedPacket.maxClients} stored clientIndex={client.ClientIndex} maxClients={client.MaxClients} state={client.State}");
+            Check.That(client.State == ClientState.SendingConnectionResponse);
+            Check.That(client.ClientIndex == 0);
+            Check.That(client.MaxClients == 0);
+        }
+
+        DeliverKeepAlive(client, in from, serverToClientKey, sequence, 3, 32);
+        Check.That(client.State == ClientState.Connected);
+        Check.That(client.ClientIndex == 3);
+        Check.That(client.MaxClients == 32);
+    }
+
+    private static void TestConnectedKeepAliveClientIndexOutOfRange()
+    {
+        const string serverAddress = "127.0.0.1:40000";
+        using var client = OpenRespondingClient(serverAddress, out Address from, out byte[] serverToClientKey);
+
+        DeliverKeepAlive(client, in from, serverToClientKey, 2, 3, 32);
+        Check.That(client.State == ClientState.Connected);
+        Check.That(client.ClientIndex == 3);
+        Check.That(client.MaxClients == 32);
+
+        client.Update(TestConstants.TestTimeoutSeconds - 1.0);
+
+        // a keep-alive that names a slot outside the server's client range must not
+        // hold an established connection open, nor change the stored index
+
+        DeliverKeepAlive(client, in from, serverToClientKey, 3, uint.MaxValue, 32);
+        DeliverKeepAlive(client, in from, serverToClientKey, 4, 5000, 32);
+        DeliverKeepAlive(client, in from, serverToClientKey, 5, 1, 0);
+        DeliverKeepAlive(client, in from, serverToClientKey, 6, 0, (uint)Protocol.MaxClients + 1);
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(client.ClientIndex == 3);
+        Check.That(client.MaxClients == 32);
+
+        client.Update(TestConstants.TestTimeoutSeconds + 1.0);
+        Check.That(client.State == ClientState.ConnectionTimedOut);
+    }
+
+    private static Client OpenRespondingClient(string serverAddress, out Address from, out byte[] serverToClientKey)
+    {
+        byte[] tokenBytes = GenerateConnectToken(serverAddress, 0x11);
+        var token = new ConnectTokenData();
+        Check.That(token.Read(tokenBytes));
+        serverToClientKey = token.ServerToClientKey;
+        Check.That(Address.TryParse(serverAddress, out from));
+
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+            ReceivePacketOverride = (ref Address receiveFrom, Span<byte> payload) => 0,
+        };
+        var client = new Client("127.0.0.1:0", config, 0.0);
+        client.Connect(tokenBytes);
+        Check.That(client.State == ClientState.SendingConnectionRequest);
+
+        byte[] challenge = new byte[8 + Defines.ChallengeTokenBytes];
+        Deliver(client, in from, serverToClientKey, PacketType.ConnectionChallenge, challenge, 1);
+        Check.That(client.State == ClientState.SendingConnectionResponse);
+        Check.That(client.ClientIndex == 0);
+        Check.That(client.MaxClients == 0);
+        return client;
+    }
+
+    private static void Deliver(Client client, in Address from, byte[] key, int packetType, ReadOnlySpan<byte> packetData, ulong sequence)
+    {
+        byte[] buffer = new byte[Defines.MaxPacketBytes];
+        int written = PacketIO.WriteEncryptedPacket(buffer, packetType, packetData, sequence, key, TestConstants.TestProtocolId);
+        Check.That(written > 0);
+        client.ProcessPacket(in from, buffer.AsSpan(0, written));
+    }
+
+    private static void DeliverKeepAlive(Client client, in Address from, byte[] key, ulong sequence, uint clientIndex, uint maxClients)
+    {
+        byte[] data = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(0, 4), clientIndex);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(4, 4), maxClients);
+        Deliver(client, in from, key, PacketType.ConnectionKeepAlive, data, sequence);
+    }
+
     public static void TestClientServerKeepAlive()
     {
+        TestKeepAliveClientIndexOutOfRange();
+
         NetworkSimulator simulator = CreateSimulator();
 
         double time = 1000.0;
