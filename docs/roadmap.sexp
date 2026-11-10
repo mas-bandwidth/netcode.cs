@@ -50,7 +50,7 @@
    :kept (:sprint-card "cs-netcode-replay-top-sequence-and-restart-floor-edges" :sprint-stream "netcode-cs-port" :sprint-column "waiting" :tier "pro" :sprint-base "sprint/netcode-cs-port" :needs "cs-netcode-disconnect-callback-cannot-reenter-a-clearing-slot,netfix-restart-floor-refuses-a-token-from-the-start-second" :pushed-head "" :pushed-branch ""))
   (item "cs-netcode-token-lifetimes-are-bounded" :group "export-netcode-cs-port" :area "netcode.cs"
    :title "Cs netcode token lifetimes are bounded"
-   :text "N7: a pure PreconnectExpireTime( time, timeoutSeconds ) returning time + (timeoutSeconds > 0 ? timeoutSeconds : Defines.PreconnectMappingSeconds /* 10 */), used at src/Server.cs:714."
+   :text "N7: a pending encryption mapping expires as in the reference: at time + timeout when the token timeout is zero or more, and at time + the token's remaining lifetime when it is negative (the connection request path in src/Server.cs)."
    :why "Moved out of the stopped sprint on 2026-10-14: neither rocketnet nor v1.3 work."
    :date "2026-10-14"
    :origin "sprint card cs-netcode-token-lifetimes-are-bounded (stream netcode-cs-port, column waiting, tier pro, base sprint/netcode-cs-port), moved out of the sprint 2026-10-14"

@@ -494,6 +494,10 @@ namespace Netcode
         /// </summary>
         public void ProcessPacket(in Address from, Span<byte> packetData)
         {
+            // check the source address first, so a packet from any other address cannot advance replay protection
+            if (!from.Equals(_serverAddress))
+                return;
+
             ulong currentTimestamp = UnixTime.Now();
 
             ReadPacketResult packet = PacketIO.ReadPacket(

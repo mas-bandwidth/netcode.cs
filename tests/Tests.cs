@@ -178,6 +178,7 @@ internal static class Program
         RunTest("test_client_error_connect_token_at_server_start", ClientServerTests.TestClientErrorConnectTokenAtServerStart);
         RunTest("test_client_server_connect", ClientServerTests.TestClientServerConnect);
         RunTest("test_client_server_keep_alive", ClientServerTests.TestClientServerKeepAlive);
+        RunTest("test_client_packet_from_other_address_leaves_replay_protection", ClientServerTests.TestClientPacketFromOtherAddressLeavesReplayProtection);
         RunTest("test_client_server_multiple_clients", ClientServerTests.TestClientServerMultipleClients);
         RunTest("test_client_server_multiple_servers", ClientServerTests.TestClientServerMultipleServers);
         RunTest("test_client_error_connect_token_expired", ClientServerTests.TestClientErrorConnectTokenExpired);
@@ -2034,7 +2035,7 @@ internal static class ConfigSnapshotTests
         Check.That(ConnectTokenGenerator.Generate(
             new[] { serverAddress },
             new[] { serverAddress },
-            TestConstants.TestConnectTokenExpiry + 1,
+            TestConstants.TestConnectTokenExpiry,
             TestConstants.TestTimeoutSeconds,
             clientId,
             TestConstants.TestProtocolId,
@@ -2087,7 +2088,7 @@ internal static class ConfigSnapshotTests
         serverConfig.ProtocolId = 0;
         Array.Clear(serverConfig.PrivateKey);
 
-        server.Start(1);
+        ClientServerTests.StartServer(server, 1);
 
         ulong clientId = new TestRng(0xC11E17).NextUInt64();
         client.Connect(GenerateConnectToken("[::1]:40000", clientId));

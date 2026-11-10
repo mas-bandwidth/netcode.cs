@@ -6,7 +6,7 @@ _Last updated: 2026-11-10, at commit ec95e86 on `main`._
 
 **Released: v1.1.0** (`src/Netcode.csproj`, release commit 2026-09-13). A
 byte-exact C# port of [mas-bandwidth/netcode](https://github.com/mas-bandwidth/netcode)
-(protocol "NETCODE 1.02"; interop is pinned to netcode 1.4.9), idiomatic over the
+(protocol "NETCODE 1.02"; interop is pinned to netcode 1.4.10), idiomatic over the
 same non-blocking update-loop model. Changes since the release are in the git log.
 
 ### What is built
@@ -20,8 +20,8 @@ same non-blocking update-loop model. Changes since the release are in the git lo
   hand-written ChaCha20/Poly1305/HChaCha20, no P/Invoke, no platform crypto.
   Rationale and the alternatives (BCL `ChaCha20Poly1305`, libsodium P/Invoke)
   are in `notes/port-map.md`.
-- **Tests** (`tests/`): a console runner with 68 named tests in two tiers. The
-  default run is the unit tier (59 tests): the C suite's tests ported
+- **Tests** (`tests/`): a console runner with 78 named tests in two tiers. The
+  default run is the unit tier (69 tests): the C suite's tests ported
   test-for-test, plus seeded hostile fuzz over every parse path, two
   zero-allocation assertions, a managed-vs-BCL crypto differential and an
   FP-contraction canary. It opens no OS sockets, never sleeps, and uses an
@@ -45,7 +45,7 @@ same non-blocking update-loop model. Changes since the release are in the git lo
     and the functional tier on net10.0 and on the real .NET 8 runtime, `soak 2000`, and a build of the
     compat harness;
   - `C wire compatibility`: the interop gate against netcode pinned at
-    `ced9b4b8…` (v1.4.9);
+    `d6bc96da…` (v1.4.10);
   - `STANDARD.md matches upstream`: the vendored spec is diffed against
     mas-bandwidth/netcode `main`.
 - **License**: AGPL-3.0 (`LICENSE`), with the "move to MBSL when ready" note in

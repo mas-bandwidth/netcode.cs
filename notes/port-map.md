@@ -131,8 +131,8 @@ expire timestamp is below server start time + `ServerConfig.MaxConnectTokenLifet
 
 ## Test inventory
 
-The runner (`tests/Tests.cs`, `Program.Main`) has 68 named tests in two tiers.
-The default run is the unit tier (59 tests): it opens no OS sockets, never
+The runner (`tests/Tests.cs`, `Program.Main`) has 78 named tests in two tiers.
+The default run is the unit tier (69 tests): it opens no OS sockets, never
 sleeps, and fixes the clock at `TestConstants.TestUnixTime`. `--functional`
 runs the functional tier (9 tests: client/server create, the three real UDP
 socket connects, the two port-in-use creates, packet tagging, and the socket
@@ -150,7 +150,7 @@ client_error_connect_token_predates_server_start, client_server_connect
 loopback), keep_alive, multiple_clients, multiple_servers, the six
 client_error_* state tests, client/server side disconnect,
 server_client_disconnect_reason, client_reconnect, disable_timeout, loopback,
-packet_tagging (functional tier; also reads `IP_TOS` / `IPV6_TCLASS` back from
+client_packet_from_other_address_leaves_replay_protection, packet_tagging (functional tier; also reads `IP_TOS` / `IPV6_TCLASS` back from
 each socket; not checked on Windows, where tagging is a no-op).
 
 Renamed or split from a C test: test_client_reconnect_used_connect_token
@@ -184,6 +184,10 @@ buffer smaller than `Protocol.MaxPacketSize`), test_unused_members_removed
 (reflection guard that the removed internal members stay removed),
 test_client_create_missing_override_callback and
 test_server_create_missing_override_callback,
+test_loopback_disconnect_reentry (a disconnect callback that disconnects its
+loopback slot again or stops the server), test_server_side_disconnect_multiple_servers
+(a connected client disconnected by its server goes to disconnected, not to the
+next server address),
 test_replay_protection_duplicate_packet and
 test_replay_protection_failed_decrypt (replay protection through
 `PacketIO.ReadPacket` within one session: duplicate datagrams rejected, failed
@@ -212,6 +216,6 @@ functions. Legs (all must pass, `scripts/interop.sh`):
    observable behavior (states, client index, payload bytes).
 4. **Session C# server ↔ C client**: token minted by C, reverse of 3.
 
-CI pins the C clone to a fixed netcode ref (`ced9b4b8…` in
-`.github/workflows/ci.yml`, netcode 1.4.9) and builds the C half with
+CI pins the C clone to a fixed netcode ref (`d6bc96da…` in
+`.github/workflows/ci.yml`, netcode 1.4.10) and builds the C half with
 `-ffp-contract=off`.
