@@ -747,11 +747,9 @@ namespace Netcode
                     ? (ulong)_maxConnectTokenLifetime
                     : connectTokenExpireTimestamp - currentTimestamp;
 
-                double pendingExpireTime = EncryptionManager.PreconnectExpireTime(
-                    _time,
-                    connectTokenPrivate.TimeoutSeconds);
-
-                double expireTime = Math.Min(pendingExpireTime, _time + (double)tokenLifetime);
+                double expireTime = connectTokenPrivate.TimeoutSeconds >= 0
+                    ? _time + connectTokenPrivate.TimeoutSeconds
+                    : _time + (double)tokenLifetime;
 
                 if (!_encryptionManager.AddEncryptionMapping(
                         in from,

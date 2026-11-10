@@ -1152,50 +1152,52 @@ internal static class ClientServerTests
             process(in from, wire.AsSpan(0, bytes), 1001);
         }
 
-        // the token has four seconds left, so an unfinished request's mapping must not outlive it
+        // as the reference: a pending mapping expires after the token's timeout when it is zero
+        // or more, and after the token's remaining lifetime when the timeout is negative
+
+        // timeout -1 and four seconds left on the token: the mapping lives four seconds
         Request(in firstAddress, 0x1001, 1005, 0.0);
         Check.That(encryptionManager.NumEncryptionMappings == 1);
+        Check.That(encryptionManager.ExpireTime[0] == 4.0);
 
         server.Update(6.0);
         Check.That(encryptionManager.EntryExpired(0, server.Time));
 
         // the expired mapping's slot is available to another pending request
+        // (timeout -1, 29 seconds left on the token)
         Request(in secondAddress, 0x1002, 1030, 6.0);
         Check.That(encryptionManager.NumEncryptionMappings == 1);
         Check.That(encryptionManager.Address[0].Equals(secondAddress));
+        Check.That(encryptionManager.ExpireTime[0] == 6.0 + 29.0);
 
-        // a positive timeout is also limited by a shorter token lifetime
+        // a timeout of zero or more sets the lifetime, whatever is left on the token
         Request(in thirdAddress, 0x1003, 1005, 6.0, timeout: 30);
         Check.That(encryptionManager.NumEncryptionMappings == 2);
-        Check.That(encryptionManager.ExpireTime[1] <= server.Time + 4.0);
+        Check.That(encryptionManager.ExpireTime[1] == 6.0 + 30.0);
 
-        server.Update(11.0);
+        Request(in fourthAddress, 0x1004, 1030, 6.0, timeout: 0);
+        Check.That(encryptionManager.NumEncryptionMappings == 3);
+        Check.That(encryptionManager.ExpireTime[2] == 6.0);
+
+        // a timeout 0 mapping is gone on the next update; the others are not
+        server.Update(7.0);
+        Check.That(encryptionManager.EntryExpired(2, server.Time));
+        Check.That(encryptionManager.FindEncryptionMapping(in fourthAddress, server.Time) == -1);
+        Check.That(encryptionManager.FindEncryptionMapping(in secondAddress, server.Time) == 0);
+        Check.That(encryptionManager.FindEncryptionMapping(in thirdAddress, server.Time) == 1);
+
+        // each expires at its own time and its slot is reclaimed
+        server.Update(36.0);
+        Check.That(encryptionManager.EntryExpired(0, server.Time));
+        Check.That(!encryptionManager.EntryExpired(1, server.Time));
+
+        Request(in fifthAddress, 0x1005, 1030, 36.0);
+        Check.That(encryptionManager.FindEncryptionMapping(in fifthAddress, server.Time) != -1);
+
+        server.Update(37.0);
         Check.That(encryptionManager.EntryExpired(1, server.Time));
 
-        // the expired mapping's slot is available to another pending request
-        Request(in fourthAddress, 0x1004, 1030, 11.0);
-        Check.That(encryptionManager.NumEncryptionMappings == 2);
-        Check.That(encryptionManager.Address[1].Equals(fourthAddress));
-
-        // a negative timeout is bounded by the pre-connect lifetime even when the
-        // token has much longer to live
-        server.Update(22.0);
-        Check.That(encryptionManager.EntryExpired(1, server.Time));
-
-        Request(in fifthAddress, 0x1005, 1030, 22.0);
-        Check.That(encryptionManager.NumEncryptionMappings == 2);
-
-        // the pending mapping is finite and its slot is reclaimed once it expires,
-        // even though the token has much longer to live
-        int fifthIndex = encryptionManager.FindEncryptionMapping(in fifthAddress, server.Time);
-        Check.That(fifthIndex != -1);
-        Check.That(encryptionManager.ExpireTime[fifthIndex] > server.Time);
-
-        server.Update(33.0);
-        Check.That(encryptionManager.EntryExpired(fifthIndex, server.Time));
-
-        Request(in sixthAddress, 0x1006, 1030, 33.0);
-        Check.That(encryptionManager.NumEncryptionMappings == 2);
+        Request(in sixthAddress, 0x1006, 1030, 37.0);
         Check.That(encryptionManager.FindEncryptionMapping(in sixthAddress, server.Time) != -1);
     }
 
