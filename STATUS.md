@@ -20,8 +20,8 @@ same non-blocking update-loop model. Changes since the release are in the git lo
   hand-written ChaCha20/Poly1305/HChaCha20, no P/Invoke, no platform crypto.
   Rationale and the alternatives (BCL `ChaCha20Poly1305`, libsodium P/Invoke)
   are in `notes/port-map.md`.
-- **Tests** (`tests/`): a console runner with 68 named tests in two tiers. The
-  default run is the unit tier (59 tests): the C suite's tests ported
+- **Tests** (`tests/`): a console runner with 78 named tests in two tiers. The
+  default run is the unit tier (69 tests): the C suite's tests ported
   test-for-test, plus seeded hostile fuzz over every parse path, two
   zero-allocation assertions, a managed-vs-BCL crypto differential and an
   FP-contraction canary. It opens no OS sockets, never sleeps, and uses an
