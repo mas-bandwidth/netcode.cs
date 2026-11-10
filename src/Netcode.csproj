@@ -6,7 +6,7 @@
     <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     <RootNamespace>Netcode</RootNamespace>
     <!-- this port's own release number. it does NOT track the C reference's
-         numbering (netcode 1.4.8 is the C release this port is tested against);
+         numbering (netcode 1.4.9 is the C release this port is tested against);
          "NETCODE 1.02" in Protocol.VersionInfo is the wire protocol version and
          never moves. -->
     <Version>1.1.0</Version>

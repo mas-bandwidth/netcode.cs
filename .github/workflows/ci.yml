@@ -55,7 +55,7 @@ jobs:
           # the interop pin: bump deliberately, in its own commit, after reading
           # the upstream diff (a wire change upstream is a spec change first).
           repository: mas-bandwidth/netcode
-          ref: 47a156b17df9110c1a2d5d8cbf5b7768d1838a47
+          ref: ced9b4b8d20d64fc0fc382748129b8b91c5d7c3f # v1.4.9
           path: c-netcode
       - uses: actions/setup-dotnet@v6
         with:

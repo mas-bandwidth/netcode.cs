@@ -9,7 +9,8 @@
 #   1. golden byte identity — both sides write the same token/packet goldens from
 #      the same fixed keys/nonces/timestamps; every file must be byte identical.
 #   2. cross verify — each side decrypts and parses the other side's goldens
-#      through its real read paths.
+#      through its real read paths, then each side checks its address parser
+#      against the same fixed table of verdicts (check-addresses).
 #   3. live session A — C server, C# client, connect token minted by C#:
 #      connect, exchange payloads both ways, clean client-side disconnect.
 #   4. live session B — C# server, C client, connect token minted by C.
@@ -55,6 +56,10 @@ done
 echo "== leg 2: cross verify (each side reads the other's goldens)"
 "$WORK/compat-c" verify "$WORK/cs-goldens"
 $CS verify "$WORK/c-goldens"
+
+echo "== leg 2b: address parsing (both sides check the same fixed table of verdicts)"
+"$WORK/compat-c" check-addresses
+$CS check-addresses
 
 echo "== leg 3: live session, C server <- C# client (token minted by C#)"
 $CS mint "$WORK/token-a.bin" 127.0.0.1:40765
