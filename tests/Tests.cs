@@ -1811,7 +1811,7 @@ internal static class ConfigSnapshotTests
             DuplicatePacketPercent = 10,
         };
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         var clientConfig = new ClientConfig { Simulator = simulator };
