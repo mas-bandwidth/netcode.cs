@@ -16,6 +16,7 @@
 
 using System;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 
 namespace Netcode.Tests;
@@ -151,6 +152,7 @@ internal static class Program
         RunTest("test_connect_token", CoreTests.TestConnectToken);
         RunTest("test_generate_connect_token_out_of_range", CoreTests.TestGenerateConnectTokenOutOfRange);
         RunTest("test_challenge_token", CoreTests.TestChallengeToken);
+        RunTest("test_challenge_token_server_serialization", CoreTests.TestChallengeTokenServerSerialization);
         RunTest("test_managed_crypto_and_negative_timeout", CoreTests.TestManagedCryptoAndNegativeTimeout);
         RunTest("test_connection_request_packet", CoreTests.TestConnectionRequestPacket);
         RunTest("test_connection_denied_packet", () => CoreTests.TestEmptyPacket(PacketType.ConnectionDenied));
@@ -955,6 +957,61 @@ internal static class CoreTests
 
         Check.That(outputToken.ClientId == inputToken.ClientId);
         Check.That(outputToken.UserData.AsSpan().SequenceEqual(inputToken.UserData));
+    }
+
+    public static void TestChallengeTokenServerSerialization()
+    {
+        // the server and the tests must share one challenge token serialization
+        // path: round-trip the token, then pin that the server calls the helpers.
+
+        var inputToken = new ChallengeToken();
+        inputToken.ClientId = TestConstants.TestClientId;
+        new TestRng(0x78).Fill(inputToken.UserData);
+
+        byte[] buffer = new byte[Defines.ChallengeTokenBytes];
+        inputToken.Write(buffer);
+
+        var outputToken = new ChallengeToken();
+        Check.That(outputToken.Read(buffer));
+        Check.That(outputToken.ClientId == inputToken.ClientId);
+        Check.That(outputToken.UserData.AsSpan().SequenceEqual(inputToken.UserData));
+
+        byte[] expected = new byte[Defines.ChallengeTokenBytes];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(expected.AsSpan(0, 8), inputToken.ClientId);
+        inputToken.UserData.AsSpan().CopyTo(expected.AsSpan(8));
+        Check.That(buffer.AsSpan().SequenceEqual(expected));
+
+        bool serverWrites = false;
+        bool serverReads = false;
+
+        foreach (MethodInfo method in typeof(Server).GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic))
+        {
+            byte[]? il = method.GetMethodBody()?.GetILAsByteArray();
+            if (il == null)
+                continue;
+            for (int i = 0; i + 4 < il.Length; i++)
+            {
+                if (il[i] != 0x28 && il[i] != 0x6F) // call / callvirt
+                    continue;
+                int token = BitConverter.ToInt32(il, i + 1);
+                MethodBase? called;
+                try
+                {
+                    called = method.Module.ResolveMethod(token);
+                }
+                catch (Exception e) when (e is ArgumentException or BadImageFormatException)
+                {
+                    continue;
+                }
+                if (called != null && called.DeclaringType == typeof(ChallengeToken) && called.Name == "Write")
+                    serverWrites = true;
+                else if (called != null && called.DeclaringType == typeof(ChallengeToken) && called.Name == "Read")
+                    serverReads = true;
+            }
+        }
+
+        Check.That(serverWrites);
+        Check.That(serverReads);
     }
 
     public static void TestManagedCryptoAndNegativeTimeout()
