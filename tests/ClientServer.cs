@@ -17,12 +17,12 @@ internal static class ClientServerTests
 {
     private delegate void ProcessAtTime(in Address from, Span<byte> packet, ulong timestamp);
 
-    internal static byte[] GenerateConnectToken(string serverAddress, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry, int timeout = TestConstants.TestTimeoutSeconds)
+    internal static byte[] GenerateConnectToken(string serverAddress, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry + 1, int timeout = TestConstants.TestTimeoutSeconds)
     {
         return GenerateConnectToken(new[] { serverAddress }, clientId, expiry, timeout);
     }
 
-    private static byte[] GenerateConnectToken(string[] serverAddresses, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry, int timeout = TestConstants.TestTimeoutSeconds)
+    private static byte[] GenerateConnectToken(string[] serverAddresses, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry + 1, int timeout = TestConstants.TestTimeoutSeconds)
     {
         byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
         byte[] userData = new byte[Protocol.UserDataBytes];
@@ -237,7 +237,32 @@ internal static class ClientServerTests
         Check.That(server.NumConnectedClients == 0);
 
         simulator.Reset();
-        client.Connect(GenerateConnectToken("[::1]:40000", 0x5678, expiry: 30));
+        client.Connect(GenerateConnectToken("[::1]:40000", 0x5678, expiry: 31));
+        ConnectLoop(simulator, client, server, ref time, deltaTime);
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server.NumConnectedClients == 1);
+    }
+
+    public static void TestClientErrorConnectTokenAtServerStart()
+    {
+        NetworkSimulator simulator = CreateSimulator();
+        double time = 1000.0;
+        double deltaTime = 1.0 / 10.0;
+        var serverConfig = CreateServerConfig(simulator);
+        serverConfig.MaxConnectTokenLifetime = 30;
+        using var server = new Server("[::1]:40000", serverConfig, time);
+        using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
+        server.Start(1);
+
+        // a token that expires in the same second the server started does not open a session
+        client.Connect(GenerateConnectToken("[::1]:40000", 0x1234, expiry: 30));
+        ConnectLoop(simulator, client, server, ref time, deltaTime);
+        Check.That(client.State == ClientState.ConnectionRequestTimedOut);
+        Check.That(server.NumConnectedClients == 0);
+
+        // one second past the start floor does
+        simulator.Reset();
+        client.Connect(GenerateConnectToken("[::1]:40000", 0x5678, expiry: 31));
         ConnectLoop(simulator, client, server, ref time, deltaTime);
         Check.That(client.State == ClientState.Connected);
         Check.That(server.NumConnectedClients == 1);
@@ -1939,7 +1964,7 @@ internal static class Soak
                         byte[] userData = new byte[Protocol.UserDataBytes];
                         rng.Fill(userData);
                         string[] address = { "[::1]:40000" };
-                        if (!ConnectTokenGenerator.Generate(address, address, 30, 5, rng.NextUInt64(), TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken))
+                        if (!ConnectTokenGenerator.Generate(address, address, 60, 5, rng.NextUInt64(), TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken))
                         {
                             Console.WriteLine("soak: failed to generate connect token");
                             return 1;
