@@ -235,11 +235,23 @@ namespace Netcode
             if (config.PrivateKey == null || config.PrivateKey.Length != Protocol.KeyBytes)
                 throw new ArgumentException($"config.PrivateKey must be {Protocol.KeyBytes} bytes", nameof(config));
 
-            _config = config;
-            _maxConnectTokenLifetime = config.MaxConnectTokenLifetime > 0
-                ? config.MaxConnectTokenLifetime
+            _config = new ServerConfig
+            {
+                ProtocolId = config.ProtocolId,
+                PrivateKey = (byte[])config.PrivateKey.Clone(),
+                Simulator = config.Simulator,
+                OnClientConnectDisconnect = config.OnClientConnectDisconnect,
+                SendLoopbackPacket = config.SendLoopbackPacket,
+                OverrideSendAndReceive = config.OverrideSendAndReceive,
+                SendPacketOverride = config.SendPacketOverride,
+                ReceivePacketOverride = config.ReceivePacketOverride,
+                MaxConnectTokenLifetime = config.MaxConnectTokenLifetime,
+                EnablePacketTagging = config.EnablePacketTagging,
+            };
+            _maxConnectTokenLifetime = _config.MaxConnectTokenLifetime > 0
+                ? _config.MaxConnectTokenLifetime
                 : Protocol.DefaultMaxConnectTokenLifetime;
-            config.PrivateKey.CopyTo(_privateKey.AsSpan());
+            _config.PrivateKey.CopyTo(_privateKey.AsSpan());
             _simulatorReceiveHandler = ProcessPacketFromSimulator;
 
             // the overrides are called on the update path with no null check. a missing one is a
