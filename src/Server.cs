@@ -13,6 +13,7 @@
 
 using System;
 using System.Buffers.Binary;
+using System.Security.Cryptography;
 
 namespace Netcode
 {
@@ -30,7 +31,6 @@ namespace Netcode
         public const int Full = -2;
 
         private readonly ConnectTokenEntryState[] _state = new ConnectTokenEntryState[MaxEntries];
-        private readonly double[] _time = new double[MaxEntries];
         private readonly ulong[] _expireTimestamp = new ulong[MaxEntries];
         private readonly byte[] _mac = new byte[MaxEntries * Protocol.MacBytes];
         private readonly Address[] _address = new Address[MaxEntries];
@@ -43,8 +43,6 @@ namespace Netcode
             Array.Clear(_expireTimestamp);
             Array.Clear(_mac);
             Array.Clear(_address);
-            for (int i = 0; i < MaxEntries; i++)
-                _time[i] = -1000.0;
         }
 
         public int FindOrAdd(in Address address, ReadOnlySpan<byte> mac, ulong expireTimestamp, ulong currentTimestamp, double time)
@@ -69,7 +67,6 @@ namespace Netcode
                     return Full;
 
                 _state[freeTokenIndex] = ConnectTokenEntryState.Pending;
-                _time[freeTokenIndex] = time;
                 _expireTimestamp[freeTokenIndex] = expireTimestamp;
                 _address[freeTokenIndex] = address;
                 mac.CopyTo(_mac.AsSpan(freeTokenIndex * Protocol.MacBytes, Protocol.MacBytes));
@@ -89,9 +86,6 @@ namespace Netcode
                 throw new ArgumentOutOfRangeException(nameof(index));
             _state[index] = ConnectTokenEntryState.Consumed;
         }
-
-        public ConnectTokenEntryState State(int index) => _state[index];
-        public double EntryTime(int index) => _time[index];
     }
 
     /// <summary>Why server creation failed (carried by NetcodeException.ErrorCode). Bind failures
@@ -185,6 +179,8 @@ namespace Netcode
         private NetcodeSocket? _socketIpv6;
         private Address _address;
         private Address _address2;
+        // Test seam: tests set FlagIgnoreConnectionRequestPackets or
+        // FlagIgnoreConnectionResponsePackets to drive the client's timeout paths.
         internal uint Flags;
         private double _time;
         private bool _running;
@@ -382,7 +378,7 @@ namespace Netcode
             _challengeSequence = 0;
             Rng.GenerateKey(_challengeKey);
 
-            _minConnectTokenExpireTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (ulong)_maxConnectTokenLifetime;
+            _minConnectTokenExpireTimestamp = UnixTime.Now() + (ulong)_maxConnectTokenLifetime;
 
             // global packets (challenge, denied) encrypt with the same per-token server to
             // client keys as per-client packets, whose sequences start at zero, so the global
@@ -560,8 +556,6 @@ namespace Netcode
             // record why before the callback fires, so the reason can be queried from inside it
             _clientDisconnectReason[clientIndex] = disconnectReason;
 
-            _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
-
             if (sendDisconnectPackets)
             {
                 NetcodeLog.Debug($"server sent disconnect packets to client {clientIndex}\n");
@@ -582,6 +576,8 @@ namespace Netcode
             _encryptionManager.RemoveEncryptionMapping(in _clientAddress[clientIndex], _time);
 
             ResetClientSlot(clientIndex);
+
+            _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
         }
 
         /// <summary>Disconnect one client, sending redundant disconnect packets.</summary>
@@ -654,95 +650,103 @@ namespace Netcode
         private void ProcessConnectionRequestPacket(in Address from, Span<byte> decryptedToken, ulong connectTokenExpireTimestamp, ulong currentTimestamp)
         {
             var connectTokenPrivate = new ConnectTokenPrivate();
-            if (!connectTokenPrivate.Read(decryptedToken))
+            try
             {
-                NetcodeLog.Debug("server ignored connection request. failed to read connect token\n");
-                return;
-            }
+                if (!connectTokenPrivate.Read(decryptedToken))
+                {
+                    NetcodeLog.Debug("server ignored connection request. failed to read connect token\n");
+                    return;
+                }
 
-            bool foundServerAddress = false;
-            for (int i = 0; i < connectTokenPrivate.NumServerAddresses; i++)
+                bool foundServerAddress = false;
+                for (int i = 0; i < connectTokenPrivate.NumServerAddresses; i++)
+                {
+                    if (_address.Equals(connectTokenPrivate.ServerAddresses[i]))
+                        foundServerAddress = true;
+                    if (_address2.Type != AddressType.None && _address2.Equals(connectTokenPrivate.ServerAddresses[i]))
+                        foundServerAddress = true;
+                }
+                if (!foundServerAddress)
+                {
+                    NetcodeLog.Debug("server ignored connection request. server address not in connect token whitelist\n");
+                    return;
+                }
+
+                if (FindClientIndexByAddress(in from) != -1)
+                {
+                    NetcodeLog.Debug("server ignored connection request. a client with this address is already connected\n");
+                    return;
+                }
+
+                if (FindClientIndexById(connectTokenPrivate.ClientId) != -1)
+                {
+                    NetcodeLog.Debug("server ignored connection request. a client with this id is already connected\n");
+                    return;
+                }
+
+                // the private token's HMAC survives in-place decryption in the last 16 bytes
+                int connectTokenEntryIndex = ConnectTokenEntriesFindOrAdd(
+                        in from,
+                        decryptedToken.Slice(Defines.ConnectTokenPrivateBytes - Protocol.MacBytes, Protocol.MacBytes),
+                        connectTokenExpireTimestamp,
+                        currentTimestamp,
+                        _time);
+                if (connectTokenEntryIndex == ConnectTokenHistory.Full)
+                {
+                    NetcodeLog.Debug("server ignored connection request. connect token history is full\n");
+                    return;
+                }
+                if (connectTokenEntryIndex == ConnectTokenHistory.Refused)
+                {
+                    NetcodeLog.Debug("server ignored connection request. connect token has already been used\n");
+                    return;
+                }
+
+                if (_numConnectedClients == _maxClients)
+                {
+                    NetcodeLog.Debug("server denied connection request. server is full\n");
+                    SendGlobalPacket(PacketType.ConnectionDenied, ReadOnlySpan<byte>.Empty, in from, connectTokenPrivate.ServerToClientKey);
+                    return;
+                }
+
+                double expireTime = connectTokenPrivate.TimeoutSeconds >= 0 ? _time + connectTokenPrivate.TimeoutSeconds : -1.0;
+
+                if (!_encryptionManager.AddEncryptionMapping(
+                        in from,
+                        connectTokenPrivate.ServerToClientKey,
+                        connectTokenPrivate.ClientToServerKey,
+                        _time,
+                        expireTime,
+                        connectTokenPrivate.TimeoutSeconds,
+                        connectTokenEntryIndex))
+                {
+                    NetcodeLog.Debug("server ignored connection request. failed to add encryption mapping\n");
+                    return;
+                }
+
+                Span<byte> challengePacketData = stackalloc byte[8 + Defines.ChallengeTokenBytes];
+                BinaryPrimitives.WriteUInt64LittleEndian(challengePacketData.Slice(0, 8), _challengeSequence);
+
+                Span<byte> challengeTokenBuffer = challengePacketData.Slice(8, Defines.ChallengeTokenBytes);
+                challengeTokenBuffer.Clear();
+                {
+                    var writer = new ByteWriter(challengeTokenBuffer);
+                    writer.U64(connectTokenPrivate.ClientId);
+                    writer.Bytes(connectTokenPrivate.UserData);
+                }
+                ChallengeToken.Encrypt(challengeTokenBuffer, _challengeSequence, _challengeKey);
+
+                _challengeSequence++;
+
+                NetcodeLog.Debug("server sent connection challenge packet\n");
+
+                SendGlobalPacket(PacketType.ConnectionChallenge, challengePacketData, in from, connectTokenPrivate.ServerToClientKey);
+            }
+            finally
             {
-                if (_address.Equals(connectTokenPrivate.ServerAddresses[i]))
-                    foundServerAddress = true;
-                if (_address2.Type != AddressType.None && _address2.Equals(connectTokenPrivate.ServerAddresses[i]))
-                    foundServerAddress = true;
+                CryptographicOperations.ZeroMemory(connectTokenPrivate.ClientToServerKey);
+                CryptographicOperations.ZeroMemory(connectTokenPrivate.ServerToClientKey);
             }
-            if (!foundServerAddress)
-            {
-                NetcodeLog.Debug("server ignored connection request. server address not in connect token whitelist\n");
-                return;
-            }
-
-            if (FindClientIndexByAddress(in from) != -1)
-            {
-                NetcodeLog.Debug("server ignored connection request. a client with this address is already connected\n");
-                return;
-            }
-
-            if (FindClientIndexById(connectTokenPrivate.ClientId) != -1)
-            {
-                NetcodeLog.Debug("server ignored connection request. a client with this id is already connected\n");
-                return;
-            }
-
-            // the private token's HMAC survives in-place decryption in the last 16 bytes
-            int connectTokenEntryIndex = ConnectTokenEntriesFindOrAdd(
-                    in from,
-                    decryptedToken.Slice(Defines.ConnectTokenPrivateBytes - Protocol.MacBytes, Protocol.MacBytes),
-                    connectTokenExpireTimestamp,
-                    currentTimestamp,
-                    _time);
-            if (connectTokenEntryIndex == ConnectTokenHistory.Full)
-            {
-                NetcodeLog.Debug("server ignored connection request. connect token history is full\n");
-                return;
-            }
-            if (connectTokenEntryIndex == ConnectTokenHistory.Refused)
-            {
-                NetcodeLog.Debug("server ignored connection request. connect token has already been used\n");
-                return;
-            }
-
-            if (_numConnectedClients == _maxClients)
-            {
-                NetcodeLog.Debug("server denied connection request. server is full\n");
-                SendGlobalPacket(PacketType.ConnectionDenied, ReadOnlySpan<byte>.Empty, in from, connectTokenPrivate.ServerToClientKey);
-                return;
-            }
-
-            double expireTime = connectTokenPrivate.TimeoutSeconds >= 0 ? _time + connectTokenPrivate.TimeoutSeconds : -1.0;
-
-            if (!_encryptionManager.AddEncryptionMapping(
-                    in from,
-                    connectTokenPrivate.ServerToClientKey,
-                    connectTokenPrivate.ClientToServerKey,
-                    _time,
-                    expireTime,
-                    connectTokenPrivate.TimeoutSeconds,
-                    connectTokenEntryIndex))
-            {
-                NetcodeLog.Debug("server ignored connection request. failed to add encryption mapping\n");
-                return;
-            }
-
-            Span<byte> challengePacketData = stackalloc byte[8 + Defines.ChallengeTokenBytes];
-            BinaryPrimitives.WriteUInt64LittleEndian(challengePacketData.Slice(0, 8), _challengeSequence);
-
-            Span<byte> challengeTokenBuffer = challengePacketData.Slice(8, Defines.ChallengeTokenBytes);
-            challengeTokenBuffer.Clear();
-            {
-                var writer = new ByteWriter(challengeTokenBuffer);
-                writer.U64(connectTokenPrivate.ClientId);
-                writer.Bytes(connectTokenPrivate.UserData);
-            }
-            ChallengeToken.Encrypt(challengeTokenBuffer, _challengeSequence, _challengeKey);
-
-            _challengeSequence++;
-
-            NetcodeLog.Debug("server sent connection challenge packet\n");
-
-            SendGlobalPacket(PacketType.ConnectionChallenge, challengePacketData, in from, connectTokenPrivate.ServerToClientKey);
         }
 
         private void ProcessConnectionResponsePacket(in Address from, Span<byte> packetData, int encryptionIndex)
@@ -800,11 +804,18 @@ namespace Netcode
             {
                 case PacketType.ConnectionRequest:
                 {
-                    if ((Flags & FlagIgnoreConnectionRequestPackets) == 0)
+                    try
                     {
-                        if (NetcodeLog.Enabled(LogLevel.Debug))
-                            NetcodeLog.Debug($"server received connection request from {from}\n");
-                        ProcessConnectionRequestPacket(in from, buffer.Slice(packet.DataOffset, packet.DataLength), packet.ConnectTokenExpireTimestamp, currentTimestamp);
+                        if ((Flags & FlagIgnoreConnectionRequestPackets) == 0)
+                        {
+                            if (NetcodeLog.Enabled(LogLevel.Debug))
+                                NetcodeLog.Debug($"server received connection request from {from}\n");
+                            ProcessConnectionRequestPacket(in from, buffer.Slice(packet.DataOffset, packet.DataLength), packet.ConnectTokenExpireTimestamp, currentTimestamp);
+                        }
+                    }
+                    finally
+                    {
+                        CryptographicOperations.ZeroMemory(buffer.Slice(packet.DataOffset, packet.DataLength));
                     }
                 }
                 break;
@@ -923,7 +934,7 @@ namespace Netcode
         /// </summary>
         public void ProcessPacket(in Address from, Span<byte> packetData)
         {
-            ulong currentTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong currentTimestamp = UnixTime.Now();
             ReadAndProcessPacket(in from, packetData, currentTimestamp);
         }
 
@@ -936,7 +947,7 @@ namespace Netcode
 
         private void ReceivePackets()
         {
-            ulong currentTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong currentTimestamp = UnixTime.Now();
 
             if (_config.Simulator == null)
             {
@@ -1129,6 +1140,9 @@ namespace Netcode
         /// </summary>
         public int ReceivePacket(int clientIndex, Span<byte> payload, out ulong sequence)
         {
+            if (payload.Length < Protocol.MaxPacketSize)
+                throw new ArgumentException($"payload must be at least {Protocol.MaxPacketSize} bytes", nameof(payload));
+
             sequence = 0;
 
             if (!_running)
@@ -1252,7 +1266,14 @@ namespace Netcode
             if (_disposed)
                 return;
             _disposed = true;
-            Stop();
+            try
+            {
+                Stop();
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(_privateKey);
+            }
             _socketIpv4?.Dispose();
             _socketIpv6?.Dispose();
         }

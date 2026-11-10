@@ -7,7 +7,7 @@
     runs live client/server session legs over localhost UDP.
 
     Subcommands: goldens <dir> | verify <dir> | mint <file> <address> |
-                 server <port> | client <port> <token-file>
+                 check-addresses | server <port> | client <port> <token-file>
     Exit code is the verdict.
 */
 
@@ -322,6 +322,38 @@ internal static class Program
         return 0;
     }
 
+    private static int DoCheckAddresses()
+    {
+        // the same inputs and verdicts as do_check_addresses in compat/c/compat.c:
+        // both parsers must agree on every row. Zone-id inputs are covered by the
+        // C# unit tests only; inet_pton zone handling varies by platform.
+        (string input, bool valid, AddressType type, ushort port)[] cases =
+        {
+            ("[[::1]]", false, default, 0),
+            ("[::1]]:80", false, default, 0),
+            ("[::1]:80]", false, default, 0),
+            ("[::1]]", false, default, 0),
+            ("127.0.0.1", true, AddressType.IPv4, 0),
+            ("127.0.0.1:80", true, AddressType.IPv4, 80),
+            ("::1", true, AddressType.IPv6, 0),
+            ("[::1]", true, AddressType.IPv6, 0),
+            ("[::1]:80", true, AddressType.IPv6, 80),
+            ("fe80::1", true, AddressType.IPv6, 0),
+            ("[fe80::202:b3ff:fe1e:8329]:40000", true, AddressType.IPv6, 40000),
+        };
+
+        foreach ((string input, bool valid, AddressType type, ushort port) in cases)
+        {
+            bool parsed = Address.TryParse(input, out Address address);
+            if (!Verify(parsed == valid, $"address check '{input}' validity")) return 1;
+            if (valid && !Verify(address.Type == type && address.Port == port, $"address check '{input}' type/port")) return 1;
+            Console.WriteLine($"address check: '{input}' -> {(parsed ? $"{address.Type}:{address.Port}" : "invalid")}");
+        }
+
+        Console.WriteLine("address checks passed");
+        return 0;
+    }
+
     private static int DoMint(string filename, string serverAddress)
     {
         byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
@@ -488,6 +520,7 @@ internal static class Program
         {
             ["goldens", var dir] => DoGoldens(dir),
             ["verify", var dir] => DoVerify(dir),
+            ["check-addresses"] => DoCheckAddresses(),
             ["mint", var file, var address] => DoMint(file, address),
             ["server", var port] => DoServer(int.Parse(port)),
             ["client", var port, var token] => DoClient(int.Parse(port), token),
@@ -497,7 +530,7 @@ internal static class Program
 
     private static int Usage()
     {
-        Console.WriteLine("usage: compat goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token>");
+        Console.WriteLine("usage: compat goldens <dir> | verify <dir> | mint <file> <address> | check-addresses | server <port> | client <port> <token>");
         return 1;
     }
 }
