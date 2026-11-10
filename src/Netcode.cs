@@ -71,6 +71,7 @@ namespace Netcode
         public const int SocketRcvbufSize = 4 * 1024 * 1024;
         public const double PacketSendRate = 10.0;
         public const int NumDisconnectPackets = 10;
+        public const int PreconnectMappingSeconds = 10;
 
         // "NETCODE 1.02" ASCII with null terminator — 13 bytes
         public static ReadOnlySpan<byte> VersionInfo => "NETCODE 1.02\0"u8;
@@ -1700,6 +1701,19 @@ namespace Netcode
             if (index == -1)
                 return 0;
             return Timeout[index];
+        }
+
+        public static double PreconnectExpireTime(double time, int timeoutSeconds)
+        {
+            return time + (timeoutSeconds > 0 ? timeoutSeconds : Defines.PreconnectMappingSeconds);
+        }
+
+        public static double PreconnectExpireTime(double time, int timeoutSeconds, ulong connectTokenExpireTimestamp, ulong currentTimestamp)
+        {
+            double tokenLifetime = connectTokenExpireTimestamp > currentTimestamp
+                ? (double)(connectTokenExpireTimestamp - currentTimestamp)
+                : 0.0;
+            return Math.Min(PreconnectExpireTime(time, timeoutSeconds), time + tokenLifetime);
         }
     }
 

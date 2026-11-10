@@ -12,6 +12,8 @@ namespace Netcode.Tests;
 
 internal static class ClientServerTests
 {
+    private delegate void ProcessAtTime(in Address from, Span<byte> packet, ulong timestamp);
+
     private static byte[] GenerateConnectToken(string serverAddress, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry, int timeout = TestConstants.TestTimeoutSeconds)
     {
         return GenerateConnectToken(new[] { serverAddress }, clientId, expiry, timeout);
@@ -1072,6 +1074,54 @@ internal static class ClientServerTests
         Check.That(client.ClientIndex == 0);
         Check.That(server.ClientConnected(0));
         Check.That(server.NumConnectedClients == 1);
+    }
+
+    public static void TestPendingEncryptionMappingExpiry()
+    {
+        const System.Reflection.BindingFlags Fields = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+
+        var config = new ServerConfig { ProtocolId = TestConstants.TestProtocolId, OverrideSendAndReceive = true };
+        TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
+        config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { };
+        config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+        using var server = new Server("127.0.0.1:40000", config, 0.0);
+        server.Start(4);
+        typeof(Server).GetField("_minConnectTokenExpireTimestamp", Fields)!.SetValue(server, 0UL);
+        var process = typeof(Server).GetMethod("ReadAndProcessPacket", Fields)!.CreateDelegate<ProcessAtTime>(server);
+        var encryptionManager = (EncryptionManager)typeof(Server).GetField("_encryptionManager", Fields)!.GetValue(server)!;
+        Address serverAddress = Address.Parse("127.0.0.1:40000");
+        Address firstAddress = Address.Parse("127.0.0.1:50000");
+        Address secondAddress = Address.Parse("127.0.0.1:50001");
+
+        void Request(in Address from, ulong clientId, ulong expireTimestamp, double time)
+        {
+            byte[] tokenBytes = new byte[Protocol.ConnectTokenBytes];
+            byte[] userData = new byte[Protocol.UserDataBytes];
+            Span<Address> addresses = stackalloc Address[1] { serverAddress };
+            Span<byte> nonce = stackalloc byte[Defines.ConnectTokenNonceBytes];
+            new TestRng(clientId).Fill(nonce);
+            Check.That(ConnectTokenGenerator.GenerateInternal(addresses, addresses, 1000, expireTimestamp, -1,
+                clientId, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, nonce, tokenBytes));
+            var token = new ConnectTokenData();
+            Check.That(token.Read(tokenBytes));
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteConnectionRequestPacket(wire, token.VersionInfo, token.ProtocolId,
+                token.ExpireTimestamp, token.Nonce, token.PrivateData);
+            server.Update(time);
+            process(in from, wire.AsSpan(0, bytes), 1001);
+        }
+
+        // the token lives for five seconds, so an unfinished request's mapping must not outlive it
+        Request(in firstAddress, 0x1001, 1005, 0.0);
+        Check.That(encryptionManager.NumEncryptionMappings == 1);
+
+        server.Update(6.0);
+        Check.That(encryptionManager.EntryExpired(0, server.Time));
+
+        // the expired mapping's slot is available to another pending request
+        Request(in secondAddress, 0x1002, 1030, 6.0);
+        Check.That(encryptionManager.NumEncryptionMappings == 1);
+        Check.That(encryptionManager.Address[0].Equals(secondAddress));
     }
 
     public static void TestDisableTimeout()

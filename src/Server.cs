@@ -709,7 +709,11 @@ namespace Netcode
                     return;
                 }
 
-                double expireTime = connectTokenPrivate.TimeoutSeconds >= 0 ? _time + connectTokenPrivate.TimeoutSeconds : -1.0;
+                double expireTime = EncryptionManager.PreconnectExpireTime(
+                    _time,
+                    connectTokenPrivate.TimeoutSeconds,
+                    connectTokenExpireTimestamp,
+                    currentTimestamp);
 
                 if (!_encryptionManager.AddEncryptionMapping(
                         in from,
