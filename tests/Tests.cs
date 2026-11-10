@@ -1842,7 +1842,7 @@ internal static class ConfigSnapshotTests
         Check.That(ConnectTokenGenerator.Generate(
             new[] { serverAddress },
             new[] { serverAddress },
-            TestConstants.TestConnectTokenExpiry,
+            TestConstants.TestConnectTokenExpiry + 1,
             TestConstants.TestTimeoutSeconds,
             clientId,
             TestConstants.TestProtocolId,
