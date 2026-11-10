@@ -773,9 +773,10 @@ namespace Netcode
         /// Generate a connect token into <paramref name="output"/> (2048 bytes).
         /// <paramref name="publicServerAddresses"/> go into the public portion the
         /// client connects to; <paramref name="internalServerAddresses"/> go into the
-        /// encrypted private portion the server validates against. Negative
-        /// expireSeconds and timeoutSeconds disable expiry and timeout for
-        /// development and testing only. Returns false on invalid input.
+        /// encrypted private portion the server validates against. A negative
+        /// expireSeconds disables expiry and a negative timeoutSeconds disables
+        /// timeout; both are for development and testing only. Returns false on
+        /// invalid input.
         /// </summary>
         /// <remarks>
         /// A negative <paramref name="expireSeconds"/> sets the token's expire timestamp
