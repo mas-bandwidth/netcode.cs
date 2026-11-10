@@ -1024,6 +1024,7 @@ internal static class ClientServerTests
 
     public static void TestLoopback()
     {
+        TestLoopbackStateChanges();
         TestClientStateChangeNotification();
 
         NetworkSimulator simulator = CreateSimulator();
@@ -1135,6 +1136,47 @@ internal static class ClientServerTests
         Check.That(server.ClientConnected(1));
         Check.That(server.NumConnectedClients == 1);
         Check.That(loopbackClient.State == ClientState.Disconnected);
+    }
+
+    private static void TestLoopbackStateChanges()
+    {
+        int changes = 0;
+        Client? clientRef = null;
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0,
+            SendLoopbackPacket = (clientIndex, payload, sequence) => { },
+            OnStateChange = (previous, next) =>
+            {
+                if (changes == 0)
+                {
+                    Check.That(previous == ClientState.Disconnected);
+                    Check.That(next == ClientState.Connected);
+                    Check.That(clientRef!.IsLoopback);
+                    Check.That(clientRef.ClientIndex == 2);
+                    Check.That(clientRef.MaxClients == 4);
+                }
+                else
+                {
+                    Check.That(changes == 1);
+                    Check.That(previous == ClientState.Connected);
+                    Check.That(next == ClientState.Disconnected);
+                }
+                changes++;
+            },
+        };
+        using var client = new Client("127.0.0.1:40000", config, 1000.0);
+        clientRef = client;
+
+        client.ConnectLoopback(2, 4);
+        Check.That(changes == 1);
+        Check.That(client.State == ClientState.Connected);
+
+        client.DisconnectLoopback();
+        Check.That(changes == 2);
+        Check.That(client.State == ClientState.Disconnected);
     }
 
     private static void TestClientStateChangeNotification()
