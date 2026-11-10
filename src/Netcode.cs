@@ -1775,9 +1775,12 @@ namespace Netcode
             else if (size != requestedSize)
                 NetcodeLog.Info($"socket {name} buffer size reduced from {requestedSize} to {size}\n");
         }
+        // for tests: how many OS sockets have been asked for, so the unit tier can prove it opened none
+        internal static int NumCreated;
 
         public static CreateError Create(in Address address, int sendBufferSize, int receiveBufferSize, bool enablePacketTagging, out NetcodeSocket? result)
         {
+            System.Threading.Interlocked.Increment(ref NumCreated);
             result = null;
 
             AddressFamily family = address.Type == AddressType.IPv6 ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork;

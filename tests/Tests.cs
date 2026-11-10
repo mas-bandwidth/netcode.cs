@@ -81,6 +81,7 @@ internal sealed class TestRng
 internal static class Program
 {
     private static string? _filter;
+    private static bool _functional;
 
     private static void RunTest(string name, Action test)
     {
@@ -88,6 +89,10 @@ internal static class Program
             return;
         Console.WriteLine(name);
         test();
+
+        // the unit tier opens no OS sockets: anything that needs one belongs to --functional
+        if (!_functional)
+            Check.That(NetcodeSocket.NumCreated == 0);
     }
 
     private static int Main(string[] args)
@@ -96,6 +101,14 @@ internal static class Program
         {
             int iterations = args.Length > 1 ? int.Parse(args[1]) : 1000;
             return Soak.Run(iterations);
+        }
+
+        // the default run is the unit tier: no OS sockets, no sleeps, injected time.
+        // --functional runs the tier that uses real sockets and real time.
+        if (args.Length > 0 && args[0] == "--functional")
+        {
+            _functional = true;
+            args = args[1..];
         }
 
         if (args.Length > 0)
