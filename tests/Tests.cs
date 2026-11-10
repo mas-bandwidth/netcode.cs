@@ -172,6 +172,7 @@ internal static class Program
         RunTest("test_connect_token_history", ClientServerTests.TestConnectTokenHistory);
         RunTest("test_client_reconnect_used_connect_token", ClientServerTests.TestClientReconnectUsedConnectToken);
         RunTest("test_client_error_connect_token_predates_server_start", ClientServerTests.TestClientErrorConnectTokenPredatesServerStart);
+        RunTest("test_client_error_connect_token_at_server_start", ClientServerTests.TestClientErrorConnectTokenAtServerStart);
         RunTest("test_client_server_connect", ClientServerTests.TestClientServerConnect);
         RunTest("test_client_server_keep_alive", ClientServerTests.TestClientServerKeepAlive);
         RunTest("test_client_server_multiple_clients", ClientServerTests.TestClientServerMultipleClients);
