@@ -1688,11 +1688,6 @@ internal static class ConfigSnapshotTests
         using var client = new Client("[::]:50000", clientConfig, time);
         using var server = new Server("[::1]:40000", serverConfig, time);
 
-        server.Start(1);
-
-        ulong clientId = new TestRng(0xC11E17).NextUInt64();
-        client.Connect(GenerateConnectToken("[::1]:40000", clientId));
-
         clientConfig.Simulator = null;
         clientConfig.OnStateChange = null;
         clientConfig.SendLoopbackPacket = null;
@@ -1711,6 +1706,11 @@ internal static class ConfigSnapshotTests
         serverConfig.EnablePacketTagging = true;
         serverConfig.ProtocolId = 0;
         Array.Clear(serverConfig.PrivateKey);
+
+        server.Start(1);
+
+        ulong clientId = new TestRng(0xC11E17).NextUInt64();
+        client.Connect(GenerateConnectToken("[::1]:40000", clientId));
 
         for (int i = 0; i < 1000 && client.State > ClientState.Disconnected && client.State != ClientState.Connected; i++)
         {
