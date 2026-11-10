@@ -1528,7 +1528,7 @@ internal static class FunctionalTests
     // N empty UDP datagrams sit ahead of one payload in the real socket queue.
     // One server Update must deliver that payload. Time is injected; this does
     // not sleep and does not wait on the clock.
-    public static void TestEmptyDatagramDoesNotDelayPayload()
+    public static void TestReceiveSkipsEmptyDatagrams()
     {
         double time = 1000.0;
         // Equality with the send interval still suppresses a send, so step past it.
@@ -1585,7 +1585,7 @@ internal static class FunctionalTests
 
     public static void TestClientServerIpv4SocketConnect()
     {
-        TestEmptyDatagramDoesNotDelayPayload();
+        TestReceiveSkipsEmptyDatagrams();
         ClientServerSocketConnect("0.0.0.0:50000", null, "127.0.0.1:40000", null);
         ClientServerSocketConnect("0.0.0.0:50000", null, "127.0.0.1:40000", "[::1]:40000");
         ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", null);

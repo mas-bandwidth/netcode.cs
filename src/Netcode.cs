@@ -2022,10 +2022,10 @@ namespace Netcode
             // too small"). .NET 9 moved that assignment after the error check. Re-arm
             // the size each call; it is a field store, nothing allocates.
             //
-            // A zero-length datagram and SocketError.MessageSize are queued datagrams.
-            // Returning 0 for either stops the caller, so a payload behind N of them
-            // waits N updates. Skip both. Return 0 only for an empty queue
-            // (WouldBlock) or a genuine socket error.
+            // A zero-length datagram and a datagram that raises
+            // SocketError.MessageSize are both queued datagrams. Skip them and
+            // keep reading. Return 0 only when the queue is empty (WouldBlock)
+            // or on a genuine socket error.
             while (true)
             {
                 _receiveAddress.Size = SocketAddress.GetMaximumAddressSize(_socket.AddressFamily);
