@@ -408,6 +408,29 @@ internal static class ClientServerTests
         Check.That(client.State == ClientState.ConnectionTimedOut);
     }
 
+    public static void TestClientPacketFromOtherAddressLeavesReplayProtection()
+    {
+        const string serverAddress = "127.0.0.1:40000";
+        using var client = OpenRespondingClient(serverAddress, out Address from, out byte[] serverToClientKey);
+        Check.That(Address.TryParse("127.0.0.1:40001", out Address otherAddress));
+
+        DeliverKeepAlive(client, in from, serverToClientKey, 2, 0, 1);
+        Check.That(client.State == ClientState.Connected);
+
+        // a packet that authenticates under the client's key, but comes from another address,
+        // must not move the client's replay protection
+
+        DeliverKeepAlive(client, in otherAddress, serverToClientKey, 1000000, 0, 1);
+
+        // so the client still accepts the next packet from its server, which keeps it connected
+
+        client.Update(10.0);
+        DeliverKeepAlive(client, in from, serverToClientKey, 3, 0, 1);
+
+        client.Update(TestConstants.TestTimeoutSeconds + 5.0);
+        Check.That(client.State == ClientState.Connected);
+    }
+
     private static Client OpenRespondingClient(string serverAddress, out Address from, out byte[] serverToClientKey)
     {
         byte[] tokenBytes = GenerateConnectToken(serverAddress, 0x11);
