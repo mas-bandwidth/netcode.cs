@@ -476,7 +476,7 @@ namespace Netcode
         /// </summary>
         public void ProcessPacket(in Address from, Span<byte> packetData)
         {
-            ulong currentTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong currentTimestamp = UnixTime.Now();
 
             ReadPacketResult packet = PacketIO.ReadPacket(
                 packetData,

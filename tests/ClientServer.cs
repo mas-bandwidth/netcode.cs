@@ -1,8 +1,9 @@
 /*
     ClientServer.cs — client/server integration tests, ported test-for-test from
-    netcode.c: deterministic network-simulator tests plus real UDP socket
-    connects, all error states, disconnect flows, reconnect, disable timeout and
-    loopback. Also the soak runner.
+    netcode.c: deterministic network-simulator tests (unit tier: no sockets,
+    injected time), all error states, disconnect flows, reconnect, disable
+    timeout and loopback; real UDP socket creates and connects (functional
+    tier, --functional). Also the soak runner.
 */
 
 using System;
@@ -12,7 +13,7 @@ namespace Netcode.Tests;
 
 internal static class ClientServerTests
 {
-    private static byte[] GenerateConnectToken(string serverAddress, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry, int timeout = TestConstants.TestTimeoutSeconds)
+    internal static byte[] GenerateConnectToken(string serverAddress, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry, int timeout = TestConstants.TestTimeoutSeconds)
     {
         return GenerateConnectToken(new[] { serverAddress }, clientId, expiry, timeout);
     }
@@ -37,7 +38,7 @@ internal static class ClientServerTests
         };
     }
 
-    private static ServerConfig CreateServerConfig(NetworkSimulator? simulator)
+    internal static ServerConfig CreateServerConfig(NetworkSimulator? simulator)
     {
         var config = new ServerConfig { ProtocolId = TestConstants.TestProtocolId, Simulator = simulator };
         TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
@@ -61,39 +62,7 @@ internal static class ClientServerTests
         }
     }
 
-    public static void TestClientCreate()
-    {
-        TestClientServerAddressFamilies();
-        {
-            using var client = new Client("127.0.0.1:40000");
-            Check.That(client.Port == 40000);
-            Check.That(client.State == ClientState.Disconnected);
-        }
-        {
-            using var client = new Client("[::]:50000");
-            Check.That(client.Port == 50000);
-        }
-        {
-            using var client = new Client("127.0.0.1:40000", "[::]:50000", null, 0.0);
-            Check.That(client.Port == 40000);
-        }
-        {
-            using var client = new Client("[::]:50000", "127.0.0.1:40000", null, 0.0);
-            Check.That(client.Port == 50000);
-        }
-        // bad address must throw with the right error code
-        try
-        {
-            using var client = new Client("not an address");
-            Check.That(false);
-        }
-        catch (NetcodeException e)
-        {
-            Check.That(e.ErrorCode == (int)ClientCreateError.ParseAddressFailed);
-        }
-    }
-
-    private static void TestClientServerAddressFamilies()
+    public static void TestClientServerAddressFamilies()
     {
         static byte[] Token(params string[] addresses)
         {
@@ -147,44 +116,13 @@ internal static class ClientServerTests
         }
     }
 
-    public static void TestServerCreate()
-    {
-        {
-            using var server = new Server("127.0.0.1:40000", CreateServerConfig(null));
-            Check.That(server.Port == 40000);
-            Check.That(!server.Running);
-        }
-        {
-            using var server = new Server("[::1]:50000", CreateServerConfig(null));
-            Check.That(server.Port == 50000);
-        }
-        {
-            using var server = new Server("127.0.0.1:40000", "[::1]:50000", CreateServerConfig(null), 0.0);
-            Check.That(server.Port == 40000);
-        }
-        {
-            using var server = new Server("[::1]:50000", "127.0.0.1:40000", CreateServerConfig(null), 0.0);
-            Check.That(server.Port == 50000);
-        }
-        // bad address must throw with the right error code
-        try
-        {
-            using var server = new Server("not an address", CreateServerConfig(null));
-            Check.That(false);
-        }
-        catch (NetcodeException e)
-        {
-            Check.That(e.ErrorCode == (int)ServerCreateError.ParseAddressFailed);
-        }
-    }
-
     public static void TestServerRestartGlobalSequence()
     {
         // global packets (challenge, denied) share per-token server to client keys with
         // per-client packets, so the global sequence must stay in the top half of the
         // sequence space or a stopped and restarted server reuses AEAD nonces.
 
-        using var server = new Server("127.0.0.1:40000", CreateServerConfig(null));
+        using var server = new Server("127.0.0.1:40000", CreateServerConfig(new NetworkSimulator()), 1000.0);
 
         Check.That(server.GlobalSequence == 1UL << 63);
 
@@ -247,7 +185,7 @@ internal static class ClientServerTests
     public static void TestClientReconnectUsedConnectToken()
     {
         NetworkSimulator simulator = CreateSimulator();
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
@@ -278,7 +216,7 @@ internal static class ClientServerTests
     public static void TestClientErrorConnectTokenPredatesServerStart()
     {
         NetworkSimulator simulator = CreateSimulator();
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
         var serverConfig = CreateServerConfig(simulator);
         serverConfig.MaxConnectTokenLifetime = 30;
@@ -302,7 +240,7 @@ internal static class ClientServerTests
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
@@ -374,80 +312,11 @@ internal static class ClientServerTests
         Check.That(clientNumPacketsReceived >= 10 && serverNumPacketsReceived >= 10);
     }
 
-    private static void ClientServerSocketConnectTo(string clientAddress, string? clientAddress2, string serverAddress, string? serverAddress2, string connectAddress)
-    {
-        double time = 0.0;
-        double deltaTime = 1.0 / 10.0;
-
-        using var client = new Client(clientAddress, clientAddress2, null, time);
-        using var server = new Server(serverAddress, serverAddress2, CreateServerConfig(null), time);
-
-        server.Start(1);
-
-        ulong clientId = new TestRng((ulong)Environment.TickCount64 | 1).NextUInt64();
-        client.Connect(GenerateConnectToken(connectAddress, clientId));
-
-        while (true)
-        {
-            client.Update(time);
-            server.Update(time);
-
-            if (client.State <= ClientState.Disconnected)
-                break;
-            if (client.State == ClientState.Connected)
-                break;
-
-            // this test runs over real sockets while advancing virtual time, so it must
-            // yield real time each iteration or the virtual timeouts can expire before
-            // the OS delivers a single loopback packet
-            Thread.Sleep(10);
-
-            time += deltaTime;
-        }
-
-        Check.That(client.State == ClientState.Connected);
-        Check.That(server.NumConnectedClients == 1);
-    }
-
-    private static void ClientServerSocketConnect(string clientAddress, string? clientAddress2, string serverAddress, string? serverAddress2)
-    {
-        ClientServerSocketConnectTo(clientAddress, clientAddress2, serverAddress, serverAddress2, serverAddress);
-    }
-
-    public static void TestClientServerIpv4SocketConnect()
-    {
-        ClientServerSocketConnect("0.0.0.0:50000", null, "127.0.0.1:40000", null);
-        ClientServerSocketConnect("0.0.0.0:50000", null, "127.0.0.1:40000", "[::1]:40000");
-        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", null);
-        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000");
-    }
-
-    public static void TestClientServerIpv6SocketConnect()
-    {
-        ClientServerSocketConnect("[::]:50000", null, "[::1]:40000", null);
-        ClientServerSocketConnect("[::]:50000", null, "[::1]:40000", "127.0.0.1:40000");
-        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "[::1]:40000", null);
-        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "[::1]:40000", "127.0.0.1:40000");
-    }
-
-    public static void TestClientServerDualSocketConnect()
-    {
-        // dual stack client connects to dual stack server over ipv4, then over ipv6
-
-        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000");
-        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "[::1]:40000", "127.0.0.1:40000");
-
-        // dual stack client connects to the second address of a dual stack server
-
-        ClientServerSocketConnectTo("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000", "[::1]:40000");
-        ClientServerSocketConnectTo("0.0.0.0:50000", "[::]:50000", "[::1]:40000", "127.0.0.1:40000", "127.0.0.1:40000");
-    }
-
     public static void TestClientServerKeepAlive()
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
@@ -489,7 +358,7 @@ internal static class ClientServerTests
 
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
@@ -626,7 +495,7 @@ internal static class ClientServerTests
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
@@ -653,7 +522,7 @@ internal static class ClientServerTests
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
 
@@ -672,7 +541,7 @@ internal static class ClientServerTests
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
@@ -693,14 +562,14 @@ internal static class ClientServerTests
         }
 
         Check.That(client.State == ClientState.ConnectTokenExpired);
-        Check.That(time < 25.0);
+        Check.That(time < 1025.0);
     }
 
     public static void TestClientErrorInvalidConnectToken()
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, 0.0);
+        using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, 1000.0);
 
         byte[] garbage = new byte[Protocol.ConnectTokenBytes];
         new TestRng(0xBAD).Fill(garbage);
@@ -717,7 +586,7 @@ internal static class ClientServerTests
 
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
@@ -751,7 +620,7 @@ internal static class ClientServerTests
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
@@ -785,7 +654,7 @@ internal static class ClientServerTests
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
@@ -822,7 +691,7 @@ internal static class ClientServerTests
 
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
@@ -865,7 +734,7 @@ internal static class ClientServerTests
 
         NetworkSimulator simulator = new NetworkSimulator(); // clean network for the disconnect packets
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
@@ -905,7 +774,7 @@ internal static class ClientServerTests
 
         NetworkSimulator simulator = new NetworkSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
@@ -943,7 +812,7 @@ internal static class ClientServerTests
 
         NetworkSimulator simulator = new NetworkSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         DisconnectReason reasonInCallback = DisconnectReason.None;
@@ -1021,7 +890,7 @@ internal static class ClientServerTests
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
@@ -1078,7 +947,7 @@ internal static class ClientServerTests
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
@@ -1139,7 +1008,7 @@ internal static class ClientServerTests
 
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         int numLoopbackPacketsSentToClient = 0;
@@ -1364,7 +1233,7 @@ internal static class ClientServerTests
         // entering loopback with SendLoopbackPacket unset must refuse to connect, in
         // every build, rather than calling null on the next send.
 
-        using var client = new Client("127.0.0.1:40000");
+        using var client = new Client("127.0.0.1:40000", new ClientConfig { Simulator = new NetworkSimulator() }, 1000.0);
 
         client.ConnectLoopback(0, 1);
 
@@ -1380,7 +1249,7 @@ internal static class ClientServerTests
         // attaching a loopback client with SendLoopbackPacket unset must refuse the slot,
         // in every build, rather than calling null on the next send.
 
-        using var server = new Server("127.0.0.1:40000", CreateServerConfig(null));
+        using var server = new Server("127.0.0.1:40000", CreateServerConfig(new NetworkSimulator()), 1000.0);
         server.Start(1);
 
         server.ConnectLoopbackClient(0, 0x11111111, ReadOnlySpan<byte>.Empty);
@@ -1544,6 +1413,143 @@ internal static class ClientServerTests
                 }
             }
         }
+    }
+}
+
+// The functional tier: real UDP sockets on fixed loopback ports, and real time.
+// Run with --functional; the default run is the unit tier above.
+internal static class FunctionalTests
+{
+    public static void TestClientCreate()
+    {
+        {
+            using var client = new Client("127.0.0.1:40000");
+            Check.That(client.Port == 40000);
+            Check.That(client.State == ClientState.Disconnected);
+        }
+        {
+            using var client = new Client("[::]:50000");
+            Check.That(client.Port == 50000);
+        }
+        {
+            using var client = new Client("127.0.0.1:40000", "[::]:50000", null, 0.0);
+            Check.That(client.Port == 40000);
+        }
+        {
+            using var client = new Client("[::]:50000", "127.0.0.1:40000", null, 0.0);
+            Check.That(client.Port == 50000);
+        }
+        // bad address must throw with the right error code
+        try
+        {
+            using var client = new Client("not an address");
+            Check.That(false);
+        }
+        catch (NetcodeException e)
+        {
+            Check.That(e.ErrorCode == (int)ClientCreateError.ParseAddressFailed);
+        }
+    }
+
+    public static void TestServerCreate()
+    {
+        {
+            using var server = new Server("127.0.0.1:40000", ClientServerTests.CreateServerConfig(null));
+            Check.That(server.Port == 40000);
+            Check.That(!server.Running);
+        }
+        {
+            using var server = new Server("[::1]:50000", ClientServerTests.CreateServerConfig(null));
+            Check.That(server.Port == 50000);
+        }
+        {
+            using var server = new Server("127.0.0.1:40000", "[::1]:50000", ClientServerTests.CreateServerConfig(null), 0.0);
+            Check.That(server.Port == 40000);
+        }
+        {
+            using var server = new Server("[::1]:50000", "127.0.0.1:40000", ClientServerTests.CreateServerConfig(null), 0.0);
+            Check.That(server.Port == 50000);
+        }
+        // bad address must throw with the right error code
+        try
+        {
+            using var server = new Server("not an address", ClientServerTests.CreateServerConfig(null));
+            Check.That(false);
+        }
+        catch (NetcodeException e)
+        {
+            Check.That(e.ErrorCode == (int)ServerCreateError.ParseAddressFailed);
+        }
+    }
+
+    private static void ClientServerSocketConnectTo(string clientAddress, string? clientAddress2, string serverAddress, string? serverAddress2, string connectAddress)
+    {
+        // real sockets run on real time: each update passes the wall clock, so a lost
+        // packet is resent by the client and the connect succeeds or fails within the
+        // token's timeout, however long the OS takes to deliver.
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        double time = 1000.0;
+
+        using var client = new Client(clientAddress, clientAddress2, null, time);
+        using var server = new Server(serverAddress, serverAddress2, ClientServerTests.CreateServerConfig(null), time);
+
+        server.Start(1);
+
+        ulong clientId = new TestRng((ulong)Environment.TickCount64 | 1).NextUInt64();
+        client.Connect(ClientServerTests.GenerateConnectToken(connectAddress, clientId));
+
+        while (true)
+        {
+            time = 1000.0 + clock.Elapsed.TotalSeconds;
+
+            client.Update(time);
+            server.Update(time);
+
+            if (client.State <= ClientState.Disconnected)
+                break;
+            if (client.State == ClientState.Connected)
+                break;
+
+            Thread.Sleep(1);
+        }
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server.NumConnectedClients == 1);
+    }
+
+    private static void ClientServerSocketConnect(string clientAddress, string? clientAddress2, string serverAddress, string? serverAddress2)
+    {
+        ClientServerSocketConnectTo(clientAddress, clientAddress2, serverAddress, serverAddress2, serverAddress);
+    }
+
+    public static void TestClientServerIpv4SocketConnect()
+    {
+        ClientServerSocketConnect("0.0.0.0:50000", null, "127.0.0.1:40000", null);
+        ClientServerSocketConnect("0.0.0.0:50000", null, "127.0.0.1:40000", "[::1]:40000");
+        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", null);
+        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000");
+    }
+
+    public static void TestClientServerIpv6SocketConnect()
+    {
+        ClientServerSocketConnect("[::]:50000", null, "[::1]:40000", null);
+        ClientServerSocketConnect("[::]:50000", null, "[::1]:40000", "127.0.0.1:40000");
+        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "[::1]:40000", null);
+        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "[::1]:40000", "127.0.0.1:40000");
+    }
+
+    public static void TestClientServerDualSocketConnect()
+    {
+        // dual stack client connects to dual stack server over ipv4, then over ipv6
+
+        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000");
+        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "[::1]:40000", "127.0.0.1:40000");
+
+        // dual stack client connects to the second address of a dual stack server
+
+        ClientServerSocketConnectTo("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000", "[::1]:40000");
+        ClientServerSocketConnectTo("0.0.0.0:50000", "[::]:50000", "[::1]:40000", "127.0.0.1:40000", "127.0.0.1:40000");
     }
 }
 
