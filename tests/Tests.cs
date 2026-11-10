@@ -981,9 +981,6 @@ internal static class CoreTests
         inputToken.UserData.AsSpan().CopyTo(expected.AsSpan(8));
         Check.That(buffer.AsSpan().SequenceEqual(expected));
 
-        MethodInfo write = typeof(ChallengeToken).GetMethod("Write", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
-        MethodInfo read = typeof(ChallengeToken).GetMethod("Read", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
-
         bool serverWrites = false;
         bool serverReads = false;
 
@@ -1006,9 +1003,9 @@ internal static class CoreTests
                 {
                     continue;
                 }
-                if (called?.MetadataToken == write.MetadataToken)
+                if (called != null && called.DeclaringType == typeof(ChallengeToken) && called.Name == "Write")
                     serverWrites = true;
-                else if (called?.MetadataToken == read.MetadataToken)
+                else if (called != null && called.DeclaringType == typeof(ChallengeToken) && called.Name == "Read")
                     serverReads = true;
             }
         }
