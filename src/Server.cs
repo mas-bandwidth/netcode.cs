@@ -56,9 +56,10 @@ namespace Netcode
                     mac.SequenceEqual(_mac.AsSpan(i * Protocol.MacBytes, Protocol.MacBytes)))
                     matchingTokenIndex = i;
 
-                // a token minted without expiry (negative expireSeconds, so its expire
-                // timestamp is ulong.MaxValue) never satisfies this reclaim check, so its
-                // history entry is never reusable during the server run
+                // a token minted without expiry (negative expireSeconds, for development
+                // and testing only, so its expire timestamp is ulong.MaxValue) never
+                // satisfies this reclaim check, so its history entry is never reusable
+                // during the server run
                 if (freeTokenIndex == -1 &&
                     (_state[i] == ConnectTokenEntryState.Free || _expireTimestamp[i] <= currentTimestamp))
                     freeTokenIndex = i;
@@ -399,9 +400,10 @@ namespace Netcode
             _challengeSequence = 0;
             Rng.GenerateKey(_challengeKey);
 
-            // a token minted without expiry (expireTimestamp == ulong.MaxValue) always
-            // passes this floor, so a token created with a negative expireSeconds stays
-            // valid across restarts while the private key and protocol id are unchanged
+            // a token minted without expiry (expireTimestamp == ulong.MaxValue, for
+            // development and testing only) always passes this floor, so a token created
+            // with a negative expireSeconds stays valid across restarts while the private
+            // key and protocol id are unchanged
             _minConnectTokenExpireTimestamp = UnixTime.Now() + (ulong)_maxConnectTokenLifetime;
 
             // global packets (challenge, denied) encrypt with the same per-token server to
