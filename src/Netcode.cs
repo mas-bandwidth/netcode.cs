@@ -1074,7 +1074,7 @@ namespace Netcode
                     return result;
                 }
 
-                if (packetExpireTimestamp < minConnectTokenExpireTimestamp)
+                if (packetExpireTimestamp <= minConnectTokenExpireTimestamp)
                 {
                     NetcodeLog.Debug("ignored connection request packet. connect token predates the server start\n");
                     return result;

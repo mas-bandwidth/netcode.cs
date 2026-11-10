@@ -153,6 +153,7 @@ internal static class Program
         RunTest("test_challenge_token", CoreTests.TestChallengeToken);
         RunTest("test_managed_crypto_and_negative_timeout", CoreTests.TestManagedCryptoAndNegativeTimeout);
         RunTest("test_connection_request_packet", CoreTests.TestConnectionRequestPacket);
+        RunTest("test_connection_request_packet_start_floor", CoreTests.TestConnectionRequestPacketStartFloor);
         RunTest("test_connection_denied_packet", () => CoreTests.TestEmptyPacket(PacketType.ConnectionDenied));
         RunTest("test_connection_challenge_packet", () => CoreTests.TestChallengeResponsePacket(PacketType.ConnectionChallenge));
         RunTest("test_connection_response_packet", () => CoreTests.TestChallengeResponsePacket(PacketType.ConnectionResponse));
@@ -1077,6 +1078,56 @@ internal static class CoreTests
         Check.That(outputToken.ClientId == TestConstants.TestClientId);
     }
 
+    public static void TestConnectionRequestPacketStartFloor()
+    {
+        Address serverAddress = TestServerAddress();
+
+        byte[] userData = new byte[Protocol.UserDataBytes];
+        new TestRng(0x99).Fill(userData);
+
+        var inputToken = new ConnectTokenPrivate();
+        Span<Address> addresses = stackalloc Address[1] { serverAddress };
+        inputToken.Generate(TestConstants.TestClientId, TestConstants.TestTimeoutSeconds, addresses, userData);
+
+        byte[] connectTokenData = new byte[Defines.ConnectTokenPrivateBytes];
+        inputToken.Write(connectTokenData);
+
+        byte[] key = new byte[Protocol.KeyBytes];
+        Rng.GenerateKey(key);
+
+        ulong currentTimestamp = 1000;
+        ulong minConnectTokenExpireTimestamp = currentTimestamp + 30;
+
+        static ReadPacketResult ReadRequest(byte[] connectTokenData, byte[] key, ulong expireTimestamp, ulong currentTimestamp, ulong minConnectTokenExpireTimestamp)
+        {
+            byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
+            Rng.GenerateNonce(nonce);
+            byte[] encryptedConnectTokenData = (byte[])connectTokenData.Clone();
+            Check.That(ConnectTokenPrivate.Encrypt(encryptedConnectTokenData, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, key));
+
+            byte[] buffer = new byte[2048];
+            int bytesWritten = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, encryptedConnectTokenData);
+            Check.That(bytesWritten == PacketIO.ConnectionRequestPacketBytes);
+
+            return PacketIO.ReadPacket(
+                buffer.AsSpan(0, bytesWritten),
+                hasReadPacketKey: true, new byte[Protocol.KeyBytes],
+                TestConstants.TestProtocolId,
+                currentTimestamp,
+                hasPrivateKey: true, key,
+                AllAllowed, null,
+                minConnectTokenExpireTimestamp);
+        }
+
+        // a token expiring in the same second the server started is refused
+        Check.That(ReadRequest(connectTokenData, key, minConnectTokenExpireTimestamp, currentTimestamp, minConnectTokenExpireTimestamp).Type == -1);
+
+        // one second past the start floor is accepted
+        ReadPacketResult accepted = ReadRequest(connectTokenData, key, minConnectTokenExpireTimestamp + 1, currentTimestamp, minConnectTokenExpireTimestamp);
+        Check.That(accepted.Type == PacketType.ConnectionRequest);
+        Check.That(accepted.ConnectTokenExpireTimestamp == minConnectTokenExpireTimestamp + 1);
+    }
+
     public static void TestEmptyPacket(int packetType)
     {
         // denied and disconnect packets: no data, encrypted
@@ -1919,7 +1970,7 @@ internal static class ConfigSnapshotTests
         Check.That(ConnectTokenGenerator.Generate(
             new[] { serverAddress },
             new[] { serverAddress },
-            TestConstants.TestConnectTokenExpiry,
+            TestConstants.TestConnectTokenExpiry + 1,
             TestConstants.TestTimeoutSeconds,
             clientId,
             TestConstants.TestProtocolId,

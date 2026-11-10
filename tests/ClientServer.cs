@@ -15,12 +15,12 @@ namespace Netcode.Tests;
 
 internal static class ClientServerTests
 {
-    internal static byte[] GenerateConnectToken(string serverAddress, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry, int timeout = TestConstants.TestTimeoutSeconds)
+    internal static byte[] GenerateConnectToken(string serverAddress, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry + 1, int timeout = TestConstants.TestTimeoutSeconds)
     {
         return GenerateConnectToken(new[] { serverAddress }, clientId, expiry, timeout);
     }
 
-    private static byte[] GenerateConnectToken(string[] serverAddresses, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry, int timeout = TestConstants.TestTimeoutSeconds)
+    private static byte[] GenerateConnectToken(string[] serverAddresses, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry + 1, int timeout = TestConstants.TestTimeoutSeconds)
     {
         byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
         byte[] userData = new byte[Protocol.UserDataBytes];
@@ -235,7 +235,7 @@ internal static class ClientServerTests
         Check.That(server.NumConnectedClients == 0);
 
         simulator.Reset();
-        client.Connect(GenerateConnectToken("[::1]:40000", 0x5678, expiry: 30));
+        client.Connect(GenerateConnectToken("[::1]:40000", 0x5678, expiry: 31));
         ConnectLoop(simulator, client, server, ref time, deltaTime);
         Check.That(client.State == ClientState.Connected);
         Check.That(server.NumConnectedClients == 1);
