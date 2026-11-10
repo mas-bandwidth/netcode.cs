@@ -451,6 +451,8 @@ internal static class ClientServerTests
     {
         Console.WriteLine("test_keep_alive_client_index_out_of_range");
 
+        TestConnectedKeepAliveClientIndexOutOfRange();
+
         const string serverAddress = "127.0.0.1:40000";
         using var client = OpenRespondingClient(serverAddress, out Address from, out byte[] serverToClientKey);
 
@@ -479,6 +481,34 @@ internal static class ClientServerTests
         Check.That(client.State == ClientState.Connected);
         Check.That(client.ClientIndex == 3);
         Check.That(client.MaxClients == 32);
+    }
+
+    private static void TestConnectedKeepAliveClientIndexOutOfRange()
+    {
+        const string serverAddress = "127.0.0.1:40000";
+        using var client = OpenRespondingClient(serverAddress, out Address from, out byte[] serverToClientKey);
+
+        DeliverKeepAlive(client, in from, serverToClientKey, 2, 3, 32);
+        Check.That(client.State == ClientState.Connected);
+        Check.That(client.ClientIndex == 3);
+        Check.That(client.MaxClients == 32);
+
+        client.Update(TestConstants.TestTimeoutSeconds - 1.0);
+
+        // a keep-alive that names a slot outside the server's client range must not
+        // hold an established connection open, nor change the stored index
+
+        DeliverKeepAlive(client, in from, serverToClientKey, 3, uint.MaxValue, 32);
+        DeliverKeepAlive(client, in from, serverToClientKey, 4, 5000, 32);
+        DeliverKeepAlive(client, in from, serverToClientKey, 5, 1, 0);
+        DeliverKeepAlive(client, in from, serverToClientKey, 6, 0, (uint)Protocol.MaxClients + 1);
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(client.ClientIndex == 3);
+        Check.That(client.MaxClients == 32);
+
+        client.Update(TestConstants.TestTimeoutSeconds + 1.0);
+        Check.That(client.State == ClientState.ConnectionTimedOut);
     }
 
     private static Client OpenRespondingClient(string serverAddress, out Address from, out byte[] serverToClientKey)
