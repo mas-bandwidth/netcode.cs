@@ -160,6 +160,7 @@ internal static class Program
         RunTest("test_connection_disconnect_packet", () => CoreTests.TestEmptyPacket(PacketType.ConnectionDisconnect));
         RunTest("test_connect_token_public", CoreTests.TestConnectTokenPublic);
         RunTest("test_key_cleanup", CoreTests.TestKeyCleanup);
+        RunTest("test_reclaimed_connect_token_is_not_consumed", CoreTests.TestReclaimedConnectTokenIsNotConsumed);
         RunTest("test_encryption_manager", CoreTests.TestEncryptionManager);
         RunTest("test_replay_protection", CoreTests.TestReplayProtection);
         RunTest("test_network_simulator_determinism", CoreTests.TestNetworkSimulatorDeterminism);
@@ -1243,6 +1244,74 @@ internal static class CoreTests
         Check.That(manager.FindEncryptionMapping(in serverAddress, 1002) == -1);
         Check.That(manager.SendKey.AsSpan(0, Protocol.KeyBytes).IndexOfAnyExcept((byte)0) == -1);
         Check.That(manager.ReceiveKey.AsSpan(0, Protocol.KeyBytes).IndexOfAnyExcept((byte)0) == -1);
+    }
+
+    private static byte[] ReclaimRequest(ConnectTokenPrivate token, in Address serverAddress, ulong expireTimestamp)
+    {
+        byte[] privateData = new byte[Defines.ConnectTokenPrivateBytes];
+        token.Write(privateData);
+        byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
+        Check.That(ConnectTokenPrivate.Encrypt(privateData, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, TestConstants.PrivateKey));
+        byte[] packet = new byte[PacketIO.ConnectionRequestPacketBytes];
+        Check.That(PacketIO.WriteConnectionRequestPacket(packet, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, privateData) == packet.Length);
+        return packet;
+    }
+
+    public static void TestReclaimedConnectTokenIsNotConsumed()
+    {
+        // T1's connect token expires on the timestamp passed in while its encryption mapping is
+        // still live on server time, and T2 reclaims that history slot. Completing T1 must not
+        // mark T2 consumed, so T2's retried connection request still gets a challenge.
+
+        const System.Reflection.BindingFlags Fields = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var sent = new System.Collections.Generic.List<(Address To, byte[] Packet)>();
+        var config = new ServerConfig
+        {
+            ProtocolId = TestConstants.TestProtocolId,
+            PrivateKey = (byte[])TestConstants.PrivateKey.Clone(),
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> packet) => sent.Add((to, packet.ToArray())),
+            ReceivePacketOverride = (ref Address from, Span<byte> packet) => 0,
+        };
+        using var server = new Server("127.0.0.1:40000", config, 1000);
+        typeof(Server).GetField("_running", Fields)!.SetValue(server, true);
+        typeof(Server).GetField("_maxClients", Fields)!.SetValue(server, 2);
+        var process = typeof(Server).GetMethod("ReadAndProcessPacket", Fields)!.CreateDelegate<ProcessAtTime>(server);
+        Address.TryParse("127.0.0.1:40000", out Address serverAddress);
+        Address.TryParse("127.0.0.1:21001", out Address fromT1);
+        Address.TryParse("127.0.0.1:21002", out Address fromT2);
+
+        const ulong now = 1000;
+        const ulong t1Expire = 1030;
+
+        var t1 = new ConnectTokenPrivate();
+        t1.Generate(1, 15, new[] { serverAddress }, new byte[Protocol.UserDataBytes]);
+        process(in fromT1, ReclaimRequest(t1, in serverAddress, t1Expire), now);
+        Check.That(sent.Count == 1 && sent[0].To.Equals(fromT1));
+        Check.That((sent[0].Packet[0] & 0xF) == PacketType.ConnectionChallenge);
+        byte[] t1Challenge = sent[0].Packet;
+
+        var t2 = new ConnectTokenPrivate();
+        t2.Generate(2, 15, new[] { serverAddress }, new byte[Protocol.UserDataBytes]);
+        byte[] t2Request = ReclaimRequest(t2, in serverAddress, t1Expire + 30);
+        process(in fromT2, (byte[])t2Request.Clone(), t1Expire);
+        Check.That(sent.Count == 2 && sent[1].To.Equals(fromT2));
+        Check.That((sent[1].Packet[0] & 0xF) == PacketType.ConnectionChallenge);
+
+        var challengeAllowed = new bool[PacketType.NumPackets];
+        challengeAllowed[PacketType.ConnectionChallenge] = true;
+        ReadPacketResult challenge = PacketIO.ReadPacket(t1Challenge, true, t1.ServerToClientKey, TestConstants.TestProtocolId, t1Expire, false, default, challengeAllowed, null);
+        Check.That(challenge.Type == PacketType.ConnectionChallenge);
+        byte[] response = new byte[Defines.MaxPacketBytes];
+        int responseBytes = PacketIO.WriteEncryptedPacket(response, PacketType.ConnectionResponse, t1Challenge.AsSpan(challenge.DataOffset, challenge.DataLength), 0, t1.ClientToServerKey, TestConstants.TestProtocolId);
+        process(in fromT1, response.AsSpan(0, responseBytes), t1Expire);
+        Check.That(server.ClientConnected(0));
+        Check.That(server.NumConnectedClients == 1);
+
+        int before = sent.Count;
+        process(in fromT2, (byte[])t2Request.Clone(), t1Expire);
+        Check.That(sent.Count == before + 1 && sent[before].To.Equals(fromT2));
+        Check.That((sent[before].Packet[0] & 0xF) == PacketType.ConnectionChallenge);
     }
 
     public static void TestEncryptionManager()
