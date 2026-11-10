@@ -664,7 +664,19 @@ internal static class CoreTests
     public static void TestChallengeTokenServerSerialization()
     {
         // the server and the tests must share one challenge token serialization
-        // path, so this pins that the server calls ChallengeToken.Write/Read.
+        // path: round-trip the token, then pin that the server calls the helpers.
+
+        var inputToken = new ChallengeToken();
+        inputToken.ClientId = TestConstants.TestClientId;
+        new TestRng(0x78).Fill(inputToken.UserData);
+
+        byte[] buffer = new byte[Defines.ChallengeTokenBytes];
+        inputToken.Write(buffer);
+
+        var outputToken = new ChallengeToken();
+        Check.That(outputToken.Read(buffer));
+        Check.That(outputToken.ClientId == inputToken.ClientId);
+        Check.That(outputToken.UserData.AsSpan().SequenceEqual(inputToken.UserData));
 
         MethodInfo write = typeof(ChallengeToken).GetMethod("Write", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
         MethodInfo read = typeof(ChallengeToken).GetMethod("Read", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
