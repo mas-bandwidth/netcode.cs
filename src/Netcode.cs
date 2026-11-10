@@ -2021,31 +2021,42 @@ namespace Netcode
             // and the next call throws ArgumentOutOfRangeException ("SocketAddress is
             // too small"). .NET 9 moved that assignment after the error check. Re-arm
             // the size each call; it is a field store, nothing allocates.
-            _receiveAddress.Size = SocketAddress.GetMaximumAddressSize(_socket.AddressFamily);
-
-            int result;
-            try
+            //
+            // A zero-length datagram and SocketError.MessageSize are queued datagrams.
+            // Returning 0 for either stops the caller, so a payload behind N of them
+            // waits N updates. Skip both. Return 0 only for an empty queue
+            // (WouldBlock) or a genuine socket error.
+            while (true)
             {
-                if (!_socket.Poll(0, SelectMode.SelectRead))
-                    return 0;
+                _receiveAddress.Size = SocketAddress.GetMaximumAddressSize(_socket.AddressFamily);
 
-                result = _socket.ReceiveFrom(packetData, SocketFlags.None, _receiveAddress);
-            }
-            catch (SocketException e)
-            {
-                if (e.SocketErrorCode != SocketError.WouldBlock &&
-                    e.SocketErrorCode != SocketError.ConnectionReset)
+                int result;
+                try
                 {
-                    NetcodeLog.Error($"error: recvfrom failed with error {e.SocketErrorCode}\n");
+                    if (!_socket.Poll(0, SelectMode.SelectRead))
+                        return 0;
+
+                    result = _socket.ReceiveFrom(packetData, SocketFlags.None, _receiveAddress);
                 }
-                return 0;
+                catch (SocketException e)
+                {
+                    if (e.SocketErrorCode == SocketError.MessageSize)
+                        continue;
+
+                    if (e.SocketErrorCode != SocketError.WouldBlock &&
+                        e.SocketErrorCode != SocketError.ConnectionReset)
+                    {
+                        NetcodeLog.Error($"error: recvfrom failed with error {e.SocketErrorCode}\n");
+                    }
+                    return 0;
+                }
+
+                if (result == 0)
+                    continue;
+
+                SocketAddressToAddress(_receiveAddress, ref from);
+                return result;
             }
-
-            if (result <= 0)
-                return 0;
-
-            SocketAddressToAddress(_receiveAddress, ref from);
-            return result;
         }
 
         public void Dispose()
