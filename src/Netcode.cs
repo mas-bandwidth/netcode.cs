@@ -154,6 +154,13 @@ namespace Netcode
         public void Bytes(Span<byte> destination) { _buffer.Slice(_position, destination.Length).CopyTo(destination); _position += destination.Length; }
     }
 
+    // wall-clock unix seconds, for connect token timestamps. internal so the unit
+    // tests can inject time instead of reading the real clock.
+    internal static class UnixTime
+    {
+        internal static Func<ulong> Now = () => (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    }
+
     internal static class Rng
     {
         public static void Fill(Span<byte> data) => RandomNumberGenerator.Fill(data);
@@ -824,7 +831,7 @@ namespace Netcode
             Span<byte> nonce = stackalloc byte[Defines.ConnectTokenNonceBytes];
             Rng.GenerateNonce(nonce);
 
-            ulong createTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong createTimestamp = UnixTime.Now();
             ulong expireTimestamp = expireSeconds >= 0 ? createTimestamp + (ulong)expireSeconds : 0xFFFFFFFFFFFFFFFFUL;
 
             return GenerateInternal(parsedPublic.Slice(0, numServerAddresses), parsedInternal.Slice(0, numServerAddresses),
@@ -1769,9 +1776,12 @@ namespace Netcode
             else if (size != requestedSize)
                 NetcodeLog.Info($"socket {name} buffer size reduced from {requestedSize} to {size}\n");
         }
+        // for tests: how many OS sockets have been asked for, so the unit tier can prove it opened none
+        internal static int NumCreated;
 
         public static CreateError Create(in Address address, int sendBufferSize, int receiveBufferSize, bool enablePacketTagging, out NetcodeSocket? result)
         {
+            System.Threading.Interlocked.Increment(ref NumCreated);
             result = null;
 
             AddressFamily family = address.Type == AddressType.IPv6 ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork;

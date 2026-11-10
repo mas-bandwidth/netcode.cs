@@ -378,7 +378,7 @@ namespace Netcode
             _challengeSequence = 0;
             Rng.GenerateKey(_challengeKey);
 
-            _minConnectTokenExpireTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (ulong)_maxConnectTokenLifetime;
+            _minConnectTokenExpireTimestamp = UnixTime.Now() + (ulong)_maxConnectTokenLifetime;
 
             // global packets (challenge, denied) encrypt with the same per-token server to
             // client keys as per-client packets, whose sequences start at zero, so the global
@@ -934,7 +934,7 @@ namespace Netcode
         /// </summary>
         public void ProcessPacket(in Address from, Span<byte> packetData)
         {
-            ulong currentTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong currentTimestamp = UnixTime.Now();
             ReadAndProcessPacket(in from, packetData, currentTimestamp);
         }
 
@@ -947,7 +947,7 @@ namespace Netcode
 
         private void ReceivePackets()
         {
-            ulong currentTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong currentTimestamp = UnixTime.Now();
 
             if (_config.Simulator == null)
             {
