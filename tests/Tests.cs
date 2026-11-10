@@ -193,6 +193,7 @@ internal static class Program
         RunTest("test_disable_timeout", ClientServerTests.TestDisableTimeout);
         RunTest("test_pending_encryption_mapping_expiry", ClientServerTests.TestPendingEncryptionMappingExpiry);
         RunTest("test_loopback", ClientServerTests.TestLoopback);
+        RunTest("test_loopback_disconnect_reentry", ClientServerTests.TestLoopbackDisconnectReentry);
         RunTest("test_receive_packet_short_buffer", ReceiveBufferTests.TestReceivePacketShortBuffer);
         RunTest("test_client_create_missing_override_callback", ClientServerTests.TestClientCreateMissingOverrideCallback);
         RunTest("test_server_create_missing_override_callback", ClientServerTests.TestServerCreateMissingOverrideCallback);

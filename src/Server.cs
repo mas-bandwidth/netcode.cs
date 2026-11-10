@@ -1271,9 +1271,12 @@ namespace Netcode
 
             _clientDisconnectReason[clientIndex] = DisconnectReason.ServerDisconnect;
 
-            _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
-
+            // match the remote disconnect path: mark the slot disconnected and count it out so a
+            // re-entrant disconnect or stop is a no-op, keeping the rest of the slot readable in the callback
+            _clientConnected[clientIndex] = false;
             _numConnectedClients--;
+
+            _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
 
             ResetClientSlot(clientIndex);
         }

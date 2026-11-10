@@ -1374,6 +1374,66 @@ internal static class ClientServerTests
         Check.That(loopbackClient.State == ClientState.Disconnected);
     }
 
+    public static void TestLoopbackDisconnectReentry()
+    {
+        // a disconnect callback that disconnects its own loopback slot again, or stops the
+        // server, sees the departing client once, already disconnected and still readable
+
+        int callbackCount = 0;
+        bool stopInCallback = false;
+        Server? serverRef = null;
+
+        var config = new ServerConfig { ProtocolId = TestConstants.TestProtocolId, OverrideSendAndReceive = true };
+        TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
+        config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { };
+        config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+        config.SendLoopbackPacket = (clientIndex, payload, sequence) => { };
+        config.OnClientConnectDisconnect = (clientIndex, connected) =>
+        {
+            if (connected)
+                return;
+
+            callbackCount++;
+
+            // bounded so a regression fails the checks below instead of overflowing the stack
+            if (callbackCount > 4)
+                return;
+
+            if (stopInCallback)
+            {
+                serverRef!.Stop();
+                return;
+            }
+
+            Check.That(!serverRef!.ClientConnected(clientIndex));
+            Check.That(serverRef.ClientId(clientIndex) == 0x5151);
+            serverRef.DisconnectLoopbackClient(clientIndex);
+        };
+
+        using var server = new Server("127.0.0.1:40000", config, 1000.0);
+        serverRef = server;
+
+        server.Start(2);
+        server.ConnectLoopbackClient(1, 0x5151, ReadOnlySpan<byte>.Empty);
+        Check.That(server.NumConnectedClients == 1);
+
+        server.DisconnectLoopbackClient(1);
+        Check.That(callbackCount == 1);
+        Check.That(!server.ClientConnected(1));
+        Check.That(server.ClientId(1) == 0);
+        Check.That(server.NumConnectedClients == 0);
+
+        server.ConnectLoopbackClient(1, 0x5151, ReadOnlySpan<byte>.Empty);
+        Check.That(server.NumConnectedClients == 1);
+
+        callbackCount = 0;
+        stopInCallback = true;
+        server.DisconnectLoopbackClient(1);
+        Check.That(callbackCount == 1);
+        Check.That(!server.Running);
+        Check.That(server.NumConnectedClients == 0);
+    }
+
     private static void TestLoopbackStateChanges()
     {
         int changes = 0;
