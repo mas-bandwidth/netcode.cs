@@ -71,6 +71,7 @@ namespace Netcode
         public const int SocketRcvbufSize = 4 * 1024 * 1024;
         public const double PacketSendRate = 10.0;
         public const int NumDisconnectPackets = 10;
+        public const int PreconnectMappingSeconds = 10;
 
         // "NETCODE 1.02" ASCII with null terminator — 13 bytes
         public static ReadOnlySpan<byte> VersionInfo => "NETCODE 1.02\0"u8;
@@ -435,7 +436,7 @@ namespace Netcode
                 {
                     ushort g = GetIPv6(i);
                     bytes[i * 2] = (byte)(g >> 8);
-                    bytes[i * 2 + 1] = (byte)g;
+                    bytes[i * 2 + 1] = unchecked((byte)g);
                 }
                 var ip = new IPAddress(bytes);
                 return Port == 0 ? ip.ToString() : $"[{ip}]:{Port}";
@@ -522,8 +523,8 @@ namespace Netcode
         {
             var writer = new ByteWriter(buffer);
             writer.U64(ClientId);
-            writer.U32((uint)TimeoutSeconds);
-            writer.U32((uint)NumServerAddresses);
+            writer.U32(unchecked((uint)TimeoutSeconds));
+            writer.U32(unchecked((uint)NumServerAddresses));
             for (int i = 0; i < NumServerAddresses; i++)
                 WriteAddress(ref writer, in ServerAddresses[i]);
             writer.Bytes(ClientToServerKey);
@@ -539,8 +540,8 @@ namespace Netcode
 
             var reader = new ByteReader(buffer);
             ClientId = reader.U64();
-            TimeoutSeconds = (int)reader.U32();
-            NumServerAddresses = (int)reader.U32();
+            TimeoutSeconds = unchecked((int)reader.U32());
+            NumServerAddresses = unchecked((int)reader.U32());
 
             if (NumServerAddresses <= 0 || NumServerAddresses > Protocol.MaxServersPerConnect)
                 return false;
@@ -704,8 +705,8 @@ namespace Netcode
             writer.U64(ExpireTimestamp);
             writer.Bytes(Nonce);
             writer.Bytes(PrivateData);
-            writer.U32((uint)TimeoutSeconds);
-            writer.U32((uint)NumServerAddresses);
+            writer.U32(unchecked((uint)TimeoutSeconds));
+            writer.U32(unchecked((uint)NumServerAddresses));
             for (int i = 0; i < NumServerAddresses; i++)
                 ConnectTokenPrivate.WriteAddress(ref writer, in ServerAddresses[i]);
             writer.Bytes(ClientToServerKey);
@@ -739,8 +740,8 @@ namespace Netcode
             reader.Bytes(Nonce);
             reader.Bytes(PrivateData);
 
-            TimeoutSeconds = (int)reader.U32();
-            NumServerAddresses = (int)reader.U32();
+            TimeoutSeconds = unchecked((int)reader.U32());
+            NumServerAddresses = unchecked((int)reader.U32());
 
             if (NumServerAddresses <= 0 || NumServerAddresses > Protocol.MaxServersPerConnect)
             {
@@ -773,10 +774,19 @@ namespace Netcode
         /// Generate a connect token into <paramref name="output"/> (2048 bytes).
         /// <paramref name="publicServerAddresses"/> go into the public portion the
         /// client connects to; <paramref name="internalServerAddresses"/> go into the
-        /// encrypted private portion the server validates against. expireSeconds
-        /// and timeoutSeconds negative values disable expiry/timeout (dev only).
-        /// Returns false on invalid input.
+        /// encrypted private portion the server validates against. A negative
+        /// expireSeconds disables expiry and a negative timeoutSeconds disables
+        /// timeout; both are for development and testing only. Returns false on
+        /// invalid input.
         /// </summary>
+        /// <remarks>
+        /// A negative <paramref name="expireSeconds"/> sets the token's expire timestamp
+        /// to <c>ulong.MaxValue</c>. Such a token always passes the server's minimum
+        /// connect token expire timestamp, so it remains valid across server restarts for
+        /// as long as the server uses the same private key and protocol id. Its entry in
+        /// the server's connect token history never satisfies the expiry check that
+        /// reclaims entries, so that entry is never reusable during the server run.
+        /// </remarks>
         public static bool Generate(
             string[] publicServerAddresses,
             string[] internalServerAddresses,
@@ -1734,6 +1744,11 @@ namespace Netcode
                 return 0;
             return Timeout[index];
         }
+
+        public static double PreconnectExpireTime(double time, int timeoutSeconds)
+        {
+            return time + (timeoutSeconds > 0 ? timeoutSeconds : Defines.PreconnectMappingSeconds);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1967,7 +1982,7 @@ namespace Netcode
                 {
                     ushort g = address.GetIPv6(i);
                     bytes[i * 2] = (byte)(g >> 8);
-                    bytes[i * 2 + 1] = (byte)g;
+                    bytes[i * 2 + 1] = unchecked((byte)g);
                 }
                 return new IPEndPoint(new IPAddress(bytes), address.Port);
             }
@@ -2001,7 +2016,7 @@ namespace Netcode
                 {
                     ushort g = address.GetIPv6(i);
                     buffer[8 + i * 2] = (byte)(g >> 8);
-                    buffer[8 + i * 2 + 1] = (byte)g;
+                    buffer[8 + i * 2 + 1] = unchecked((byte)g);
                 }
                 buffer.Slice(24, 4).Clear(); // scope id
             }

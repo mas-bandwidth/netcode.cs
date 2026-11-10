@@ -15,6 +15,8 @@ namespace Netcode.Tests;
 
 internal static class ClientServerTests
 {
+    private delegate void ProcessAtTime(in Address from, Span<byte> packet, ulong timestamp);
+
     internal static byte[] GenerateConnectToken(string serverAddress, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry + 1, int timeout = TestConstants.TestTimeoutSeconds)
     {
         return GenerateConnectToken(new[] { serverAddress }, clientId, expiry, timeout);
@@ -168,8 +170,8 @@ internal static class ClientServerTests
         for (int i = 1; i < ConnectTokenHistory.MaxEntries; i++)
         {
             mac = new byte[Protocol.MacBytes];
-            mac[0] = (byte)(i + 1);
-            mac[1] = (byte)((i + 1) >> 8);
+            mac[0] = unchecked((byte)(i + 1));
+            mac[1] = unchecked((byte)((i + 1) >> 8));
             Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 400.0) >= 0);
         }
 
@@ -294,7 +296,7 @@ internal static class ClientServerTests
 
         byte[] packetData = new byte[Protocol.MaxPacketSize];
         for (int i = 0; i < packetData.Length; i++)
-            packetData[i] = (byte)i;
+            packetData[i] = unchecked((byte)i);
 
         byte[] received = new byte[Protocol.MaxPacketSize];
 
@@ -342,8 +344,116 @@ internal static class ClientServerTests
         Check.That(clientNumPacketsReceived >= 10 && serverNumPacketsReceived >= 10);
     }
 
+    public static void TestKeepAliveClientIndexOutOfRange()
+    {
+        Console.WriteLine("test_keep_alive_client_index_out_of_range");
+
+        TestConnectedKeepAliveClientIndexOutOfRange();
+
+        const string serverAddress = "127.0.0.1:40000";
+        using var client = OpenRespondingClient(serverAddress, out Address from, out byte[] serverToClientKey);
+
+        // Each of these is stored on the unfixed path: uint.MaxValue casts to -1,
+        // 5000 is past any server, 0 is not a slot count, and MaxClients is the ceiling.
+        (uint clientIndex, uint maxClients)[] rejected =
+        {
+            (uint.MaxValue, 32),
+            (5000, 32),
+            (1, 0),
+            (0, (uint)Protocol.MaxClients + 1),
+        };
+
+        ulong sequence = 2;
+        foreach (var rejectedPacket in rejected)
+        {
+            DeliverKeepAlive(client, in from, serverToClientKey, sequence, rejectedPacket.clientIndex, rejectedPacket.maxClients);
+            sequence++;
+            Console.WriteLine($"rejected keep-alive wire clientIndex={rejectedPacket.clientIndex} maxClients={rejectedPacket.maxClients} stored clientIndex={client.ClientIndex} maxClients={client.MaxClients} state={client.State}");
+            Check.That(client.State == ClientState.SendingConnectionResponse);
+            Check.That(client.ClientIndex == 0);
+            Check.That(client.MaxClients == 0);
+        }
+
+        DeliverKeepAlive(client, in from, serverToClientKey, sequence, 3, 32);
+        Check.That(client.State == ClientState.Connected);
+        Check.That(client.ClientIndex == 3);
+        Check.That(client.MaxClients == 32);
+    }
+
+    private static void TestConnectedKeepAliveClientIndexOutOfRange()
+    {
+        const string serverAddress = "127.0.0.1:40000";
+        using var client = OpenRespondingClient(serverAddress, out Address from, out byte[] serverToClientKey);
+
+        DeliverKeepAlive(client, in from, serverToClientKey, 2, 3, 32);
+        Check.That(client.State == ClientState.Connected);
+        Check.That(client.ClientIndex == 3);
+        Check.That(client.MaxClients == 32);
+
+        client.Update(TestConstants.TestTimeoutSeconds - 1.0);
+
+        // a keep-alive that names a slot outside the server's client range must not
+        // hold an established connection open, nor change the stored index
+
+        DeliverKeepAlive(client, in from, serverToClientKey, 3, uint.MaxValue, 32);
+        DeliverKeepAlive(client, in from, serverToClientKey, 4, 5000, 32);
+        DeliverKeepAlive(client, in from, serverToClientKey, 5, 1, 0);
+        DeliverKeepAlive(client, in from, serverToClientKey, 6, 0, (uint)Protocol.MaxClients + 1);
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(client.ClientIndex == 3);
+        Check.That(client.MaxClients == 32);
+
+        client.Update(TestConstants.TestTimeoutSeconds + 1.0);
+        Check.That(client.State == ClientState.ConnectionTimedOut);
+    }
+
+    private static Client OpenRespondingClient(string serverAddress, out Address from, out byte[] serverToClientKey)
+    {
+        byte[] tokenBytes = GenerateConnectToken(serverAddress, 0x11);
+        var token = new ConnectTokenData();
+        Check.That(token.Read(tokenBytes));
+        serverToClientKey = token.ServerToClientKey;
+        Check.That(Address.TryParse(serverAddress, out from));
+
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+            ReceivePacketOverride = (ref Address receiveFrom, Span<byte> payload) => 0,
+        };
+        var client = new Client("127.0.0.1:0", config, 0.0);
+        client.Connect(tokenBytes);
+        Check.That(client.State == ClientState.SendingConnectionRequest);
+
+        byte[] challenge = new byte[8 + Defines.ChallengeTokenBytes];
+        Deliver(client, in from, serverToClientKey, PacketType.ConnectionChallenge, challenge, 1);
+        Check.That(client.State == ClientState.SendingConnectionResponse);
+        Check.That(client.ClientIndex == 0);
+        Check.That(client.MaxClients == 0);
+        return client;
+    }
+
+    private static void Deliver(Client client, in Address from, byte[] key, int packetType, ReadOnlySpan<byte> packetData, ulong sequence)
+    {
+        byte[] buffer = new byte[Defines.MaxPacketBytes];
+        int written = PacketIO.WriteEncryptedPacket(buffer, packetType, packetData, sequence, key, TestConstants.TestProtocolId);
+        Check.That(written > 0);
+        client.ProcessPacket(in from, buffer.AsSpan(0, written));
+    }
+
+    private static void DeliverKeepAlive(Client client, in Address from, byte[] key, ulong sequence, uint clientIndex, uint maxClients)
+    {
+        byte[] data = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(0, 4), clientIndex);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(4, 4), maxClients);
+        Deliver(client, in from, key, PacketType.ConnectionKeepAlive, data, sequence);
+    }
+
     public static void TestClientServerKeepAlive()
     {
+        TestKeepAliveClientIndexOutOfRange();
+
         NetworkSimulator simulator = CreateSimulator();
 
         double time = 1000.0;
@@ -451,7 +561,7 @@ internal static class ClientServerTests
 
             byte[] packetData = new byte[Protocol.MaxPacketSize];
             for (int j = 0; j < packetData.Length; j++)
-                packetData[j] = (byte)j;
+                packetData[j] = unchecked((byte)j);
 
             byte[] received = new byte[Protocol.MaxPacketSize];
 
@@ -988,6 +1098,92 @@ internal static class ClientServerTests
         Check.That(server.NumConnectedClients == 1);
     }
 
+    public static void TestPendingEncryptionMappingExpiry()
+    {
+        const System.Reflection.BindingFlags Fields = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+
+        var config = new ServerConfig { ProtocolId = TestConstants.TestProtocolId, OverrideSendAndReceive = true };
+        TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
+        config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { };
+        config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+        using var server = new Server("127.0.0.1:40000", config, 0.0);
+        server.Start(4);
+        typeof(Server).GetField("_minConnectTokenExpireTimestamp", Fields)!.SetValue(server, 0UL);
+        var process = typeof(Server).GetMethod("ReadAndProcessPacket", Fields)!.CreateDelegate<ProcessAtTime>(server);
+        var encryptionManager = (EncryptionManager)typeof(Server).GetField("_encryptionManager", Fields)!.GetValue(server)!;
+        Address serverAddress = Address.Parse("127.0.0.1:40000");
+        Address firstAddress = Address.Parse("127.0.0.1:50000");
+        Address secondAddress = Address.Parse("127.0.0.1:50001");
+        Address thirdAddress = Address.Parse("127.0.0.1:50002");
+        Address fourthAddress = Address.Parse("127.0.0.1:50003");
+        Address fifthAddress = Address.Parse("127.0.0.1:50004");
+        Address sixthAddress = Address.Parse("127.0.0.1:50005");
+
+        void Request(in Address from, ulong clientId, ulong expireTimestamp, double time, int timeout = -1)
+        {
+            byte[] tokenBytes = new byte[Protocol.ConnectTokenBytes];
+            byte[] userData = new byte[Protocol.UserDataBytes];
+            Span<Address> addresses = stackalloc Address[1] { serverAddress };
+            Span<byte> nonce = stackalloc byte[Defines.ConnectTokenNonceBytes];
+            new TestRng(clientId).Fill(nonce);
+            Check.That(ConnectTokenGenerator.GenerateInternal(addresses, addresses, 1000, expireTimestamp, timeout,
+                clientId, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, nonce, tokenBytes));
+            var token = new ConnectTokenData();
+            Check.That(token.Read(tokenBytes));
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteConnectionRequestPacket(wire, token.VersionInfo, token.ProtocolId,
+                token.ExpireTimestamp, token.Nonce, token.PrivateData);
+            server.Update(time);
+            process(in from, wire.AsSpan(0, bytes), 1001);
+        }
+
+        // the token has four seconds left, so an unfinished request's mapping must not outlive it
+        Request(in firstAddress, 0x1001, 1005, 0.0);
+        Check.That(encryptionManager.NumEncryptionMappings == 1);
+
+        server.Update(6.0);
+        Check.That(encryptionManager.EntryExpired(0, server.Time));
+
+        // the expired mapping's slot is available to another pending request
+        Request(in secondAddress, 0x1002, 1030, 6.0);
+        Check.That(encryptionManager.NumEncryptionMappings == 1);
+        Check.That(encryptionManager.Address[0].Equals(secondAddress));
+
+        // a positive timeout is also limited by a shorter token lifetime
+        Request(in thirdAddress, 0x1003, 1005, 6.0, timeout: 30);
+        Check.That(encryptionManager.NumEncryptionMappings == 2);
+        Check.That(encryptionManager.ExpireTime[1] <= server.Time + 4.0);
+
+        server.Update(11.0);
+        Check.That(encryptionManager.EntryExpired(1, server.Time));
+
+        // the expired mapping's slot is available to another pending request
+        Request(in fourthAddress, 0x1004, 1030, 11.0);
+        Check.That(encryptionManager.NumEncryptionMappings == 2);
+        Check.That(encryptionManager.Address[1].Equals(fourthAddress));
+
+        // a negative timeout is bounded by the pre-connect lifetime even when the
+        // token has much longer to live
+        server.Update(22.0);
+        Check.That(encryptionManager.EntryExpired(1, server.Time));
+
+        Request(in fifthAddress, 0x1005, 1030, 22.0);
+        Check.That(encryptionManager.NumEncryptionMappings == 2);
+
+        // the pending mapping is finite and its slot is reclaimed once it expires,
+        // even though the token has much longer to live
+        int fifthIndex = encryptionManager.FindEncryptionMapping(in fifthAddress, server.Time);
+        Check.That(fifthIndex != -1);
+        Check.That(encryptionManager.ExpireTime[fifthIndex] > server.Time);
+
+        server.Update(33.0);
+        Check.That(encryptionManager.EntryExpired(fifthIndex, server.Time));
+
+        Request(in sixthAddress, 0x1006, 1030, 33.0);
+        Check.That(encryptionManager.NumEncryptionMappings == 2);
+        Check.That(encryptionManager.FindEncryptionMapping(in sixthAddress, server.Time) != -1);
+    }
+
     public static void TestDisableTimeout()
     {
         NetworkSimulator simulator = CreateSimulator();
@@ -1013,7 +1209,7 @@ internal static class ClientServerTests
 
         byte[] packetData = new byte[Protocol.MaxPacketSize];
         for (int i = 0; i < packetData.Length; i++)
-            packetData[i] = (byte)i;
+            packetData[i] = unchecked((byte)i);
 
         byte[] received = new byte[Protocol.MaxPacketSize];
 
@@ -1062,7 +1258,7 @@ internal static class ClientServerTests
 
         byte[] packetData = new byte[Protocol.MaxPacketSize];
         for (int i = 0; i < packetData.Length; i++)
-            packetData[i] = (byte)i;
+            packetData[i] = unchecked((byte)i);
 
         Client? loopbackClientRef = null;
         Server? serverRef = null;
@@ -1648,7 +1844,7 @@ internal static class FunctionalTests
 
         byte[] packetData = new byte[32];
         for (int i = 0; i < packetData.Length; i++)
-            packetData[i] = (byte)(i ^ 0x5A);
+            packetData[i] = unchecked((byte)(i ^ 0x5A));
 
         const int emptyDatagrams = 8;
         using (var sender = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))

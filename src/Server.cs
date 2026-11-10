@@ -56,6 +56,10 @@ namespace Netcode
                     mac.SequenceEqual(_mac.AsSpan(i * Protocol.MacBytes, Protocol.MacBytes)))
                     matchingTokenIndex = i;
 
+                // a token minted without expiry (negative expireSeconds, for development
+                // and testing only, so its expire timestamp is ulong.MaxValue) never
+                // satisfies this reclaim check, so its history entry is never reusable
+                // during the server run
                 if (freeTokenIndex == -1 &&
                     (_state[i] == ConnectTokenEntryState.Free || _expireTimestamp[i] <= currentTimestamp))
                     freeTokenIndex = i;
@@ -396,6 +400,10 @@ namespace Netcode
             _challengeSequence = 0;
             Rng.GenerateKey(_challengeKey);
 
+            // a token minted without expiry (expireTimestamp == ulong.MaxValue, for
+            // development and testing only) always passes this floor, so a token created
+            // with a negative expireSeconds stays valid across restarts while the private
+            // key and protocol id are unchanged
             _minConnectTokenExpireTimestamp = UnixTime.Now() + (ulong)_maxConnectTokenLifetime;
 
             // global packets (challenge, denied) encrypt with the same per-token server to
@@ -731,7 +739,15 @@ namespace Netcode
                     return;
                 }
 
-                double expireTime = connectTokenPrivate.TimeoutSeconds >= 0 ? _time + connectTokenPrivate.TimeoutSeconds : -1.0;
+                ulong tokenLifetime = connectTokenExpireTimestamp == ulong.MaxValue
+                    ? (ulong)_maxConnectTokenLifetime
+                    : connectTokenExpireTimestamp - currentTimestamp;
+
+                double pendingExpireTime = EncryptionManager.PreconnectExpireTime(
+                    _time,
+                    connectTokenPrivate.TimeoutSeconds);
+
+                double expireTime = Math.Min(pendingExpireTime, _time + (double)tokenLifetime);
 
                 if (!_encryptionManager.AddEncryptionMapping(
                         in from,
@@ -751,11 +767,11 @@ namespace Netcode
                 BinaryPrimitives.WriteUInt64LittleEndian(challengePacketData.Slice(0, 8), _challengeSequence);
 
                 Span<byte> challengeTokenBuffer = challengePacketData.Slice(8, Defines.ChallengeTokenBytes);
-                challengeTokenBuffer.Clear();
                 {
-                    var writer = new ByteWriter(challengeTokenBuffer);
-                    writer.U64(connectTokenPrivate.ClientId);
-                    writer.Bytes(connectTokenPrivate.UserData);
+                    var challengeToken = new ChallengeToken();
+                    challengeToken.ClientId = connectTokenPrivate.ClientId;
+                    connectTokenPrivate.UserData.AsSpan().CopyTo(challengeToken.UserData);
+                    challengeToken.Write(challengeTokenBuffer);
                 }
                 ChallengeToken.Encrypt(challengeTokenBuffer, _challengeSequence, _challengeKey);
 
@@ -783,9 +799,15 @@ namespace Netcode
                 return;
             }
 
-            var challengeReader = new ByteReader(challengeTokenBuffer);
-            ulong challengeClientId = challengeReader.U64();
-            ReadOnlySpan<byte> challengeUserData = challengeTokenBuffer.Slice(8, Protocol.UserDataBytes);
+            var challengeToken = new ChallengeToken();
+            if (!challengeToken.Read(challengeTokenBuffer))
+            {
+                NetcodeLog.Debug("server ignored connection response. failed to read challenge token\n");
+                return;
+            }
+
+            ulong challengeClientId = challengeToken.ClientId;
+            ReadOnlySpan<byte> challengeUserData = challengeToken.UserData;
 
             ReadOnlySpan<byte> packetSendKey = _encryptionManager.GetSendKey(encryptionIndex);
 
