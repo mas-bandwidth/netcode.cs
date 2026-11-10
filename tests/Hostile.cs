@@ -597,16 +597,31 @@ internal static class Hostile
             PayloadFrame();
         }
 
-        long before = GC.GetAllocatedBytesForCurrentThread();
+        // for a few seconds after warm up, tiered compilation keeps replacing the code behind
+        // the runtime's socket P/Invokes, and the runtime allocates on the calling thread when
+        // it does (56 bytes each on Linux, 48 on Windows). that is the runtime, not netcode, so
+        // the measured window is one in which the process compiled no method. a window with
+        // compilation in it is measured again; netcode allocating in steady state fails every one.
 
-        for (int i = 0; i < 200; i++)
+        long allocated = 0;
+        bool quietWindow = false;
+
+        for (int attempt = 0; attempt < 200 && !quietWindow; attempt++)
         {
-            IdleFrame();
-            PayloadFrame();
+            long compiledBefore = System.Runtime.JitInfo.GetCompiledMethodCount(currentThread: false);
+            long before = GC.GetAllocatedBytesForCurrentThread();
+
+            for (int i = 0; i < 200; i++)
+            {
+                IdleFrame();
+                PayloadFrame();
+            }
+
+            allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            quietWindow = System.Runtime.JitInfo.GetCompiledMethodCount(currentThread: false) == compiledBefore;
         }
 
-        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
-
+        Check.That(quietWindow);
         Check.That(client.State == ClientState.Connected);
         Check.That(server.ClientConnected(0));
 

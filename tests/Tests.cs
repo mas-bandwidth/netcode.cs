@@ -188,11 +188,13 @@ internal static class Program
         RunTest("test_client_error_connection_denied", ClientServerTests.TestClientErrorConnectionDenied);
         RunTest("test_client_side_disconnect", ClientServerTests.TestClientSideDisconnect);
         RunTest("test_server_side_disconnect", ClientServerTests.TestServerSideDisconnect);
+        RunTest("test_server_side_disconnect_multiple_servers", ClientServerTests.TestServerSideDisconnectMultipleServers);
         RunTest("test_server_client_disconnect_reason", ClientServerTests.TestServerClientDisconnectReason);
         RunTest("test_client_reconnect", ClientServerTests.TestClientReconnect);
         RunTest("test_disable_timeout", ClientServerTests.TestDisableTimeout);
         RunTest("test_pending_encryption_mapping_expiry", ClientServerTests.TestPendingEncryptionMappingExpiry);
         RunTest("test_loopback", ClientServerTests.TestLoopback);
+        RunTest("test_loopback_disconnect_reentry", ClientServerTests.TestLoopbackDisconnectReentry);
         RunTest("test_receive_packet_short_buffer", ReceiveBufferTests.TestReceivePacketShortBuffer);
         RunTest("test_client_create_missing_override_callback", ClientServerTests.TestClientCreateMissingOverrideCallback);
         RunTest("test_server_create_missing_override_callback", ClientServerTests.TestServerCreateMissingOverrideCallback);
@@ -1366,6 +1368,8 @@ internal static class CoreTests
         using var server = new Server("127.0.0.1:40000", config, 1000);
         var ownedKey = (byte[])typeof(Server).GetField("_privateKey", Fields)!.GetValue(server)!;
         Check.That(ownedKey.AsSpan().SequenceEqual(key));
+        var snapshotKey = ((ServerConfig)typeof(Server).GetField("_config", Fields)!.GetValue(server)!).PrivateKey;
+        Check.That(!ReferenceEquals(snapshotKey, key));
         typeof(Server).GetField("_running", Fields)!.SetValue(server, true);
         var process = typeof(Server).GetMethod("ReadAndProcessPacket", Fields)!.CreateDelegate<ProcessAtTime>(server);
         Address.TryParse("127.0.0.1:40000", out Address serverAddress);
@@ -1386,6 +1390,7 @@ internal static class CoreTests
         }
         server.Dispose();
         Check.That(ownedKey.AsSpan().IndexOfAnyExcept((byte)0) == -1);
+        Check.That(snapshotKey.AsSpan().IndexOfAnyExcept((byte)0) == -1);
         Check.That(key.AsSpan().SequenceEqual(TestConstants.PrivateKey));
 
         var ownedManager = new EncryptionManager();

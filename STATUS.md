@@ -6,7 +6,7 @@ _Last updated: 2026-11-10, at commit ec95e86 on `main`._
 
 **Released: v1.1.0** (`src/Netcode.csproj`, release commit 2026-09-13). A
 byte-exact C# port of [mas-bandwidth/netcode](https://github.com/mas-bandwidth/netcode)
-(protocol "NETCODE 1.02"; interop is pinned to netcode 1.4.8), idiomatic over the
+(protocol "NETCODE 1.02"; interop is pinned to netcode 1.4.9), idiomatic over the
 same non-blocking update-loop model. Changes since the release are in the git log.
 
 ### What is built
@@ -41,11 +41,11 @@ same non-blocking update-loop model. Changes since the release are in the git lo
   4. live session: C# server ← C client, token minted by C
 - **CI** (`.github/workflows/ci.yml`), on pushes to `main` and `sprint/*` and on
   every pull request:
-  - `test` on ubuntu-latest and macos-latest: build both TFMs, the unit tests
-    on net10.0 and on the real .NET 8 runtime, `soak 2000`, and a build of the
+  - `test` on ubuntu-latest, macos-latest and windows-latest: build both TFMs, the unit tests
+    and the functional tier on net10.0 and on the real .NET 8 runtime, `soak 2000`, and a build of the
     compat harness;
   - `C wire compatibility`: the interop gate against netcode pinned at
-    `47a156b1…`;
+    `ced9b4b8…` (v1.4.9);
   - `STANDARD.md matches upstream`: the vendored spec is diffed against
     mas-bandwidth/netcode `main`.
 - **License**: AGPL-3.0 (`LICENSE`), with the "move to MBSL when ready" note in

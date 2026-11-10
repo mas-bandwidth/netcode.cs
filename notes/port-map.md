@@ -212,6 +212,6 @@ functions. Legs (all must pass, `scripts/interop.sh`):
    observable behavior (states, client index, payload bytes).
 4. **Session C# server ↔ C client**: token minted by C, reverse of 3.
 
-CI pins the C clone to a fixed netcode ref (`47a156b1…` in
-`.github/workflows/ci.yml`, netcode 1.4.8) and builds the C half with
+CI pins the C clone to a fixed netcode ref (`ced9b4b8…` in
+`.github/workflows/ci.yml`, netcode 1.4.9) and builds the C half with
 `-ffp-contract=off`.

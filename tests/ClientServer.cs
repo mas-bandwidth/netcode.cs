@@ -919,14 +919,23 @@ internal static class ClientServerTests
 
         int disconnectCallbackCount = 0;
         Server? serverRef = null;
+        Address departingAddress = default;
+        byte[] departingUserData = new byte[Protocol.UserDataBytes];
         var serverConfig = CreateServerConfig(simulator);
         serverConfig.OnClientConnectDisconnect = (clientIndex, connected) =>
         {
             if (!connected)
             {
                 disconnectCallbackCount++;
+
+                // the departing client stays readable through the callback, already disconnected
+                Check.That(!serverRef!.ClientConnected(clientIndex));
+                Check.That(serverRef.ClientId(clientIndex) == 0x8);
+                Check.That(serverRef.ClientAddress(clientIndex).Equals(departingAddress));
+                Check.That(serverRef.ClientUserData(clientIndex).SequenceEqual(departingUserData));
+
                 if (disconnectCallbackCount == 1)
-                    serverRef!.DisconnectClient(clientIndex);
+                    serverRef.DisconnectClient(clientIndex);
             }
         };
 
@@ -942,8 +951,14 @@ internal static class ClientServerTests
 
         Check.That(client.State == ClientState.Connected);
 
+        departingAddress = server.ClientAddress(0);
+        Check.That(departingAddress.Type == AddressType.IPv6);
+        server.ClientUserData(0).CopyTo(departingUserData);
+
         server.DisconnectClient(0);
         Check.That(disconnectCallbackCount == 1);
+        Check.That(server.ClientId(0) == 0);
+        Check.That(server.ClientAddress(0).Type == AddressType.None);
 
         for (int i = 0; i < 10; i++)
         {
@@ -959,6 +974,55 @@ internal static class ClientServerTests
 
         Check.That(client.State == ClientState.Disconnected);
         Check.That(server.NumConnectedClients == 0);
+    }
+
+    public static void TestServerSideDisconnectMultipleServers()
+    {
+        // a connected client that the server disconnects goes to disconnected; it does not
+        // move on to the next server address in its connect token
+
+        NetworkSimulator simulator = new NetworkSimulator();
+
+        double time = 1000.0;
+        double deltaTime = 1.0 / 10.0;
+
+        var transitions = new System.Collections.Generic.List<(ClientState Previous, ClientState Next)>();
+        var clientConfig = new ClientConfig
+        {
+            Simulator = simulator,
+            OnStateChange = (previous, next) => transitions.Add((previous, next)),
+        };
+
+        using var client = new Client("[::]:50000", clientConfig, time);
+        using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
+
+        server.Start(1);
+
+        client.Connect(GenerateConnectToken(new[] { "[::1]:40000", "[::1]:40001" }, 0x8008, timeout: 5));
+
+        ConnectLoop(simulator, client, server, ref time, deltaTime);
+
+        Check.That(client.State == ClientState.Connected);
+
+        transitions.Clear();
+
+        server.DisconnectClient(0);
+
+        for (int i = 0; i < 100; i++)
+        {
+            simulator.Update(time);
+            client.Update(time);
+            server.Update(time);
+
+            if (client.State <= ClientState.Disconnected)
+                break;
+
+            time += deltaTime;
+        }
+
+        Check.That(client.State == ClientState.Disconnected);
+        Check.That(transitions.Count == 1);
+        Check.That(transitions[0] == (ClientState.Connected, ClientState.Disconnected));
     }
 
     public static void TestServerClientDisconnectReason()
@@ -1137,50 +1201,52 @@ internal static class ClientServerTests
             process(in from, wire.AsSpan(0, bytes), 1001);
         }
 
-        // the token has four seconds left, so an unfinished request's mapping must not outlive it
+        // as the reference: a pending mapping expires after the token's timeout when it is zero
+        // or more, and after the token's remaining lifetime when the timeout is negative
+
+        // timeout -1 and four seconds left on the token: the mapping lives four seconds
         Request(in firstAddress, 0x1001, 1005, 0.0);
         Check.That(encryptionManager.NumEncryptionMappings == 1);
+        Check.That(encryptionManager.ExpireTime[0] == 4.0);
 
         server.Update(6.0);
         Check.That(encryptionManager.EntryExpired(0, server.Time));
 
         // the expired mapping's slot is available to another pending request
+        // (timeout -1, 29 seconds left on the token)
         Request(in secondAddress, 0x1002, 1030, 6.0);
         Check.That(encryptionManager.NumEncryptionMappings == 1);
         Check.That(encryptionManager.Address[0].Equals(secondAddress));
+        Check.That(encryptionManager.ExpireTime[0] == 6.0 + 29.0);
 
-        // a positive timeout is also limited by a shorter token lifetime
+        // a timeout of zero or more sets the lifetime, whatever is left on the token
         Request(in thirdAddress, 0x1003, 1005, 6.0, timeout: 30);
         Check.That(encryptionManager.NumEncryptionMappings == 2);
-        Check.That(encryptionManager.ExpireTime[1] <= server.Time + 4.0);
+        Check.That(encryptionManager.ExpireTime[1] == 6.0 + 30.0);
 
-        server.Update(11.0);
+        Request(in fourthAddress, 0x1004, 1030, 6.0, timeout: 0);
+        Check.That(encryptionManager.NumEncryptionMappings == 3);
+        Check.That(encryptionManager.ExpireTime[2] == 6.0);
+
+        // a timeout 0 mapping is gone on the next update; the others are not
+        server.Update(7.0);
+        Check.That(encryptionManager.EntryExpired(2, server.Time));
+        Check.That(encryptionManager.FindEncryptionMapping(in fourthAddress, server.Time) == -1);
+        Check.That(encryptionManager.FindEncryptionMapping(in secondAddress, server.Time) == 0);
+        Check.That(encryptionManager.FindEncryptionMapping(in thirdAddress, server.Time) == 1);
+
+        // each expires at its own time and its slot is reclaimed
+        server.Update(36.0);
+        Check.That(encryptionManager.EntryExpired(0, server.Time));
+        Check.That(!encryptionManager.EntryExpired(1, server.Time));
+
+        Request(in fifthAddress, 0x1005, 1030, 36.0);
+        Check.That(encryptionManager.FindEncryptionMapping(in fifthAddress, server.Time) != -1);
+
+        server.Update(37.0);
         Check.That(encryptionManager.EntryExpired(1, server.Time));
 
-        // the expired mapping's slot is available to another pending request
-        Request(in fourthAddress, 0x1004, 1030, 11.0);
-        Check.That(encryptionManager.NumEncryptionMappings == 2);
-        Check.That(encryptionManager.Address[1].Equals(fourthAddress));
-
-        // a negative timeout is bounded by the pre-connect lifetime even when the
-        // token has much longer to live
-        server.Update(22.0);
-        Check.That(encryptionManager.EntryExpired(1, server.Time));
-
-        Request(in fifthAddress, 0x1005, 1030, 22.0);
-        Check.That(encryptionManager.NumEncryptionMappings == 2);
-
-        // the pending mapping is finite and its slot is reclaimed once it expires,
-        // even though the token has much longer to live
-        int fifthIndex = encryptionManager.FindEncryptionMapping(in fifthAddress, server.Time);
-        Check.That(fifthIndex != -1);
-        Check.That(encryptionManager.ExpireTime[fifthIndex] > server.Time);
-
-        server.Update(33.0);
-        Check.That(encryptionManager.EntryExpired(fifthIndex, server.Time));
-
-        Request(in sixthAddress, 0x1006, 1030, 33.0);
-        Check.That(encryptionManager.NumEncryptionMappings == 2);
+        Request(in sixthAddress, 0x1006, 1030, 37.0);
         Check.That(encryptionManager.FindEncryptionMapping(in sixthAddress, server.Time) != -1);
     }
 
@@ -1357,6 +1423,66 @@ internal static class ClientServerTests
         Check.That(server.ClientConnected(1));
         Check.That(server.NumConnectedClients == 1);
         Check.That(loopbackClient.State == ClientState.Disconnected);
+    }
+
+    public static void TestLoopbackDisconnectReentry()
+    {
+        // a disconnect callback that disconnects its own loopback slot again, or stops the
+        // server, sees the departing client once, already disconnected and still readable
+
+        int callbackCount = 0;
+        bool stopInCallback = false;
+        Server? serverRef = null;
+
+        var config = new ServerConfig { ProtocolId = TestConstants.TestProtocolId, OverrideSendAndReceive = true };
+        TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
+        config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { };
+        config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+        config.SendLoopbackPacket = (clientIndex, payload, sequence) => { };
+        config.OnClientConnectDisconnect = (clientIndex, connected) =>
+        {
+            if (connected)
+                return;
+
+            callbackCount++;
+
+            // bounded so a regression fails the checks below instead of overflowing the stack
+            if (callbackCount > 4)
+                return;
+
+            if (stopInCallback)
+            {
+                serverRef!.Stop();
+                return;
+            }
+
+            Check.That(!serverRef!.ClientConnected(clientIndex));
+            Check.That(serverRef.ClientId(clientIndex) == 0x5151);
+            serverRef.DisconnectLoopbackClient(clientIndex);
+        };
+
+        using var server = new Server("127.0.0.1:40000", config, 1000.0);
+        serverRef = server;
+
+        server.Start(2);
+        server.ConnectLoopbackClient(1, 0x5151, ReadOnlySpan<byte>.Empty);
+        Check.That(server.NumConnectedClients == 1);
+
+        server.DisconnectLoopbackClient(1);
+        Check.That(callbackCount == 1);
+        Check.That(!server.ClientConnected(1));
+        Check.That(server.ClientId(1) == 0);
+        Check.That(server.NumConnectedClients == 0);
+
+        server.ConnectLoopbackClient(1, 0x5151, ReadOnlySpan<byte>.Empty);
+        Check.That(server.NumConnectedClients == 1);
+
+        callbackCount = 0;
+        stopInCallback = true;
+        server.DisconnectLoopbackClient(1);
+        Check.That(callbackCount == 1);
+        Check.That(!server.Running);
+        Check.That(server.NumConnectedClients == 0);
     }
 
     private static void TestLoopbackStateChanges()
