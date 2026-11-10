@@ -1111,7 +1111,7 @@ internal static class ClientServerTests
             process(in from, wire.AsSpan(0, bytes), 1001);
         }
 
-        // the token lives for five seconds, so an unfinished request's mapping must not outlive it
+        // the token has four seconds left, so an unfinished request's mapping must not outlive it
         Request(in firstAddress, 0x1001, 1005, 0.0);
         Check.That(encryptionManager.NumEncryptionMappings == 1);
 

@@ -709,11 +709,13 @@ namespace Netcode
                     return;
                 }
 
-                double expireTime = EncryptionManager.PreconnectExpireTime(
-                    _time,
-                    connectTokenPrivate.TimeoutSeconds,
-                    connectTokenExpireTimestamp,
-                    currentTimestamp);
+                ulong tokenLifetime = connectTokenExpireTimestamp == ulong.MaxValue
+                    ? (ulong)_maxConnectTokenLifetime
+                    : connectTokenExpireTimestamp - currentTimestamp;
+
+                double expireTime = connectTokenPrivate.TimeoutSeconds >= 0
+                    ? _time + connectTokenPrivate.TimeoutSeconds
+                    : _time + (double)tokenLifetime;
 
                 if (!_encryptionManager.AddEncryptionMapping(
                         in from,
