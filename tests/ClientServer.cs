@@ -1130,6 +1130,7 @@ internal static class ClientServerTests
         // a positive timeout is also limited by a shorter token lifetime
         Request(in thirdAddress, 0x1003, 1005, 6.0, timeout: 30);
         Check.That(encryptionManager.NumEncryptionMappings == 2);
+        Check.That(encryptionManager.ExpireTime[1] <= server.Time + 4.0);
 
         server.Update(11.0);
         Check.That(encryptionManager.EntryExpired(1, server.Time));
