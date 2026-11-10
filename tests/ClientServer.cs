@@ -7,6 +7,8 @@
 */
 
 using System;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 
 namespace Netcode.Tests;
@@ -1538,8 +1540,67 @@ internal static class FunctionalTests
         ClientServerSocketConnectTo(clientAddress, clientAddress2, serverAddress, serverAddress2, serverAddress);
     }
 
+    // N empty UDP datagrams sit ahead of one payload in the real socket queue.
+    // One server Update must deliver that payload. Time is injected; this does
+    // not sleep and does not wait on the clock.
+    public static void TestReceiveSkipsEmptyDatagrams()
+    {
+        double time = 1000.0;
+        // Equality with the send interval still suppresses a send, so step past it.
+        double step = (1.0 / Defines.PacketSendRate) + 1e-3;
+
+        // The server's public address, port included, must be the address in the
+        // connect token. Port 0 would stay 0 in that address after the bind.
+        ushort port;
+        using (var probe = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+        {
+            probe.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            port = (ushort)((IPEndPoint)probe.LocalEndPoint!).Port;
+        }
+
+        string serverAddress = $"127.0.0.1:{port}";
+        using var server = new Server(serverAddress, ClientServerTests.CreateServerConfig(null), time);
+        server.Start(1);
+        using var client = new Client("127.0.0.1:0", null, time);
+
+        client.Connect(ClientServerTests.GenerateConnectToken(serverAddress, 0xE001));
+
+        for (int i = 0; i < 32 && client.State > ClientState.Disconnected && client.State != ClientState.Connected; i++)
+        {
+            client.Update(time);
+            server.Update(time);
+            time += step;
+        }
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server.NumConnectedClients == 1);
+        Check.That(server.ClientConnected(0));
+
+        byte[] packetData = new byte[32];
+        for (int i = 0; i < packetData.Length; i++)
+            packetData[i] = (byte)(i ^ 0x5A);
+
+        const int emptyDatagrams = 8;
+        using (var sender = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+        {
+            var serverEndpoint = new IPEndPoint(IPAddress.Loopback, server.Port);
+            for (int i = 0; i < emptyDatagrams; i++)
+                sender.SendTo(Array.Empty<byte>(), serverEndpoint);
+        }
+
+        client.SendPacket(packetData);
+
+        server.Update(time);
+
+        byte[] received = new byte[Protocol.MaxPacketSize];
+        int bytes = server.ReceivePacket(0, received, out _);
+        Check.That(bytes == packetData.Length);
+        Check.That(received.AsSpan(0, bytes).SequenceEqual(packetData));
+    }
+
     public static void TestClientServerIpv4SocketConnect()
     {
+        TestReceiveSkipsEmptyDatagrams();
         ClientServerSocketConnect("0.0.0.0:50000", null, "127.0.0.1:40000", null);
         ClientServerSocketConnect("0.0.0.0:50000", null, "127.0.0.1:40000", "[::1]:40000");
         ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", null);
