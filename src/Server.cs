@@ -56,6 +56,10 @@ namespace Netcode
                     mac.SequenceEqual(_mac.AsSpan(i * Protocol.MacBytes, Protocol.MacBytes)))
                     matchingTokenIndex = i;
 
+                // a token minted without expiry (negative expireSeconds, for development
+                // and testing only, so its expire timestamp is ulong.MaxValue) never
+                // satisfies this reclaim check, so its history entry is never reusable
+                // during the server run
                 if (freeTokenIndex == -1 &&
                     (_state[i] == ConnectTokenEntryState.Free || _expireTimestamp[i] <= currentTimestamp))
                     freeTokenIndex = i;
@@ -78,6 +82,12 @@ namespace Netcode
                 return matchingTokenIndex;
 
             return Refused;
+        }
+
+        public bool Holds(int index, ReadOnlySpan<byte> mac)
+        {
+            return _state[index] != ConnectTokenEntryState.Free &&
+                   mac.SequenceEqual(_mac.AsSpan(index * Protocol.MacBytes, Protocol.MacBytes));
         }
 
         public void Consume(int index)
@@ -235,11 +245,23 @@ namespace Netcode
             if (config.PrivateKey == null || config.PrivateKey.Length != Protocol.KeyBytes)
                 throw new ArgumentException($"config.PrivateKey must be {Protocol.KeyBytes} bytes", nameof(config));
 
-            _config = config;
-            _maxConnectTokenLifetime = config.MaxConnectTokenLifetime > 0
-                ? config.MaxConnectTokenLifetime
+            _config = new ServerConfig
+            {
+                ProtocolId = config.ProtocolId,
+                PrivateKey = (byte[])config.PrivateKey.Clone(),
+                Simulator = config.Simulator,
+                OnClientConnectDisconnect = config.OnClientConnectDisconnect,
+                SendLoopbackPacket = config.SendLoopbackPacket,
+                OverrideSendAndReceive = config.OverrideSendAndReceive,
+                SendPacketOverride = config.SendPacketOverride,
+                ReceivePacketOverride = config.ReceivePacketOverride,
+                MaxConnectTokenLifetime = config.MaxConnectTokenLifetime,
+                EnablePacketTagging = config.EnablePacketTagging,
+            };
+            _maxConnectTokenLifetime = _config.MaxConnectTokenLifetime > 0
+                ? _config.MaxConnectTokenLifetime
                 : Protocol.DefaultMaxConnectTokenLifetime;
-            config.PrivateKey.CopyTo(_privateKey.AsSpan());
+            _config.PrivateKey.CopyTo(_privateKey.AsSpan());
             _simulatorReceiveHandler = ProcessPacketFromSimulator;
 
             // the overrides are called on the update path with no null check. a missing one is a
@@ -378,7 +400,11 @@ namespace Netcode
             _challengeSequence = 0;
             Rng.GenerateKey(_challengeKey);
 
-            _minConnectTokenExpireTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (ulong)_maxConnectTokenLifetime;
+            // a token minted without expiry (expireTimestamp == ulong.MaxValue, for
+            // development and testing only) always passes this floor, so a token created
+            // with a negative expireSeconds stays valid across restarts while the private
+            // key and protocol id are unchanged
+            _minConnectTokenExpireTimestamp = UnixTime.Now() + (ulong)_maxConnectTokenLifetime;
 
             // global packets (challenge, denied) encrypt with the same per-token server to
             // client keys as per-client packets, whose sequences start at zero, so the global
@@ -556,8 +582,6 @@ namespace Netcode
             // record why before the callback fires, so the reason can be queried from inside it
             _clientDisconnectReason[clientIndex] = disconnectReason;
 
-            _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
-
             if (sendDisconnectPackets)
             {
                 NetcodeLog.Debug($"server sent disconnect packets to client {clientIndex}\n");
@@ -578,6 +602,8 @@ namespace Netcode
             _encryptionManager.RemoveEncryptionMapping(in _clientAddress[clientIndex], _time);
 
             ResetClientSlot(clientIndex);
+
+            _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
         }
 
         /// <summary>Disconnect one client, sending redundant disconnect packets.</summary>
@@ -631,8 +657,11 @@ namespace Netcode
             _clientLastPacketReceiveTime[clientIndex] = _time;
             userData.CopyTo(_clientUserData.AsSpan(clientIndex * Protocol.UserDataBytes, Protocol.UserDataBytes));
 
+            // the history slot may have been reclaimed by another token after this one expired,
+            // so consume it only while it still holds this token's mac
             int connectTokenEntryIndex = _encryptionManager.GetConnectTokenEntryIndex(encryptionIndex);
-            if (connectTokenEntryIndex >= 0)
+            if (connectTokenEntryIndex >= 0 &&
+                _connectTokenHistory.Holds(connectTokenEntryIndex, _encryptionManager.GetConnectTokenMac(encryptionIndex)))
                 _connectTokenHistory.Consume(connectTokenEntryIndex);
 
             if (NetcodeLog.Enabled(LogLevel.Info))
@@ -685,9 +714,10 @@ namespace Netcode
                 }
 
                 // the private token's HMAC survives in-place decryption in the last 16 bytes
+                ReadOnlySpan<byte> connectTokenMac = decryptedToken.Slice(Defines.ConnectTokenPrivateBytes - Protocol.MacBytes, Protocol.MacBytes);
                 int connectTokenEntryIndex = ConnectTokenEntriesFindOrAdd(
                         in from,
-                        decryptedToken.Slice(Defines.ConnectTokenPrivateBytes - Protocol.MacBytes, Protocol.MacBytes),
+                        connectTokenMac,
                         connectTokenExpireTimestamp,
                         currentTimestamp,
                         _time);
@@ -726,7 +756,8 @@ namespace Netcode
                         _time,
                         expireTime,
                         connectTokenPrivate.TimeoutSeconds,
-                        connectTokenEntryIndex))
+                        connectTokenEntryIndex,
+                        connectTokenMac))
                 {
                     NetcodeLog.Debug("server ignored connection request. failed to add encryption mapping\n");
                     return;
@@ -736,11 +767,11 @@ namespace Netcode
                 BinaryPrimitives.WriteUInt64LittleEndian(challengePacketData.Slice(0, 8), _challengeSequence);
 
                 Span<byte> challengeTokenBuffer = challengePacketData.Slice(8, Defines.ChallengeTokenBytes);
-                challengeTokenBuffer.Clear();
                 {
-                    var writer = new ByteWriter(challengeTokenBuffer);
-                    writer.U64(connectTokenPrivate.ClientId);
-                    writer.Bytes(connectTokenPrivate.UserData);
+                    var challengeToken = new ChallengeToken();
+                    challengeToken.ClientId = connectTokenPrivate.ClientId;
+                    connectTokenPrivate.UserData.AsSpan().CopyTo(challengeToken.UserData);
+                    challengeToken.Write(challengeTokenBuffer);
                 }
                 ChallengeToken.Encrypt(challengeTokenBuffer, _challengeSequence, _challengeKey);
 
@@ -768,9 +799,15 @@ namespace Netcode
                 return;
             }
 
-            var challengeReader = new ByteReader(challengeTokenBuffer);
-            ulong challengeClientId = challengeReader.U64();
-            ReadOnlySpan<byte> challengeUserData = challengeTokenBuffer.Slice(8, Protocol.UserDataBytes);
+            var challengeToken = new ChallengeToken();
+            if (!challengeToken.Read(challengeTokenBuffer))
+            {
+                NetcodeLog.Debug("server ignored connection response. failed to read challenge token\n");
+                return;
+            }
+
+            ulong challengeClientId = challengeToken.ClientId;
+            ReadOnlySpan<byte> challengeUserData = challengeToken.UserData;
 
             ReadOnlySpan<byte> packetSendKey = _encryptionManager.GetSendKey(encryptionIndex);
 
@@ -942,7 +979,7 @@ namespace Netcode
         /// </summary>
         public void ProcessPacket(in Address from, Span<byte> packetData)
         {
-            ulong currentTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong currentTimestamp = UnixTime.Now();
             ReadAndProcessPacket(in from, packetData, currentTimestamp);
         }
 
@@ -955,7 +992,7 @@ namespace Netcode
 
         private void ReceivePackets()
         {
-            ulong currentTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong currentTimestamp = UnixTime.Now();
 
             if (_config.Simulator == null)
             {

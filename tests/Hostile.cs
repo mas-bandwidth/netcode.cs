@@ -298,17 +298,17 @@ internal static class Hostile
                 }
                 else
                 {
-                    addresses[i].SetIPv6((ushort)rng.NextUInt64(), (ushort)rng.NextUInt64(), (ushort)rng.NextUInt64(), (ushort)rng.NextUInt64(),
-                                         (ushort)rng.NextUInt64(), (ushort)rng.NextUInt64(), (ushort)rng.NextUInt64(), (ushort)rng.NextUInt64());
+                    addresses[i].SetIPv6(unchecked((ushort)rng.NextUInt64()), unchecked((ushort)rng.NextUInt64()), unchecked((ushort)rng.NextUInt64()), unchecked((ushort)rng.NextUInt64()),
+                                         unchecked((ushort)rng.NextUInt64()), unchecked((ushort)rng.NextUInt64()), unchecked((ushort)rng.NextUInt64()), unchecked((ushort)rng.NextUInt64()));
                 }
-                addresses[i].Port = (ushort)rng.NextUInt64();
+                addresses[i].Port = unchecked((ushort)rng.NextUInt64());
             }
 
             byte[] userData = new byte[Protocol.UserDataBytes];
             rng.Fill(userData);
 
             var input = new ConnectTokenPrivate();
-            input.Generate(rng.NextUInt64(), (int)(uint)rng.NextUInt64(), addresses, userData);
+            input.Generate(rng.NextUInt64(), unchecked((int)(uint)rng.NextUInt64()), addresses, userData);
             input.Write(privateBuffer);
 
             var output = new ConnectTokenPrivate();
