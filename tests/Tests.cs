@@ -39,6 +39,7 @@ internal static class TestConstants
     public const int TestServerPort = 40000;
     public const int TestConnectTokenExpiry = 30;
     public const int TestTimeoutSeconds = 15;
+    public const ulong TestUnixTime = 1000;
 
     // TEST KEY ONLY — same fixed key as the C reference test suite. Obviously
     // non-production: it is published in two public repositories.
@@ -81,6 +82,7 @@ internal sealed class TestRng
 internal static class Program
 {
     private static string? _filter;
+    private static bool _functional;
 
     private static void RunTest(string name, Action test)
     {
@@ -88,6 +90,10 @@ internal static class Program
             return;
         Console.WriteLine(name);
         test();
+
+        // the unit tier opens no OS sockets: anything that needs one belongs to --functional
+        if (!_functional)
+            Check.That(NetcodeSocket.NumCreated == 0);
     }
 
     private static int Main(string[] args)
@@ -98,8 +104,37 @@ internal static class Program
             return Soak.Run(iterations);
         }
 
+        // the default run is the unit tier: no OS sockets, no sleeps, injected time.
+        // --functional runs the tier that uses real sockets and real time.
+        if (args.Length > 0 && args[0] == "--functional")
+        {
+            _functional = true;
+            args = args[1..];
+        }
+
         if (args.Length > 0)
             _filter = args[0];
+
+        if (_functional)
+        {
+            Console.WriteLine("[netcode.cs functional tests]\n");
+
+            RunTest("test_client_create", FunctionalTests.TestClientCreate);
+            RunTest("test_server_create", FunctionalTests.TestServerCreate);
+            RunTest("test_client_server_ipv4_socket_connect", FunctionalTests.TestClientServerIpv4SocketConnect);
+            RunTest("test_client_server_ipv6_socket_connect", FunctionalTests.TestClientServerIpv6SocketConnect);
+            RunTest("test_client_server_dual_socket_connect", FunctionalTests.TestClientServerDualSocketConnect);
+            RunTest("test_client_create_port_in_use", ClientServerTests.TestClientCreatePortInUse);
+            RunTest("test_server_create_port_in_use", ClientServerTests.TestServerCreatePortInUse);
+            RunTest("test_packet_tagging", ClientServerTests.TestPacketTagging);
+            RunTest("test_zero_allocation_socket_steady_state", Hostile.TestZeroAllocationSocketSteadyState);
+
+            Console.WriteLine("\nAll functional tests passed.");
+            return 0;
+        }
+
+        // the unit tier never reads the wall clock: unix time is injected
+        UnixTime.Now = () => TestConstants.TestUnixTime;
 
         Console.WriteLine("[netcode.cs tests]\n");
 
@@ -109,6 +144,7 @@ internal static class Program
         RunTest("test_crypto_poly1305_vectors", CoreTests.TestCryptoPoly1305Vectors);
         RunTest("test_crypto_differential_bcl", Hostile.TestCryptoDifferentialBcl);
         RunTest("test_queue", CoreTests.TestQueue);
+        RunTest("test_unused_members_removed", CoreTests.TestUnusedMembersRemoved);
         RunTest("test_sequence", CoreTests.TestSequence);
         RunTest("test_socket_buffer_size_back_off", CoreTests.TestSocketBufferSizeBackOff);
         RunTest("test_address", CoreTests.TestAddress);
@@ -129,16 +165,12 @@ internal static class Program
         RunTest("test_network_simulator_determinism", CoreTests.TestNetworkSimulatorDeterminism);
         RunTest("FloatMultiplyAddRoundsTwice", CoreTests.FloatMultiplyAddRoundsTwice);
         RunTest("test_ipv6_traffic_class_option", CoreTests.TestIpv6TrafficClassOption);
-        RunTest("test_client_create", ClientServerTests.TestClientCreate);
-        RunTest("test_server_create", ClientServerTests.TestServerCreate);
+        RunTest("test_client_server_address_families", ClientServerTests.TestClientServerAddressFamilies);
         RunTest("test_server_restart_global_sequence", ClientServerTests.TestServerRestartGlobalSequence);
         RunTest("test_connect_token_history", ClientServerTests.TestConnectTokenHistory);
         RunTest("test_client_reconnect_used_connect_token", ClientServerTests.TestClientReconnectUsedConnectToken);
         RunTest("test_client_error_connect_token_predates_server_start", ClientServerTests.TestClientErrorConnectTokenPredatesServerStart);
         RunTest("test_client_server_connect", ClientServerTests.TestClientServerConnect);
-        RunTest("test_client_server_ipv4_socket_connect", ClientServerTests.TestClientServerIpv4SocketConnect);
-        RunTest("test_client_server_ipv6_socket_connect", ClientServerTests.TestClientServerIpv6SocketConnect);
-        RunTest("test_client_server_dual_socket_connect", ClientServerTests.TestClientServerDualSocketConnect);
         RunTest("test_client_server_keep_alive", ClientServerTests.TestClientServerKeepAlive);
         RunTest("test_client_server_multiple_clients", ClientServerTests.TestClientServerMultipleClients);
         RunTest("test_client_server_multiple_servers", ClientServerTests.TestClientServerMultipleServers);
@@ -160,20 +192,15 @@ internal static class Program
         RunTest("test_client_loopback_requires_callback", ClientServerTests.TestClientLoopbackRequiresCallback);
         RunTest("test_server_loopback_requires_callback", ClientServerTests.TestServerLoopbackRequiresCallback);
 
-        // replay protection within a session (unit), port-in-use create errors and
-        // packet tagging (functional: real loopback sockets on ephemeral ports)
         RunTest("test_replay_protection_duplicate_packet", SessionReplayTests.TestReplayProtectionDuplicatePacket);
         RunTest("test_replay_protection_failed_decrypt", SessionReplayTests.TestReplayProtectionFailedDecrypt);
-        RunTest("test_client_create_port_in_use", ClientServerTests.TestClientCreatePortInUse);
-        RunTest("test_server_create_port_in_use", ClientServerTests.TestServerCreatePortInUse);
-        RunTest("test_packet_tagging", ClientServerTests.TestPacketTagging);
+        RunTest("test_client_server_config_snapshot", ConfigSnapshotTests.TestClientServerConfigSnapshot);
 
         RunTest("test_fuzz_read_packet_raw", Hostile.TestFuzzReadPacketRaw);
         RunTest("test_fuzz_packet_round_trip_corruption", Hostile.TestFuzzPacketRoundTripCorruption);
         RunTest("test_fuzz_connect_token", Hostile.TestFuzzConnectToken);
         RunTest("test_fuzz_parse_address", Hostile.TestFuzzParseAddress);
         RunTest("test_zero_allocation_steady_state", Hostile.TestZeroAllocationSteadyState);
-        RunTest("test_zero_allocation_socket_steady_state", Hostile.TestZeroAllocationSocketSteadyState);
 
         Console.WriteLine("\nAll tests passed.");
         return 0;
@@ -490,7 +517,6 @@ internal static class CoreTests
 
         // add some packets to the queue and make sure they pop off in the correct order
 
-        var rng = new TestRng(0x1234);
         const int NumPackets = 100;
         byte[] payload = new byte[Protocol.MaxPacketSize];
 
@@ -550,8 +576,23 @@ internal static class CoreTests
 
         Check.That(queue.Count == 0);
         Check.That(queue.Pop(popped, out _) == -1);
+    }
 
-        _ = rng;
+    public static void TestUnusedMembersRemoved()
+    {
+        const System.Reflection.BindingFlags Declared =
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.Static |
+            System.Reflection.BindingFlags.DeclaredOnly;
+
+        Check.That(typeof(ByteReader).GetMethod("Skip", Declared) == null);
+        Check.That(typeof(ByteReader).GetProperty("Remaining", Declared) == null);
+        Check.That(typeof(Aead).GetField("NonceBytesX", Declared) == null);
+        Check.That(typeof(ConnectTokenHistory).GetMethod("State", Declared) == null);
+        Check.That(typeof(ConnectTokenHistory).GetMethod("EntryTime", Declared) == null);
+        Check.That(typeof(ConnectTokenHistory).GetField("_time", Declared) == null);
     }
 
     public static void TestSequence()
@@ -832,7 +873,7 @@ internal static class CoreTests
 
         // encrypt the buffer
 
-        ulong expireTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 30;
+        ulong expireTimestamp = UnixTime.Now() + 30;
         byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
         Rng.GenerateNonce(nonce);
         byte[] key = new byte[Protocol.KeyBytes];
@@ -941,7 +982,7 @@ internal static class CoreTests
 
         byte[] encryptedConnectTokenData = (byte[])connectTokenData.Clone();
 
-        ulong expireTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 30;
+        ulong expireTimestamp = UnixTime.Now() + 30;
         byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
         Rng.GenerateNonce(nonce);
         byte[] key = new byte[Protocol.KeyBytes];
@@ -962,7 +1003,7 @@ internal static class CoreTests
             buffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, new byte[Protocol.KeyBytes],
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: true, key,
             AllAllowed, null);
 
@@ -991,7 +1032,7 @@ internal static class CoreTests
             buffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, packetKey,
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
             AllAllowed, null);
 
@@ -1019,7 +1060,7 @@ internal static class CoreTests
             buffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, packetKey,
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
             AllAllowed, null);
 
@@ -1046,7 +1087,7 @@ internal static class CoreTests
             buffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, packetKey,
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
             AllAllowed, null);
 
@@ -1071,7 +1112,7 @@ internal static class CoreTests
             buffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, packetKey,
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
             AllAllowed, null);
 
@@ -1096,7 +1137,7 @@ internal static class CoreTests
         byte[] connectTokenPrivateData = new byte[Defines.ConnectTokenPrivateBytes];
         connectTokenPrivate.Write(connectTokenPrivateData);
 
-        ulong createTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        ulong createTimestamp = UnixTime.Now();
         ulong expireTimestamp = createTimestamp + 30;
         byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
         Rng.GenerateNonce(nonce);
@@ -1737,5 +1778,128 @@ internal static class SessionReplayTests
         Check.That(Read(tampered, receiveBuffer, key, replayProtection).Type == -1);
         Check.That(Read(authentic, receiveBuffer, key, replayProtection).Type == -1);
         Check.That(replayProtection.MostRecentSequence == 1000);
+    }
+}
+
+internal static class ConfigSnapshotTests
+{
+    private static byte[] GenerateConnectToken(string serverAddress, ulong clientId)
+    {
+        byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
+        byte[] userData = new byte[Protocol.UserDataBytes];
+        new TestRng(0xC0FFEE).Fill(userData);
+        Check.That(ConnectTokenGenerator.Generate(
+            new[] { serverAddress },
+            new[] { serverAddress },
+            TestConstants.TestConnectTokenExpiry,
+            TestConstants.TestTimeoutSeconds,
+            clientId,
+            TestConstants.TestProtocolId,
+            TestConstants.PrivateKey,
+            userData,
+            connectToken));
+        return connectToken;
+    }
+
+    public static void TestClientServerConfigSnapshot()
+    {
+        var simulator = new NetworkSimulator
+        {
+            LatencyMilliseconds = 250,
+            JitterMilliseconds = 250,
+            PacketLossPercent = 5,
+            DuplicatePacketPercent = 10,
+        };
+
+        double time = 1000.0;
+        double deltaTime = 1.0 / 10.0;
+
+        var clientConfig = new ClientConfig { Simulator = simulator };
+        var serverConfig = new ServerConfig
+        {
+            ProtocolId = TestConstants.TestProtocolId,
+            Simulator = simulator,
+        };
+        TestConstants.PrivateKey.CopyTo(serverConfig.PrivateKey, 0);
+
+        using var client = new Client("[::]:50000", clientConfig, time);
+        using var server = new Server("[::1]:40000", serverConfig, time);
+
+        clientConfig.Simulator = null;
+        clientConfig.OnStateChange = null;
+        clientConfig.SendLoopbackPacket = null;
+        clientConfig.OverrideSendAndReceive = true;
+        clientConfig.SendPacketOverride = null;
+        clientConfig.ReceivePacketOverride = null;
+        clientConfig.EnablePacketTagging = true;
+
+        serverConfig.Simulator = null;
+        serverConfig.OnClientConnectDisconnect = null;
+        serverConfig.SendLoopbackPacket = null;
+        serverConfig.OverrideSendAndReceive = true;
+        serverConfig.SendPacketOverride = null;
+        serverConfig.ReceivePacketOverride = null;
+        serverConfig.MaxConnectTokenLifetime = 1;
+        serverConfig.EnablePacketTagging = true;
+        serverConfig.ProtocolId = 0;
+        Array.Clear(serverConfig.PrivateKey);
+
+        server.Start(1);
+
+        ulong clientId = new TestRng(0xC11E17).NextUInt64();
+        client.Connect(GenerateConnectToken("[::1]:40000", clientId));
+
+        for (int i = 0; i < 1000 && client.State > ClientState.Disconnected && client.State != ClientState.Connected; i++)
+        {
+            simulator.Update(time);
+            client.Update(time);
+            server.Update(time);
+            time += deltaTime;
+        }
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server.ClientConnected(0));
+
+        var payload = new byte[Protocol.MaxPacketSize];
+        for (int i = 0; i < payload.Length; i++)
+            payload[i] = (byte)i;
+        var received = new byte[Protocol.MaxPacketSize];
+
+        bool clientReceived = false;
+        bool serverReceived = false;
+        for (int i = 0; i < 1000 && !(clientReceived && serverReceived); i++)
+        {
+            simulator.Update(time);
+            client.Update(time);
+            server.Update(time);
+
+            client.SendPacket(payload);
+            server.SendPacket(0, payload);
+
+            while (true)
+            {
+                int bytes = client.ReceivePacket(received, out _);
+                if (bytes < 0)
+                    break;
+                Check.That(bytes == Protocol.MaxPacketSize);
+                Check.That(received.AsSpan(0, bytes).SequenceEqual(payload));
+                clientReceived = true;
+            }
+
+            while (true)
+            {
+                int bytes = server.ReceivePacket(0, received, out _);
+                if (bytes < 0)
+                    break;
+                Check.That(bytes == Protocol.MaxPacketSize);
+                Check.That(received.AsSpan(0, bytes).SequenceEqual(payload));
+                serverReceived = true;
+            }
+
+            time += deltaTime;
+        }
+
+        Check.That(clientReceived);
+        Check.That(serverReceived);
     }
 }

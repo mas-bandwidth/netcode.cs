@@ -152,7 +152,17 @@ namespace Netcode
         /// </summary>
         public Client(string bindAddress1, string? bindAddress2, ClientConfig? config, double time)
         {
-            _config = config ?? new ClientConfig();
+            ClientConfig source = config ?? new ClientConfig();
+            _config = new ClientConfig
+            {
+                Simulator = source.Simulator,
+                OnStateChange = source.OnStateChange,
+                SendLoopbackPacket = source.SendLoopbackPacket,
+                OverrideSendAndReceive = source.OverrideSendAndReceive,
+                SendPacketOverride = source.SendPacketOverride,
+                ReceivePacketOverride = source.ReceivePacketOverride,
+                EnablePacketTagging = source.EnablePacketTagging,
+            };
             _simulatorReceiveHandler = ProcessPacketFromSimulator;
 
             // the overrides are called on the update path with no null check. a missing one is a
@@ -484,7 +494,7 @@ namespace Netcode
         /// </summary>
         public void ProcessPacket(in Address from, Span<byte> packetData)
         {
-            ulong currentTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong currentTimestamp = UnixTime.Now();
 
             ReadPacketResult packet = PacketIO.ReadPacket(
                 packetData,
@@ -831,10 +841,10 @@ namespace Netcode
             }
 
             NetcodeLog.Info($"client connected to server via loopback as client {clientIndex}\n");
-            _state = ClientState.Connected;
             _clientIndex = clientIndex;
             _maxClients = maxClients;
             _loopback = true;
+            SetState(ClientState.Connected);
         }
 
         /// <summary>Disconnect a loopback client.</summary>
