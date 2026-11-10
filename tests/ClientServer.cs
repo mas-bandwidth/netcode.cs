@@ -91,10 +91,13 @@ internal static class ClientServerTests
             using var client = new Client(matching, config, 1000.0);
             var socketField = typeof(Client).GetField(ipv6 ? "_socketIpv6" : "_socketIpv4",
                 System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            var configField = typeof(Client).GetField("_config",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            var clientConfig = (ClientConfig)configField.GetValue(client)!;
             // Only socket presence is read by address selection. A sentinel exercises
             // that path without opening a socket or sending/receiving any packets.
             socketField.SetValue(client, System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(NetcodeSocket)));
-            config.OverrideSendAndReceive = false;
+            clientConfig.OverrideSendAndReceive = false;
             try
             {
                 client.Connect(Token(mismatched));
@@ -113,7 +116,7 @@ internal static class ClientServerTests
             {
                 // The sentinel has no underlying socket and must never be disposed.
                 socketField.SetValue(client, null);
-                config.OverrideSendAndReceive = true;
+                clientConfig.OverrideSendAndReceive = true;
             }
         }
     }
