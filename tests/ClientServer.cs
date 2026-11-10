@@ -976,6 +976,55 @@ internal static class ClientServerTests
         Check.That(server.NumConnectedClients == 0);
     }
 
+    public static void TestServerSideDisconnectMultipleServers()
+    {
+        // a connected client that the server disconnects goes to disconnected; it does not
+        // move on to the next server address in its connect token
+
+        NetworkSimulator simulator = new NetworkSimulator();
+
+        double time = 1000.0;
+        double deltaTime = 1.0 / 10.0;
+
+        var transitions = new System.Collections.Generic.List<(ClientState Previous, ClientState Next)>();
+        var clientConfig = new ClientConfig
+        {
+            Simulator = simulator,
+            OnStateChange = (previous, next) => transitions.Add((previous, next)),
+        };
+
+        using var client = new Client("[::]:50000", clientConfig, time);
+        using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
+
+        server.Start(1);
+
+        client.Connect(GenerateConnectToken(new[] { "[::1]:40000", "[::1]:40001" }, 0x8008, timeout: 5));
+
+        ConnectLoop(simulator, client, server, ref time, deltaTime);
+
+        Check.That(client.State == ClientState.Connected);
+
+        transitions.Clear();
+
+        server.DisconnectClient(0);
+
+        for (int i = 0; i < 100; i++)
+        {
+            simulator.Update(time);
+            client.Update(time);
+            server.Update(time);
+
+            if (client.State <= ClientState.Disconnected)
+                break;
+
+            time += deltaTime;
+        }
+
+        Check.That(client.State == ClientState.Disconnected);
+        Check.That(transitions.Count == 1);
+        Check.That(transitions[0] == (ClientState.Connected, ClientState.Disconnected));
+    }
+
     public static void TestServerClientDisconnectReason()
     {
         // the disconnect reason is recorded before the callback fires and queryable inside it

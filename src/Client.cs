@@ -707,7 +707,9 @@ namespace Netcode
             {
                 if (NetcodeLog.Enabled(LogLevel.Debug))
                     NetcodeLog.Debug($"client should disconnect -> {StateName(_shouldDisconnectState)}\n");
-                if (ConnectToNextServer())
+                // only a failure while connecting moves on to the next server. a connected
+                // client that the server disconnects goes to disconnected.
+                if (_state != ClientState.Connected && ConnectToNextServer())
                     return;
                 DisconnectInternal(_shouldDisconnectState, sendDisconnectPackets: false);
                 return;

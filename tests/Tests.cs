@@ -188,6 +188,7 @@ internal static class Program
         RunTest("test_client_error_connection_denied", ClientServerTests.TestClientErrorConnectionDenied);
         RunTest("test_client_side_disconnect", ClientServerTests.TestClientSideDisconnect);
         RunTest("test_server_side_disconnect", ClientServerTests.TestServerSideDisconnect);
+        RunTest("test_server_side_disconnect_multiple_servers", ClientServerTests.TestServerSideDisconnectMultipleServers);
         RunTest("test_server_client_disconnect_reason", ClientServerTests.TestServerClientDisconnectReason);
         RunTest("test_client_reconnect", ClientServerTests.TestClientReconnect);
         RunTest("test_disable_timeout", ClientServerTests.TestDisableTimeout);
