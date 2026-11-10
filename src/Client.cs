@@ -152,7 +152,17 @@ namespace Netcode
         /// </summary>
         public Client(string bindAddress1, string? bindAddress2, ClientConfig? config, double time)
         {
-            _config = config ?? new ClientConfig();
+            ClientConfig source = config ?? new ClientConfig();
+            _config = new ClientConfig
+            {
+                Simulator = source.Simulator,
+                OnStateChange = source.OnStateChange,
+                SendLoopbackPacket = source.SendLoopbackPacket,
+                OverrideSendAndReceive = source.OverrideSendAndReceive,
+                SendPacketOverride = source.SendPacketOverride,
+                ReceivePacketOverride = source.ReceivePacketOverride,
+                EnablePacketTagging = source.EnablePacketTagging,
+            };
             _simulatorReceiveHandler = ProcessPacketFromSimulator;
 
             // the overrides are called on the update path with no null check. a missing one is a
@@ -261,9 +271,10 @@ namespace Netcode
             if (NetcodeLog.Enabled(LogLevel.Debug))
                 NetcodeLog.Debug($"client changed state from '{StateName(_state)}' to '{StateName(state)}'\n");
 
-            _config.OnStateChange?.Invoke(_state, state);
-
+            ClientState oldState = _state;
             _state = state;
+            if (oldState != state)
+                _config.OnStateChange?.Invoke(oldState, state);
         }
 
         /// <summary>Human-readable name for a client state (matches the C library's strings).</summary>
@@ -345,7 +356,15 @@ namespace Netcode
             }
 
             _serverAddressIndex = 0;
-            _serverAddress = _connectToken.ServerAddresses[0];
+            while (_serverAddressIndex < _connectToken.NumServerAddresses &&
+                   !CanConnectToAddress(in _connectToken.ServerAddresses[_serverAddressIndex]))
+                _serverAddressIndex++;
+            if (_serverAddressIndex == _connectToken.NumServerAddresses)
+            {
+                SetState(ClientState.InvalidConnectToken);
+                return;
+            }
+            _serverAddress = _connectToken.ServerAddresses[_serverAddressIndex];
 
             if (NetcodeLog.Enabled(LogLevel.Info))
             {
@@ -467,7 +486,7 @@ namespace Netcode
         /// </summary>
         public void ProcessPacket(in Address from, Span<byte> packetData)
         {
-            ulong currentTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong currentTimestamp = UnixTime.Now();
 
             ReadPacketResult packet = PacketIO.ReadPacket(
                 packetData,
@@ -620,15 +639,27 @@ namespace Netcode
             }
         }
 
+        private bool CanConnectToAddress(in Address address)
+        {
+            return _config.OverrideSendAndReceive || _config.Simulator != null ||
+                   (address.Type == AddressType.IPv4 && _socketIpv4 != null) ||
+                   (address.Type == AddressType.IPv6 && _socketIpv6 != null);
+        }
+
         private bool ConnectToNextServer()
         {
-            if (_serverAddressIndex + 1 >= _connectToken.NumServerAddresses)
+            do
+            {
+                _serverAddressIndex++;
+            }
+            while (_serverAddressIndex < _connectToken.NumServerAddresses &&
+                   !CanConnectToAddress(in _connectToken.ServerAddresses[_serverAddressIndex]));
+            if (_serverAddressIndex >= _connectToken.NumServerAddresses)
             {
                 NetcodeLog.Debug("client has no more servers to connect to\n");
                 return false;
             }
 
-            _serverAddressIndex++;
             _serverAddress = _connectToken.ServerAddresses[_serverAddressIndex];
 
             ResetBeforeNextConnect();
@@ -748,6 +779,9 @@ namespace Netcode
         /// </summary>
         public int ReceivePacket(Span<byte> payload, out ulong sequence)
         {
+            if (payload.Length < Protocol.MaxPacketSize)
+                throw new ArgumentException($"payload must be at least {Protocol.MaxPacketSize} bytes", nameof(payload));
+
             return _packetReceiveQueue.Pop(payload, out sequence);
         }
 
