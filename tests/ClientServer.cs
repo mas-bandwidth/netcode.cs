@@ -1095,6 +1095,7 @@ internal static class ClientServerTests
         Address thirdAddress = Address.Parse("127.0.0.1:50002");
         Address fourthAddress = Address.Parse("127.0.0.1:50003");
         Address fifthAddress = Address.Parse("127.0.0.1:50004");
+        Address sixthAddress = Address.Parse("127.0.0.1:50005");
 
         void Request(in Address from, ulong clientId, ulong expireTimestamp, double time, int timeout = -1)
         {
@@ -1145,7 +1146,19 @@ internal static class ClientServerTests
 
         Request(in fifthAddress, 0x1005, 1030, 22.0);
         Check.That(encryptionManager.NumEncryptionMappings == 2);
-        Check.That(encryptionManager.FindEncryptionMapping(in fifthAddress, server.Time) != -1);
+
+        // the pending mapping is finite and its slot is reclaimed once it expires,
+        // even though the token has much longer to live
+        int fifthIndex = encryptionManager.FindEncryptionMapping(in fifthAddress, server.Time);
+        Check.That(fifthIndex != -1);
+        Check.That(encryptionManager.ExpireTime[fifthIndex] > server.Time);
+
+        server.Update(33.0);
+        Check.That(encryptionManager.EntryExpired(fifthIndex, server.Time));
+
+        Request(in sixthAddress, 0x1006, 1030, 33.0);
+        Check.That(encryptionManager.NumEncryptionMappings == 2);
+        Check.That(encryptionManager.FindEncryptionMapping(in sixthAddress, server.Time) != -1);
     }
 
     public static void TestDisableTimeout()
