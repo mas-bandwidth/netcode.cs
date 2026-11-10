@@ -1743,7 +1743,7 @@ internal static class Soak
                         byte[] userData = new byte[Protocol.UserDataBytes];
                         rng.Fill(userData);
                         string[] address = { "[::1]:40000" };
-                        if (!ConnectTokenGenerator.Generate(address, address, 30, 5, rng.NextUInt64(), TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken))
+                        if (!ConnectTokenGenerator.Generate(address, address, 60, 5, rng.NextUInt64(), TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken))
                         {
                             Console.WriteLine("soak: failed to generate connect token");
                             return 1;
