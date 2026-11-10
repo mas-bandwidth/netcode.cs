@@ -779,8 +779,22 @@ internal static class ClientServerTests
         double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
+        int disconnectCallbackCount = 0;
+        Server? serverRef = null;
+        var serverConfig = CreateServerConfig(simulator);
+        serverConfig.OnClientConnectDisconnect = (clientIndex, connected) =>
+        {
+            if (!connected)
+            {
+                disconnectCallbackCount++;
+                if (disconnectCallbackCount == 1)
+                    serverRef!.DisconnectClient(clientIndex);
+            }
+        };
+
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
-        using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
+        using var server = new Server("[::1]:40000", serverConfig, time);
+        serverRef = server;
 
         server.Start(1);
 
@@ -791,6 +805,7 @@ internal static class ClientServerTests
         Check.That(client.State == ClientState.Connected);
 
         server.DisconnectClient(0);
+        Check.That(disconnectCallbackCount == 1);
 
         for (int i = 0; i < 10; i++)
         {
