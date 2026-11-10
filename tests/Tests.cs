@@ -976,6 +976,11 @@ internal static class CoreTests
         Check.That(outputToken.ClientId == inputToken.ClientId);
         Check.That(outputToken.UserData.AsSpan().SequenceEqual(inputToken.UserData));
 
+        byte[] expected = new byte[Defines.ChallengeTokenBytes];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(expected.AsSpan(0, 8), inputToken.ClientId);
+        inputToken.UserData.AsSpan().CopyTo(expected.AsSpan(8));
+        Check.That(buffer.AsSpan().SequenceEqual(expected));
+
         MethodInfo write = typeof(ChallengeToken).GetMethod("Write", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
         MethodInfo read = typeof(ChallengeToken).GetMethod("Read", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)!;
 
