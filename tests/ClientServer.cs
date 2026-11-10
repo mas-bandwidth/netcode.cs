@@ -1092,15 +1092,17 @@ internal static class ClientServerTests
         Address serverAddress = Address.Parse("127.0.0.1:40000");
         Address firstAddress = Address.Parse("127.0.0.1:50000");
         Address secondAddress = Address.Parse("127.0.0.1:50001");
+        Address thirdAddress = Address.Parse("127.0.0.1:50002");
+        Address fourthAddress = Address.Parse("127.0.0.1:50003");
 
-        void Request(in Address from, ulong clientId, ulong expireTimestamp, double time)
+        void Request(in Address from, ulong clientId, ulong expireTimestamp, double time, int timeout = -1)
         {
             byte[] tokenBytes = new byte[Protocol.ConnectTokenBytes];
             byte[] userData = new byte[Protocol.UserDataBytes];
             Span<Address> addresses = stackalloc Address[1] { serverAddress };
             Span<byte> nonce = stackalloc byte[Defines.ConnectTokenNonceBytes];
             new TestRng(clientId).Fill(nonce);
-            Check.That(ConnectTokenGenerator.GenerateInternal(addresses, addresses, 1000, expireTimestamp, -1,
+            Check.That(ConnectTokenGenerator.GenerateInternal(addresses, addresses, 1000, expireTimestamp, timeout,
                 clientId, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, nonce, tokenBytes));
             var token = new ConnectTokenData();
             Check.That(token.Read(tokenBytes));
@@ -1122,6 +1124,18 @@ internal static class ClientServerTests
         Request(in secondAddress, 0x1002, 1030, 6.0);
         Check.That(encryptionManager.NumEncryptionMappings == 1);
         Check.That(encryptionManager.Address[0].Equals(secondAddress));
+
+        // a positive timeout is also limited by a shorter token lifetime
+        Request(in thirdAddress, 0x1003, 1005, 6.0, timeout: 30);
+        Check.That(encryptionManager.NumEncryptionMappings == 2);
+
+        server.Update(11.0);
+        Check.That(encryptionManager.EntryExpired(1, server.Time));
+
+        // the expired mapping's slot is available to another pending request
+        Request(in fourthAddress, 0x1004, 1030, 11.0);
+        Check.That(encryptionManager.NumEncryptionMappings == 2);
+        Check.That(encryptionManager.Address[1].Equals(fourthAddress));
     }
 
     public static void TestDisableTimeout()
