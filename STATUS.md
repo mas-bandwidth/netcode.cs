@@ -41,8 +41,8 @@ same non-blocking update-loop model. Changes since the release are in the git lo
   4. live session: C# server ← C client, token minted by C
 - **CI** (`.github/workflows/ci.yml`), on pushes to `main` and `sprint/*` and on
   every pull request:
-  - `test` on ubuntu-latest and macos-latest: build both TFMs, the unit tests
-    on net10.0 and on the real .NET 8 runtime, `soak 2000`, and a build of the
+  - `test` on ubuntu-latest, macos-latest and windows-latest: build both TFMs, the unit tests
+    and the functional tier on net10.0 and on the real .NET 8 runtime, `soak 2000`, and a build of the
     compat harness;
   - `C wire compatibility`: the interop gate against netcode pinned at
     `ced9b4b8…` (v1.4.9);
