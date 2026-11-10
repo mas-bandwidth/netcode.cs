@@ -739,7 +739,15 @@ namespace Netcode
                     return;
                 }
 
-                double expireTime = connectTokenPrivate.TimeoutSeconds >= 0 ? _time + connectTokenPrivate.TimeoutSeconds : -1.0;
+                ulong tokenLifetime = connectTokenExpireTimestamp == ulong.MaxValue
+                    ? (ulong)_maxConnectTokenLifetime
+                    : connectTokenExpireTimestamp - currentTimestamp;
+
+                double pendingExpireTime = EncryptionManager.PreconnectExpireTime(
+                    _time,
+                    connectTokenPrivate.TimeoutSeconds);
+
+                double expireTime = Math.Min(pendingExpireTime, _time + (double)tokenLifetime);
 
                 if (!_encryptionManager.AddEncryptionMapping(
                         in from,
