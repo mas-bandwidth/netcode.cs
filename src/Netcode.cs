@@ -1380,6 +1380,13 @@ namespace Netcode
     /// Deterministic network conditions simulator for tests: latency, jitter,
     /// packet loss and duplicates. Same xorshift64* generator and seed as the C
     /// library, so a given configuration drops and delays the same packets.
+    /// Buffers: each slot of the packet-entry ring copies its packet into a
+    /// MaxPacketBytes buffer, allocated when the slot has none, and reuses that
+    /// buffer on later overwrites until the packet is moved out. Update moves a
+    /// due entry, buffer included, to the pending-receive list and empties its
+    /// slot; delivery, or the next Update for an undelivered entry, drops the
+    /// pending reference. A slot whose packet was moved out allocates a fresh
+    /// buffer the next time it is filled. Not allocation-free; it is a test tool.
     /// </summary>
     public sealed class NetworkSimulator
     {
