@@ -486,7 +486,7 @@ namespace Netcode
         /// </summary>
         public void ProcessPacket(in Address from, Span<byte> packetData)
         {
-            ulong currentTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong currentTimestamp = UnixTime.Now();
 
             ReadPacketResult packet = PacketIO.ReadPacket(
                 packetData,
@@ -779,6 +779,9 @@ namespace Netcode
         /// </summary>
         public int ReceivePacket(Span<byte> payload, out ulong sequence)
         {
+            if (payload.Length < Protocol.MaxPacketSize)
+                throw new ArgumentException($"payload must be at least {Protocol.MaxPacketSize} bytes", nameof(payload));
+
             return _packetReceiveQueue.Pop(payload, out sequence);
         }
 

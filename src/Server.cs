@@ -31,7 +31,6 @@ namespace Netcode
         public const int Full = -2;
 
         private readonly ConnectTokenEntryState[] _state = new ConnectTokenEntryState[MaxEntries];
-        private readonly double[] _time = new double[MaxEntries];
         private readonly ulong[] _expireTimestamp = new ulong[MaxEntries];
         private readonly byte[] _mac = new byte[MaxEntries * Protocol.MacBytes];
         private readonly Address[] _address = new Address[MaxEntries];
@@ -44,8 +43,6 @@ namespace Netcode
             Array.Clear(_expireTimestamp);
             Array.Clear(_mac);
             Array.Clear(_address);
-            for (int i = 0; i < MaxEntries; i++)
-                _time[i] = -1000.0;
         }
 
         public int FindOrAdd(in Address address, ReadOnlySpan<byte> mac, ulong expireTimestamp, ulong currentTimestamp, double time)
@@ -70,7 +67,6 @@ namespace Netcode
                     return Full;
 
                 _state[freeTokenIndex] = ConnectTokenEntryState.Pending;
-                _time[freeTokenIndex] = time;
                 _expireTimestamp[freeTokenIndex] = expireTimestamp;
                 _address[freeTokenIndex] = address;
                 mac.CopyTo(_mac.AsSpan(freeTokenIndex * Protocol.MacBytes, Protocol.MacBytes));
@@ -90,9 +86,6 @@ namespace Netcode
                 throw new ArgumentOutOfRangeException(nameof(index));
             _state[index] = ConnectTokenEntryState.Consumed;
         }
-
-        public ConnectTokenEntryState State(int index) => _state[index];
-        public double EntryTime(int index) => _time[index];
     }
 
     /// <summary>Why server creation failed (carried by NetcodeException.ErrorCode). Bind failures
@@ -186,6 +179,8 @@ namespace Netcode
         private NetcodeSocket? _socketIpv6;
         private Address _address;
         private Address _address2;
+        // Test seam: tests set FlagIgnoreConnectionRequestPackets or
+        // FlagIgnoreConnectionResponsePackets to drive the client's timeout paths.
         internal uint Flags;
         private double _time;
         private bool _running;
@@ -395,7 +390,7 @@ namespace Netcode
             _challengeSequence = 0;
             Rng.GenerateKey(_challengeKey);
 
-            _minConnectTokenExpireTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + (ulong)_maxConnectTokenLifetime;
+            _minConnectTokenExpireTimestamp = UnixTime.Now() + (ulong)_maxConnectTokenLifetime;
 
             // global packets (challenge, denied) encrypt with the same per-token server to
             // client keys as per-client packets, whose sequences start at zero, so the global
@@ -573,8 +568,6 @@ namespace Netcode
             // record why before the callback fires, so the reason can be queried from inside it
             _clientDisconnectReason[clientIndex] = disconnectReason;
 
-            _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
-
             if (sendDisconnectPackets)
             {
                 NetcodeLog.Debug($"server sent disconnect packets to client {clientIndex}\n");
@@ -595,6 +588,8 @@ namespace Netcode
             _encryptionManager.RemoveEncryptionMapping(in _clientAddress[clientIndex], _time);
 
             ResetClientSlot(clientIndex);
+
+            _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
         }
 
         /// <summary>Disconnect one client, sending redundant disconnect packets.</summary>
@@ -951,7 +946,7 @@ namespace Netcode
         /// </summary>
         public void ProcessPacket(in Address from, Span<byte> packetData)
         {
-            ulong currentTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong currentTimestamp = UnixTime.Now();
             ReadAndProcessPacket(in from, packetData, currentTimestamp);
         }
 
@@ -964,7 +959,7 @@ namespace Netcode
 
         private void ReceivePackets()
         {
-            ulong currentTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong currentTimestamp = UnixTime.Now();
 
             if (_config.Simulator == null)
             {
@@ -1157,6 +1152,9 @@ namespace Netcode
         /// </summary>
         public int ReceivePacket(int clientIndex, Span<byte> payload, out ulong sequence)
         {
+            if (payload.Length < Protocol.MaxPacketSize)
+                throw new ArgumentException($"payload must be at least {Protocol.MaxPacketSize} bytes", nameof(payload));
+
             sequence = 0;
 
             if (!_running)
