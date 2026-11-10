@@ -80,6 +80,12 @@ namespace Netcode
             return Refused;
         }
 
+        public bool Holds(int index, ReadOnlySpan<byte> mac)
+        {
+            return _state[index] != ConnectTokenEntryState.Free &&
+                   mac.SequenceEqual(_mac.AsSpan(index * Protocol.MacBytes, Protocol.MacBytes));
+        }
+
         public void Consume(int index)
         {
             if ((uint)index >= MaxEntries)
@@ -643,8 +649,11 @@ namespace Netcode
             _clientLastPacketReceiveTime[clientIndex] = _time;
             userData.CopyTo(_clientUserData.AsSpan(clientIndex * Protocol.UserDataBytes, Protocol.UserDataBytes));
 
+            // the history slot may have been reclaimed by another token after this one expired,
+            // so consume it only while it still holds this token's mac
             int connectTokenEntryIndex = _encryptionManager.GetConnectTokenEntryIndex(encryptionIndex);
-            if (connectTokenEntryIndex >= 0)
+            if (connectTokenEntryIndex >= 0 &&
+                _connectTokenHistory.Holds(connectTokenEntryIndex, _encryptionManager.GetConnectTokenMac(encryptionIndex)))
                 _connectTokenHistory.Consume(connectTokenEntryIndex);
 
             if (NetcodeLog.Enabled(LogLevel.Info))
@@ -697,9 +706,10 @@ namespace Netcode
                 }
 
                 // the private token's HMAC survives in-place decryption in the last 16 bytes
+                ReadOnlySpan<byte> connectTokenMac = decryptedToken.Slice(Defines.ConnectTokenPrivateBytes - Protocol.MacBytes, Protocol.MacBytes);
                 int connectTokenEntryIndex = ConnectTokenEntriesFindOrAdd(
                         in from,
-                        decryptedToken.Slice(Defines.ConnectTokenPrivateBytes - Protocol.MacBytes, Protocol.MacBytes),
+                        connectTokenMac,
                         connectTokenExpireTimestamp,
                         currentTimestamp,
                         _time);
@@ -730,7 +740,8 @@ namespace Netcode
                         _time,
                         expireTime,
                         connectTokenPrivate.TimeoutSeconds,
-                        connectTokenEntryIndex))
+                        connectTokenEntryIndex,
+                        connectTokenMac))
                 {
                     NetcodeLog.Debug("server ignored connection request. failed to add encryption mapping\n");
                     return;
