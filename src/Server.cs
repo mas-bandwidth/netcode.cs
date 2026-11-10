@@ -1325,6 +1325,7 @@ namespace Netcode
             finally
             {
                 CryptographicOperations.ZeroMemory(_privateKey);
+                CryptographicOperations.ZeroMemory(_config.PrivateKey);
             }
             _socketIpv4?.Dispose();
             _socketIpv6?.Dispose();
