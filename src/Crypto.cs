@@ -39,7 +39,6 @@ namespace Netcode
         public const int KeyBytes = 32;
         public const int MacBytes = 16;
         public const int NonceBytesIetf = 12;
-        public const int NonceBytesX = 24;
 
         // ------------------------------------------------------------------
         // ChaCha20 core (RFC 8439). 32-bit counter, 96-bit nonce.
@@ -296,6 +295,18 @@ namespace Netcode
             st.R0 = 0; st.R1 = 0; st.R2 = 0;
             st.S1 = 0; st.S2 = 0;
             st.Pad0 = 0; st.Pad1 = 0;
+        }
+
+        /// <summary>One-shot Poly1305 MAC (RFC 8439 Section 2.5) of a message
+        /// under a 32-byte one-time key r ‖ s.</summary>
+        internal static void Poly1305Mac(Span<byte> mac16, ReadOnlySpan<byte> message, ReadOnlySpan<byte> key32)
+        {
+            Poly1305State st = default;
+            Poly1305Init(ref st, key32);
+            Span<byte> scratch = stackalloc byte[16];
+            int scratchLen = 0;
+            Poly1305Update(ref st, message, scratch, ref scratchLen);
+            Poly1305Finish(ref st, scratch, scratchLen, mac16);
         }
 
         // ------------------------------------------------------------------
