@@ -435,7 +435,7 @@ namespace Netcode
                 {
                     ushort g = GetIPv6(i);
                     bytes[i * 2] = (byte)(g >> 8);
-                    bytes[i * 2 + 1] = (byte)g;
+                    bytes[i * 2 + 1] = unchecked((byte)g);
                 }
                 var ip = new IPAddress(bytes);
                 return Port == 0 ? ip.ToString() : $"[{ip}]:{Port}";
@@ -522,8 +522,8 @@ namespace Netcode
         {
             var writer = new ByteWriter(buffer);
             writer.U64(ClientId);
-            writer.U32((uint)TimeoutSeconds);
-            writer.U32((uint)NumServerAddresses);
+            writer.U32(unchecked((uint)TimeoutSeconds));
+            writer.U32(unchecked((uint)NumServerAddresses));
             for (int i = 0; i < NumServerAddresses; i++)
                 WriteAddress(ref writer, in ServerAddresses[i]);
             writer.Bytes(ClientToServerKey);
@@ -539,8 +539,8 @@ namespace Netcode
 
             var reader = new ByteReader(buffer);
             ClientId = reader.U64();
-            TimeoutSeconds = (int)reader.U32();
-            NumServerAddresses = (int)reader.U32();
+            TimeoutSeconds = unchecked((int)reader.U32());
+            NumServerAddresses = unchecked((int)reader.U32());
 
             if (NumServerAddresses <= 0 || NumServerAddresses > Protocol.MaxServersPerConnect)
                 return false;
@@ -704,8 +704,8 @@ namespace Netcode
             writer.U64(ExpireTimestamp);
             writer.Bytes(Nonce);
             writer.Bytes(PrivateData);
-            writer.U32((uint)TimeoutSeconds);
-            writer.U32((uint)NumServerAddresses);
+            writer.U32(unchecked((uint)TimeoutSeconds));
+            writer.U32(unchecked((uint)NumServerAddresses));
             for (int i = 0; i < NumServerAddresses; i++)
                 ConnectTokenPrivate.WriteAddress(ref writer, in ServerAddresses[i]);
             writer.Bytes(ClientToServerKey);
@@ -739,8 +739,8 @@ namespace Netcode
             reader.Bytes(Nonce);
             reader.Bytes(PrivateData);
 
-            TimeoutSeconds = (int)reader.U32();
-            NumServerAddresses = (int)reader.U32();
+            TimeoutSeconds = unchecked((int)reader.U32());
+            NumServerAddresses = unchecked((int)reader.U32());
 
             if (NumServerAddresses <= 0 || NumServerAddresses > Protocol.MaxServersPerConnect)
             {
@@ -1948,7 +1948,7 @@ namespace Netcode
                 {
                     ushort g = address.GetIPv6(i);
                     bytes[i * 2] = (byte)(g >> 8);
-                    bytes[i * 2 + 1] = (byte)g;
+                    bytes[i * 2 + 1] = unchecked((byte)g);
                 }
                 return new IPEndPoint(new IPAddress(bytes), address.Port);
             }
@@ -1982,7 +1982,7 @@ namespace Netcode
                 {
                     ushort g = address.GetIPv6(i);
                     buffer[8 + i * 2] = (byte)(g >> 8);
-                    buffer[8 + i * 2 + 1] = (byte)g;
+                    buffer[8 + i * 2 + 1] = unchecked((byte)g);
                 }
                 buffer.Slice(24, 4).Clear(); // scope id
             }

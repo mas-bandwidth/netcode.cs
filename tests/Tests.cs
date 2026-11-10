@@ -75,7 +75,7 @@ internal sealed class TestRng
     public void Fill(Span<byte> data)
     {
         for (int i = 0; i < data.Length; i++)
-            data[i] = (byte)NextUInt64();
+            data[i] = unchecked((byte)NextUInt64());
     }
 }
 
@@ -151,6 +151,7 @@ internal static class Program
         RunTest("test_connect_token", CoreTests.TestConnectToken);
         RunTest("test_generate_connect_token_out_of_range", CoreTests.TestGenerateConnectTokenOutOfRange);
         RunTest("test_challenge_token", CoreTests.TestChallengeToken);
+        RunTest("test_managed_crypto_and_negative_timeout", CoreTests.TestManagedCryptoAndNegativeTimeout);
         RunTest("test_connection_request_packet", CoreTests.TestConnectionRequestPacket);
         RunTest("test_connection_denied_packet", () => CoreTests.TestEmptyPacket(PacketType.ConnectionDenied));
         RunTest("test_connection_challenge_packet", () => CoreTests.TestChallengeResponsePacket(PacketType.ConnectionChallenge));
@@ -955,6 +956,64 @@ internal static class CoreTests
         Check.That(outputToken.UserData.AsSpan().SequenceEqual(inputToken.UserData));
     }
 
+    public static void TestManagedCryptoAndNegativeTimeout()
+    {
+        byte[] key = new byte[Aead.KeyBytes];
+        for (int i = 0; i < key.Length; i++)
+            key[i] = (byte)(i + 1);
+
+        byte[] message = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17 };
+
+        byte[] ietfNonce = new byte[Aead.NonceBytesIetf];
+        for (int i = 0; i < ietfNonce.Length; i++)
+            ietfNonce[i] = (byte)i;
+
+        byte[] xNonce = new byte[Defines.ConnectTokenNonceBytes];
+        for (int i = 0; i < xNonce.Length; i++)
+            xNonce[i] = (byte)i;
+
+        byte[] buffer = new byte[message.Length + Aead.MacBytes];
+        message.CopyTo(buffer, 0);
+        Aead.EncryptIetf(buffer, message.Length, ReadOnlySpan<byte>.Empty, ietfNonce, key);
+        Check.That(Aead.DecryptIetf(buffer, buffer.Length, ReadOnlySpan<byte>.Empty, ietfNonce, key));
+        Check.That(buffer.AsSpan(0, message.Length).SequenceEqual(message));
+
+        message.CopyTo(buffer, 0);
+        Aead.EncryptX(buffer, message.Length, ReadOnlySpan<byte>.Empty, xNonce, key);
+        Check.That(Aead.DecryptX(buffer, buffer.Length, ReadOnlySpan<byte>.Empty, xNonce, key));
+        Check.That(buffer.AsSpan(0, message.Length).SequenceEqual(message));
+
+        Address address = default;
+        address.SetIPv4(127, 0, 0, 1);
+        address.Port = TestConstants.TestServerPort;
+
+        var token = new ConnectTokenPrivate();
+        token.ClientId = TestConstants.TestClientId;
+        token.TimeoutSeconds = -1;
+        token.NumServerAddresses = 1;
+        token.ServerAddresses[0] = address;
+
+        byte[] tokenBuffer = new byte[Defines.ConnectTokenPrivateBytes];
+        token.Write(tokenBuffer);
+
+        var readToken = new ConnectTokenPrivate();
+        Check.That(readToken.Read(tokenBuffer));
+        Check.That(readToken.TimeoutSeconds == -1);
+
+        var data = new ConnectTokenData();
+        Defines.VersionInfo.CopyTo(data.VersionInfo);
+        data.TimeoutSeconds = -1;
+        data.NumServerAddresses = 1;
+        data.ServerAddresses[0] = address;
+
+        byte[] dataBuffer = new byte[Protocol.ConnectTokenBytes];
+        data.Write(dataBuffer);
+
+        var readData = new ConnectTokenData();
+        Check.That(readData.Read(dataBuffer));
+        Check.That(readData.TimeoutSeconds == -1);
+    }
+
     private static readonly bool[] AllAllowed = CreateAllAllowed();
 
     private static bool[] CreateAllAllowed()
@@ -1510,7 +1569,7 @@ internal static class CoreTests
         for (int i = 0; i < NumPackets; i++)
         {
             for (int j = 0; j < packetData.Length; j++)
-                packetData[j] = (byte)(i + j);
+                packetData[j] = unchecked((byte)(i + j));
             simulatorA.SendPacket(in from, in to, packetData);
             simulatorB.SendPacket(in from, in to, packetData);
         }
@@ -1862,7 +1921,7 @@ internal static class ConfigSnapshotTests
 
         var payload = new byte[Protocol.MaxPacketSize];
         for (int i = 0; i < payload.Length; i++)
-            payload[i] = (byte)i;
+            payload[i] = unchecked((byte)i);
         var received = new byte[Protocol.MaxPacketSize];
 
         bool clientReceived = false;
