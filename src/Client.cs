@@ -427,23 +427,31 @@ namespace Netcode
                     {
                         ReadOnlySpan<byte> data = buffer.Slice(packet.DataOffset, packet.DataLength);
 
-                        if (_state == ClientState.Connected)
+                        int clientIndex = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(0, 4));
+                        int maxClients = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(4, 4));
+
+                        // Debug.Assert is compiled out of Release. A slot outside the server's
+                        // client range is not a connection, and the stored index stays put.
+                        if (maxClients > 0 && maxClients <= Protocol.MaxClients && clientIndex >= 0 && clientIndex < maxClients)
                         {
-                            NetcodeLog.Debug("client received connection keep alive packet from server\n");
+                            if (_state == ClientState.Connected)
+                            {
+                                NetcodeLog.Debug("client received connection keep alive packet from server\n");
 
-                            _lastPacketReceiveTime = _time;
-                        }
-                        else if (_state == ClientState.SendingConnectionResponse)
-                        {
-                            NetcodeLog.Debug("client received connection keep alive packet from server\n");
+                                _lastPacketReceiveTime = _time;
+                            }
+                            else if (_state == ClientState.SendingConnectionResponse)
+                            {
+                                NetcodeLog.Debug("client received connection keep alive packet from server\n");
 
-                            _lastPacketReceiveTime = _time;
-                            _clientIndex = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(0, 4));
-                            _maxClients = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(data.Slice(4, 4));
+                                _lastPacketReceiveTime = _time;
+                                _clientIndex = clientIndex;
+                                _maxClients = maxClients;
 
-                            SetState(ClientState.Connected);
+                                SetState(ClientState.Connected);
 
-                            NetcodeLog.Info("client connected to server\n");
+                                NetcodeLog.Info("client connected to server\n");
+                            }
                         }
                     }
                 }
