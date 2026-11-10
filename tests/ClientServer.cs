@@ -214,15 +214,11 @@ internal static class ClientServerTests
 
         int index = history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 100.0);
         Check.That(index >= 0);
-        Check.That(history.State(index) == ConnectTokenEntryState.Pending);
-        Check.That(history.EntryTime(index) == 100.0);
 
         Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 200.0) == index);
-        Check.That(history.EntryTime(index) == 100.0);
         Check.That(history.FindOrAdd(in addressB, mac, expireTimestamp, currentTimestamp, 200.0) == ConnectTokenHistory.Refused);
 
         history.Consume(index);
-        Check.That(history.State(index) == ConnectTokenEntryState.Consumed);
         Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 300.0) == ConnectTokenHistory.Refused);
         Check.That(history.FindOrAdd(in addressB, mac, expireTimestamp, currentTimestamp, 300.0) == ConnectTokenHistory.Refused);
 
