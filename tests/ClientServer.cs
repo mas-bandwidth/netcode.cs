@@ -919,14 +919,23 @@ internal static class ClientServerTests
 
         int disconnectCallbackCount = 0;
         Server? serverRef = null;
+        Address departingAddress = default;
+        byte[] departingUserData = new byte[Protocol.UserDataBytes];
         var serverConfig = CreateServerConfig(simulator);
         serverConfig.OnClientConnectDisconnect = (clientIndex, connected) =>
         {
             if (!connected)
             {
                 disconnectCallbackCount++;
+
+                // the departing client stays readable through the callback, already disconnected
+                Check.That(!serverRef!.ClientConnected(clientIndex));
+                Check.That(serverRef.ClientId(clientIndex) == 0x8);
+                Check.That(serverRef.ClientAddress(clientIndex).Equals(departingAddress));
+                Check.That(serverRef.ClientUserData(clientIndex).SequenceEqual(departingUserData));
+
                 if (disconnectCallbackCount == 1)
-                    serverRef!.DisconnectClient(clientIndex);
+                    serverRef.DisconnectClient(clientIndex);
             }
         };
 
@@ -942,8 +951,14 @@ internal static class ClientServerTests
 
         Check.That(client.State == ClientState.Connected);
 
+        departingAddress = server.ClientAddress(0);
+        Check.That(departingAddress.Type == AddressType.IPv6);
+        server.ClientUserData(0).CopyTo(departingUserData);
+
         server.DisconnectClient(0);
         Check.That(disconnectCallbackCount == 1);
+        Check.That(server.ClientId(0) == 0);
+        Check.That(server.ClientAddress(0).Type == AddressType.None);
 
         for (int i = 0; i < 10; i++)
         {

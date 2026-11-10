@@ -571,8 +571,6 @@ namespace Netcode
             _clientAddress[clientIndex] = default;
             _clientEncryptionIndex[clientIndex] = -1;
             _clientUserData.AsSpan(clientIndex * Protocol.UserDataBytes, Protocol.UserDataBytes).Clear();
-
-            _numConnectedClients--;
         }
 
         private void DisconnectClientInternal(int clientIndex, bool sendDisconnectPackets, DisconnectReason disconnectReason)
@@ -601,9 +599,15 @@ namespace Netcode
 
             _encryptionManager.RemoveEncryptionMapping(in _clientAddress[clientIndex], _time);
 
-            ResetClientSlot(clientIndex);
+            // mark the slot disconnected and count it out before the callback, so a re-entrant
+            // disconnect or stop is a no-op for this slot. the rest of the slot stays readable
+            // from inside the callback until the reset below.
+            _clientConnected[clientIndex] = false;
+            _numConnectedClients--;
 
             _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
+
+            ResetClientSlot(clientIndex);
         }
 
         /// <summary>Disconnect one client, sending redundant disconnect packets.</summary>
@@ -1268,6 +1272,8 @@ namespace Netcode
             _clientDisconnectReason[clientIndex] = DisconnectReason.ServerDisconnect;
 
             _config.OnClientConnectDisconnect?.Invoke(clientIndex, false);
+
+            _numConnectedClients--;
 
             ResetClientSlot(clientIndex);
         }
