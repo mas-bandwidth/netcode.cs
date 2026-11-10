@@ -479,12 +479,12 @@ internal static class Hostile
         using var client = new Client("127.0.0.1:50000", clientConfig, 0.0);
         using var server = new Server("127.0.0.1:40000", serverConfig, 0.0);
 
-        server.Start(1);
+        ClientServerTests.StartServer(server, 1);
 
         byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
         byte[] userData = new byte[Protocol.UserDataBytes];
         string[] address = { "127.0.0.1:40000" };
-        Check.That(ConnectTokenGenerator.Generate(address, address, 60, 15, 0x1234, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken));
+        Check.That(ConnectTokenGenerator.Generate(address, address, TestConstants.TestConnectTokenExpiry, 15, 0x1234, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken));
 
         client.Connect(connectToken);
 
@@ -546,12 +546,12 @@ internal static class Hostile
         using var client = new Client("127.0.0.1:50001", new ClientConfig(), time);
         using var server = new Server("127.0.0.1:40001", serverConfig, time);
 
-        server.Start(1);
+        ClientServerTests.StartServerAndWaitForNextSecond(server, 1);
 
         byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
         byte[] userData = new byte[Protocol.UserDataBytes];
         string[] address = { "127.0.0.1:40001" };
-        Check.That(ConnectTokenGenerator.Generate(address, address, 60, 15, 0x1234, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken));
+        Check.That(ConnectTokenGenerator.Generate(address, address, TestConstants.TestConnectTokenExpiry, 15, 0x1234, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken));
 
         client.Connect(connectToken);
 

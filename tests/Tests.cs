@@ -2035,7 +2035,7 @@ internal static class ConfigSnapshotTests
         Check.That(ConnectTokenGenerator.Generate(
             new[] { serverAddress },
             new[] { serverAddress },
-            TestConstants.TestConnectTokenExpiry + 1,
+            TestConstants.TestConnectTokenExpiry,
             TestConstants.TestTimeoutSeconds,
             clientId,
             TestConstants.TestProtocolId,
@@ -2088,7 +2088,7 @@ internal static class ConfigSnapshotTests
         serverConfig.ProtocolId = 0;
         Array.Clear(serverConfig.PrivateKey);
 
-        server.Start(1);
+        ClientServerTests.StartServer(server, 1);
 
         ulong clientId = new TestRng(0xC11E17).NextUInt64();
         client.Connect(GenerateConnectToken("[::1]:40000", clientId));

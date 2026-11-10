@@ -17,12 +17,12 @@ internal static class ClientServerTests
 {
     private delegate void ProcessAtTime(in Address from, Span<byte> packet, ulong timestamp);
 
-    internal static byte[] GenerateConnectToken(string serverAddress, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry + 1, int timeout = TestConstants.TestTimeoutSeconds)
+    internal static byte[] GenerateConnectToken(string serverAddress, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry, int timeout = TestConstants.TestTimeoutSeconds)
     {
         return GenerateConnectToken(new[] { serverAddress }, clientId, expiry, timeout);
     }
 
-    private static byte[] GenerateConnectToken(string[] serverAddresses, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry + 1, int timeout = TestConstants.TestTimeoutSeconds)
+    private static byte[] GenerateConnectToken(string[] serverAddresses, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry, int timeout = TestConstants.TestTimeoutSeconds)
     {
         byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
         byte[] userData = new byte[Protocol.UserDataBytes];
@@ -40,6 +40,32 @@ internal static class ClientServerTests
             PacketLossPercent = 5,
             DuplicatePacketPercent = 10,
         };
+    }
+
+    // the server refuses connect tokens issued in the second it started, so a test issues its
+    // tokens a second after its server starts. unit tests, whose unix clock is injected, start
+    // the server a second earlier; tests on the wall clock wait for the next second.
+
+    internal static void StartServer(Server server, int maxClients)
+    {
+        Func<ulong> now = UnixTime.Now;
+        UnixTime.Now = () => now() - 1;
+        try
+        {
+            server.Start(maxClients);
+        }
+        finally
+        {
+            UnixTime.Now = now;
+        }
+    }
+
+    internal static void StartServerAndWaitForNextSecond(Server server, int maxClients)
+    {
+        server.Start(maxClients);
+        ulong startSecond = UnixTime.Now();
+        while (UnixTime.Now() == startSecond)
+            Thread.Sleep(10);
     }
 
     internal static ServerConfig CreateServerConfig(NetworkSimulator? simulator)
@@ -196,7 +222,7 @@ internal static class ClientServerTests
         double deltaTime = 1.0 / 10.0;
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
-        server.Start(1);
+        StartServer(server, 1);
 
         byte[] connectToken = GenerateConnectToken("[::1]:40000", 0x1234);
         client.Connect(connectToken);
@@ -236,11 +262,26 @@ internal static class ClientServerTests
         Check.That(client.State == ClientState.ConnectionRequestTimedOut);
         Check.That(server.NumConnectedClients == 0);
 
-        simulator.Reset();
-        client.Connect(GenerateConnectToken("[::1]:40000", 0x5678, expiry: 31));
-        ConnectLoop(simulator, client, server, ref time, deltaTime);
-        Check.That(client.State == ClientState.Connected);
-        Check.That(server.NumConnectedClients == 1);
+        // a full-lifetime token issued in the next second is accepted
+        ConnectInNextSecond(simulator, client, server, ref time, deltaTime, 0x5678);
+    }
+
+    private static void ConnectInNextSecond(NetworkSimulator simulator, Client client, Server server, ref double time, double deltaTime, ulong clientId)
+    {
+        Func<ulong> now = UnixTime.Now;
+        UnixTime.Now = () => now() + 1;
+        try
+        {
+            simulator.Reset();
+            client.Connect(GenerateConnectToken("[::1]:40000", clientId));
+            ConnectLoop(simulator, client, server, ref time, deltaTime);
+            Check.That(client.State == ClientState.Connected);
+            Check.That(server.NumConnectedClients == 1);
+        }
+        finally
+        {
+            UnixTime.Now = now;
+        }
     }
 
     public static void TestClientErrorConnectTokenAtServerStart()
@@ -254,18 +295,15 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         server.Start(1);
 
-        // a token that expires in the same second the server started does not open a session
+        // a full-lifetime token issued in the second the server started expires exactly at the
+        // start floor, and does not open a session
         client.Connect(GenerateConnectToken("[::1]:40000", 0x1234, expiry: 30));
         ConnectLoop(simulator, client, server, ref time, deltaTime);
         Check.That(client.State == ClientState.ConnectionRequestTimedOut);
         Check.That(server.NumConnectedClients == 0);
 
-        // one second past the start floor does
-        simulator.Reset();
-        client.Connect(GenerateConnectToken("[::1]:40000", 0x5678, expiry: 31));
-        ConnectLoop(simulator, client, server, ref time, deltaTime);
-        Check.That(client.State == ClientState.Connected);
-        Check.That(server.NumConnectedClients == 1);
+        // the same lifetime issued in the next second does
+        ConnectInNextSecond(simulator, client, server, ref time, deltaTime, 0x5678);
     }
 
     public static void TestClientServerConnect()
@@ -278,7 +316,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         ulong clientId = new TestRng(0xC11E17).NextUInt64();
         client.Connect(GenerateConnectToken("[::1]:40000", clientId));
@@ -485,7 +523,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x1234));
 
@@ -528,7 +566,7 @@ internal static class ClientServerTests
 
         for (int i = 0; i < maxClients.Length; i++)
         {
-            server.Start(maxClients[i]);
+            StartServer(server, maxClients[i]);
 
             var clients = new Client[maxClients[i]];
             for (int j = 0; j < maxClients[i]; j++)
@@ -664,7 +702,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         // the first two addresses point at servers that do not exist; the client works
         // through them and connects to the third
@@ -755,7 +793,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x2));
 
@@ -789,7 +827,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         // the server ignores connection response packets, so the client hangs in
         // SendingConnectionResponse until it times out
@@ -823,7 +861,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         // the server ignores connection request packets, so the client hangs in
         // SendingConnectionRequest until it times out
@@ -860,7 +898,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x5));
 
@@ -903,7 +941,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x7));
 
@@ -966,7 +1004,7 @@ internal static class ClientServerTests
         using var server = new Server("[::1]:40000", serverConfig, time);
         serverRef = server;
 
-        server.Start(1);
+        StartServer(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x8));
 
@@ -1019,7 +1057,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", clientConfig, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         client.Connect(GenerateConnectToken(new[] { "[::1]:40000", "[::1]:40001" }, 0x8008, timeout: 5));
 
@@ -1075,7 +1113,7 @@ internal static class ClientServerTests
         using var server = new Server("[::1]:40000", serverConfig, time);
         serverRef = server;
 
-        server.Start(1);
+        StartServer(server, 1);
 
         // server-side disconnect
 
@@ -1138,7 +1176,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         ulong clientId = 0xCAFE;
 
@@ -1194,8 +1232,17 @@ internal static class ClientServerTests
         config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { };
         config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
         using var server = new Server("127.0.0.1:40000", config, 0.0);
-        server.Start(4);
-        typeof(Server).GetField("_minConnectTokenExpireTimestamp", Fields)!.SetValue(server, 0UL);
+        // the tokens below are issued 30 seconds after the server starts, so none falls under its start floor
+        Func<ulong> now = UnixTime.Now;
+        UnixTime.Now = () => 970;
+        try
+        {
+            server.Start(4);
+        }
+        finally
+        {
+            UnixTime.Now = now;
+        }
         var process = typeof(Server).GetMethod("ReadAndProcessPacket", Fields)!.CreateDelegate<ProcessAtTime>(server);
         var encryptionManager = (EncryptionManager)typeof(Server).GetField("_encryptionManager", Fields)!.GetValue(server)!;
         Address serverAddress = Address.Parse("127.0.0.1:40000");
@@ -1283,7 +1330,7 @@ internal static class ClientServerTests
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         // timeout of -1 disables timeouts entirely (dev only)
 
@@ -1381,7 +1428,7 @@ internal static class ClientServerTests
         loopbackClientRef = loopbackClient;
         serverRef = server;
 
-        server.Start(2);
+        StartServer(server, 2);
 
         // connect the loopback client to slot 0
 
@@ -1926,7 +1973,7 @@ internal static class FunctionalTests
         using var client = new Client(clientAddress, clientAddress2, null, time);
         using var server = new Server(serverAddress, serverAddress2, ClientServerTests.CreateServerConfig(null), time);
 
-        server.Start(1);
+        ClientServerTests.StartServerAndWaitForNextSecond(server, 1);
 
         ulong clientId = new TestRng((ulong)Environment.TickCount64 | 1).NextUInt64();
         client.Connect(ClientServerTests.GenerateConnectToken(connectAddress, clientId));
@@ -1975,7 +2022,7 @@ internal static class FunctionalTests
 
         string serverAddress = $"127.0.0.1:{port}";
         using var server = new Server(serverAddress, ClientServerTests.CreateServerConfig(null), time);
-        server.Start(1);
+        ClientServerTests.StartServerAndWaitForNextSecond(server, 1);
         using var client = new Client("127.0.0.1:0", null, time);
 
         client.Connect(ClientServerTests.GenerateConnectToken(serverAddress, 0xE001));
@@ -2071,7 +2118,7 @@ internal static class Soak
         TestConstants.PrivateKey.CopyTo(serverConfig.PrivateKey, 0);
 
         using var server = new Server("[::1]:40000", serverConfig, time);
-        server.Start(MaxClients);
+        ClientServerTests.StartServerAndWaitForNextSecond(server, MaxClients);
 
         var clients = new Client[MaxClients];
         for (int i = 0; i < MaxClients; i++)
@@ -2113,7 +2160,7 @@ internal static class Soak
                         byte[] userData = new byte[Protocol.UserDataBytes];
                         rng.Fill(userData);
                         string[] address = { "[::1]:40000" };
-                        if (!ConnectTokenGenerator.Generate(address, address, 60, 5, rng.NextUInt64(), TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken))
+                        if (!ConnectTokenGenerator.Generate(address, address, TestConstants.TestConnectTokenExpiry, 5, rng.NextUInt64(), TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken))
                         {
                             Console.WriteLine("soak: failed to generate connect token");
                             return 1;
