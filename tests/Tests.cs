@@ -15,6 +15,7 @@
 */
 
 using System;
+using System.Buffers.Binary;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 
@@ -74,7 +75,7 @@ internal sealed class TestRng
     public void Fill(Span<byte> data)
     {
         for (int i = 0; i < data.Length; i++)
-            data[i] = (byte)NextUInt64();
+            data[i] = unchecked((byte)NextUInt64());
     }
 }
 
@@ -125,6 +126,7 @@ internal static class Program
         RunTest("test_connection_disconnect_packet", () => CoreTests.TestEmptyPacket(PacketType.ConnectionDisconnect));
         RunTest("test_connect_token_public", CoreTests.TestConnectTokenPublic);
         RunTest("test_key_cleanup", CoreTests.TestKeyCleanup);
+        RunTest("test_wrapping_arithmetic", CoreTests.TestWrappingArithmetic);
         RunTest("test_encryption_manager", CoreTests.TestEncryptionManager);
         RunTest("test_replay_protection", CoreTests.TestReplayProtection);
         RunTest("test_network_simulator_determinism", CoreTests.TestNetworkSimulatorDeterminism);
@@ -1219,6 +1221,72 @@ internal static class CoreTests
         Check.That(manager.ReceiveKey.AsSpan(0, Protocol.KeyBytes).IndexOfAnyExcept((byte)0) == -1);
     }
 
+    public static void TestWrappingArithmetic()
+    {
+        // the crypto and token serialization rely on 32-bit wrapping and on
+        // reinterpreting int <-> uint. they must behave the same when the host
+        // build turns on CheckForOverflowUnderflow.
+
+        var rng = new TestRng(0x5EED);
+        byte[] key = new byte[Aead.KeyBytes];
+        rng.Fill(key);
+        byte[] nonce12 = new byte[Aead.NonceBytesIetf];
+        rng.Fill(nonce12);
+        byte[] nonce24 = new byte[Defines.ConnectTokenNonceBytes];
+        rng.Fill(nonce24);
+        byte[] ad = new byte[13];
+        rng.Fill(ad);
+        byte[] message = new byte[200]; // several chacha20 blocks
+        rng.Fill(message);
+
+        byte[] buffer = new byte[message.Length + Aead.MacBytes];
+        message.CopyTo(buffer, 0);
+        Aead.EncryptIetf(buffer, message.Length, ad, nonce12, key);
+        Check.That(!buffer.AsSpan(0, message.Length).SequenceEqual(message));
+        Check.That(Aead.DecryptIetf(buffer, buffer.Length, ad, nonce12, key));
+        Check.That(buffer.AsSpan(0, message.Length).SequenceEqual(message));
+
+        message.CopyTo(buffer, 0);
+        Aead.EncryptX(buffer, message.Length, ad, nonce24, key);
+        Check.That(!buffer.AsSpan(0, message.Length).SequenceEqual(message));
+        Check.That(Aead.DecryptX(buffer, buffer.Length, ad, nonce24, key));
+        Check.That(buffer.AsSpan(0, message.Length).SequenceEqual(message));
+
+        // negative timeout (-1 disables the timeout) round trips as 0xFFFFFFFF on the wire
+
+        Address serverAddress = TestServerAddress();
+        Span<Address> addresses = stackalloc Address[1] { serverAddress };
+        byte[] userData = new byte[Protocol.UserDataBytes];
+
+        var inputPrivate = new ConnectTokenPrivate();
+        inputPrivate.Generate(TestConstants.TestClientId, -1, addresses, userData);
+        byte[] privateData = new byte[Defines.ConnectTokenPrivateBytes];
+        inputPrivate.Write(privateData);
+        Check.That(BinaryPrimitives.ReadUInt32LittleEndian(privateData.AsSpan(8, 4)) == 0xFFFFFFFFu);
+        var outputPrivate = new ConnectTokenPrivate();
+        Check.That(outputPrivate.Read(privateData));
+        Check.That(outputPrivate.TimeoutSeconds == -1);
+
+        var inputPublic = new ConnectTokenData();
+        Defines.VersionInfo.CopyTo(inputPublic.VersionInfo);
+        inputPublic.ProtocolId = TestConstants.TestProtocolId;
+        inputPublic.CreateTimestamp = 1000;
+        inputPublic.ExpireTimestamp = 1030;
+        inputPublic.TimeoutSeconds = -1;
+        inputPublic.NumServerAddresses = 1;
+        inputPublic.ServerAddresses[0] = serverAddress;
+        byte[] publicData = new byte[Protocol.ConnectTokenBytes];
+        inputPublic.Write(publicData);
+        var outputPublic = new ConnectTokenData();
+        Check.That(outputPublic.Read(publicData));
+        Check.That(outputPublic.TimeoutSeconds == -1);
+
+        // a server address count with the top bit set is rejected, not thrown on
+
+        BinaryPrimitives.WriteUInt32LittleEndian(privateData.AsSpan(12, 4), 0xFFFFFFFFu);
+        Check.That(!new ConnectTokenPrivate().Read(privateData));
+    }
+
     public static void TestEncryptionManager()
     {
         var encryptionManager = new EncryptionManager();
@@ -1484,7 +1552,7 @@ internal static class CoreTests
         for (int i = 0; i < NumPackets; i++)
         {
             for (int j = 0; j < packetData.Length; j++)
-                packetData[j] = (byte)(i + j);
+                packetData[j] = unchecked((byte)(i + j));
             simulatorA.SendPacket(in from, in to, packetData);
             simulatorB.SendPacket(in from, in to, packetData);
         }

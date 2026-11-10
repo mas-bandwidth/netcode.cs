@@ -46,10 +46,13 @@ namespace Netcode
 
         private static void QuarterRound(ref uint a, ref uint b, ref uint c, ref uint d)
         {
-            a += b; d ^= a; d = BitOperations.RotateLeft(d, 16);
-            c += d; b ^= c; b = BitOperations.RotateLeft(b, 12);
-            a += b; d ^= a; d = BitOperations.RotateLeft(d, 8);
-            c += d; b ^= c; b = BitOperations.RotateLeft(b, 7);
+            unchecked
+            {
+                a += b; d ^= a; d = BitOperations.RotateLeft(d, 16);
+                c += d; b ^= c; b = BitOperations.RotateLeft(b, 12);
+                a += b; d ^= a; d = BitOperations.RotateLeft(d, 8);
+                c += d; b ^= c; b = BitOperations.RotateLeft(b, 7);
+            }
         }
 
         private static void ChaCha20Rounds(Span<uint> x)
@@ -92,7 +95,7 @@ namespace Netcode
             state.CopyTo(x);
             ChaCha20Rounds(x);
             for (int i = 0; i < 16; i++)
-                BinaryPrimitives.WriteUInt32LittleEndian(keystream64.Slice(i * 4, 4), x[i] + state[i]);
+                BinaryPrimitives.WriteUInt32LittleEndian(keystream64.Slice(i * 4, 4), unchecked(x[i] + state[i]));
         }
 
         /// <summary>ChaCha20 stream xor: dst = src ^ keystream(key, nonce, counter...).
@@ -108,7 +111,7 @@ namespace Netcode
             while (remaining > 0)
             {
                 Block(state, keystream);
-                state[12]++;
+                state[12] = unchecked(state[12] + 1);
                 int n = remaining < 64 ? remaining : 64;
                 for (int i = 0; i < n; i++)
                     dst[offset + i] = (byte)(src[offset + i] ^ keystream[i]);
@@ -200,9 +203,9 @@ namespace Netcode
                 UInt128 d1 = (UInt128)h0 * r1 + (UInt128)h1 * r0 + (UInt128)h2 * s2;
                 UInt128 d2 = (UInt128)h0 * r2 + (UInt128)h1 * r1 + (UInt128)h2 * r0;
 
-                ulong c = (ulong)(d0 >> 44); h0 = (ulong)d0 & 0xfffffffffffUL;
-                d1 += c; c = (ulong)(d1 >> 44); h1 = (ulong)d1 & 0xfffffffffffUL;
-                d2 += c; c = (ulong)(d2 >> 42); h2 = (ulong)d2 & 0x3ffffffffffUL;
+                ulong c = (ulong)(d0 >> 44); h0 = unchecked((ulong)d0) & 0xfffffffffffUL;
+                d1 += c; c = (ulong)(d1 >> 44); h1 = unchecked((ulong)d1) & 0xfffffffffffUL;
+                d2 += c; c = (ulong)(d2 >> 42); h2 = unchecked((ulong)d2) & 0x3ffffffffffUL;
                 h0 += c * 5; c = h0 >> 44; h0 &= 0xfffffffffffUL;
                 h1 += c;
 
@@ -272,7 +275,7 @@ namespace Netcode
             ulong g2 = unchecked(h2 + c - (1UL << 42));
 
             // select h if h < p, else h - p (constant time)
-            c = (g2 >> 63) - 1;
+            c = unchecked((g2 >> 63) - 1);
             g0 &= c; g1 &= c; g2 &= c;
             ulong nc = ~c;
             h0 = (h0 & nc) | g0;

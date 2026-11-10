@@ -15,6 +15,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <!-- wrapping arithmetic is marked unchecked(...) at each site; this keeps a
+         host's directory-wide setting from changing the library's behaviour. -->
+    <CheckForOverflowUnderflow>false</CheckForOverflowUnderflow>
   </PropertyGroup>
 
   <ItemGroup>
