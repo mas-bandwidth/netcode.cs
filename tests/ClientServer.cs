@@ -1094,6 +1094,7 @@ internal static class ClientServerTests
         Address secondAddress = Address.Parse("127.0.0.1:50001");
         Address thirdAddress = Address.Parse("127.0.0.1:50002");
         Address fourthAddress = Address.Parse("127.0.0.1:50003");
+        Address fifthAddress = Address.Parse("127.0.0.1:50004");
 
         void Request(in Address from, ulong clientId, ulong expireTimestamp, double time, int timeout = -1)
         {
@@ -1136,6 +1137,15 @@ internal static class ClientServerTests
         Request(in fourthAddress, 0x1004, 1030, 11.0);
         Check.That(encryptionManager.NumEncryptionMappings == 2);
         Check.That(encryptionManager.Address[1].Equals(fourthAddress));
+
+        // a negative timeout is bounded by the pre-connect lifetime even when the
+        // token has much longer to live
+        server.Update(22.0);
+        Check.That(encryptionManager.EntryExpired(1, server.Time));
+
+        Request(in fifthAddress, 0x1005, 1030, 22.0);
+        Check.That(encryptionManager.NumEncryptionMappings == 2);
+        Check.That(encryptionManager.FindEncryptionMapping(in fifthAddress, server.Time) != -1);
     }
 
     public static void TestDisableTimeout()
