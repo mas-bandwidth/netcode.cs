@@ -56,6 +56,9 @@ namespace Netcode
                     mac.SequenceEqual(_mac.AsSpan(i * Protocol.MacBytes, Protocol.MacBytes)))
                     matchingTokenIndex = i;
 
+                // a token minted without expiry (expireTimestamp == ulong.MaxValue) never
+                // satisfies this reclaim check, so its history entry is never reusable
+                // during the server run
                 if (freeTokenIndex == -1 &&
                     (_state[i] == ConnectTokenEntryState.Free || _expireTimestamp[i] <= currentTimestamp))
                     freeTokenIndex = i;
