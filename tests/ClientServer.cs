@@ -168,8 +168,8 @@ internal static class ClientServerTests
         for (int i = 1; i < ConnectTokenHistory.MaxEntries; i++)
         {
             mac = new byte[Protocol.MacBytes];
-            mac[0] = (byte)(i + 1);
-            mac[1] = (byte)((i + 1) >> 8);
+            mac[0] = unchecked((byte)(i + 1));
+            mac[1] = unchecked((byte)((i + 1) >> 8));
             Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 400.0) >= 0);
         }
 
@@ -269,7 +269,7 @@ internal static class ClientServerTests
 
         byte[] packetData = new byte[Protocol.MaxPacketSize];
         for (int i = 0; i < packetData.Length; i++)
-            packetData[i] = (byte)i;
+            packetData[i] = unchecked((byte)i);
 
         byte[] received = new byte[Protocol.MaxPacketSize];
 
@@ -534,7 +534,7 @@ internal static class ClientServerTests
 
             byte[] packetData = new byte[Protocol.MaxPacketSize];
             for (int j = 0; j < packetData.Length; j++)
-                packetData[j] = (byte)j;
+                packetData[j] = unchecked((byte)j);
 
             byte[] received = new byte[Protocol.MaxPacketSize];
 
@@ -1096,7 +1096,7 @@ internal static class ClientServerTests
 
         byte[] packetData = new byte[Protocol.MaxPacketSize];
         for (int i = 0; i < packetData.Length; i++)
-            packetData[i] = (byte)i;
+            packetData[i] = unchecked((byte)i);
 
         byte[] received = new byte[Protocol.MaxPacketSize];
 
@@ -1145,7 +1145,7 @@ internal static class ClientServerTests
 
         byte[] packetData = new byte[Protocol.MaxPacketSize];
         for (int i = 0; i < packetData.Length; i++)
-            packetData[i] = (byte)i;
+            packetData[i] = unchecked((byte)i);
 
         Client? loopbackClientRef = null;
         Server? serverRef = null;
@@ -1731,7 +1731,7 @@ internal static class FunctionalTests
 
         byte[] packetData = new byte[32];
         for (int i = 0; i < packetData.Length; i++)
-            packetData[i] = (byte)(i ^ 0x5A);
+            packetData[i] = unchecked((byte)(i ^ 0x5A));
 
         const int emptyDatagrams = 8;
         using (var sender = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
