@@ -773,10 +773,19 @@ namespace Netcode
         /// Generate a connect token into <paramref name="output"/> (2048 bytes).
         /// <paramref name="publicServerAddresses"/> go into the public portion the
         /// client connects to; <paramref name="internalServerAddresses"/> go into the
-        /// encrypted private portion the server validates against. expireSeconds
-        /// and timeoutSeconds negative values disable expiry/timeout (dev only).
-        /// Returns false on invalid input.
+        /// encrypted private portion the server validates against. A negative
+        /// expireSeconds disables expiry and a negative timeoutSeconds disables
+        /// timeout; both are for development and testing only. Returns false on
+        /// invalid input.
         /// </summary>
+        /// <remarks>
+        /// A negative <paramref name="expireSeconds"/> sets the token's expire timestamp
+        /// to <c>ulong.MaxValue</c>. Such a token always passes the server's minimum
+        /// connect token expire timestamp, so it remains valid across server restarts for
+        /// as long as the server uses the same private key and protocol id. Its entry in
+        /// the server's connect token history never satisfies the expiry check that
+        /// reclaims entries, so that entry is never reusable during the server run.
+        /// </remarks>
         public static bool Generate(
             string[] publicServerAddresses,
             string[] internalServerAddresses,
