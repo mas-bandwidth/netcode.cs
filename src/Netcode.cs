@@ -1552,6 +1552,7 @@ namespace Netcode
         public readonly Address[] Address = new Address[MaxEncryptionMappings];
         public readonly int[] ClientIndex = new int[MaxEncryptionMappings];
         public readonly int[] ConnectTokenEntryIndex = new int[MaxEncryptionMappings];
+        public readonly byte[] ConnectTokenMac = new byte[Protocol.MacBytes * MaxEncryptionMappings];
         public readonly byte[] SendKey = new byte[Protocol.KeyBytes * MaxEncryptionMappings];
         public readonly byte[] ReceiveKey = new byte[Protocol.KeyBytes * MaxEncryptionMappings];
 
@@ -1576,6 +1577,7 @@ namespace Netcode
             }
 
             Array.Clear(Timeout);
+            Array.Clear(ConnectTokenMac);
             CryptographicOperations.ZeroMemory(SendKey);
             CryptographicOperations.ZeroMemory(ReceiveKey);
         }
@@ -1592,7 +1594,7 @@ namespace Netcode
             return expired;
         }
 
-        public bool AddEncryptionMapping(in Address address, ReadOnlySpan<byte> sendKey, ReadOnlySpan<byte> receiveKey, double time, double expireTime, int timeout, int connectTokenEntryIndex = -1)
+        public bool AddEncryptionMapping(in Address address, ReadOnlySpan<byte> sendKey, ReadOnlySpan<byte> receiveKey, double time, double expireTime, int timeout, int connectTokenEntryIndex = -1, ReadOnlySpan<byte> connectTokenMac = default)
         {
             for (int i = 0; i < NumEncryptionMappings; i++)
             {
@@ -1602,6 +1604,7 @@ namespace Netcode
                     ExpireTime[i] = expireTime;
                     LastAccessTime[i] = time;
                     ConnectTokenEntryIndex[i] = connectTokenEntryIndex;
+                    SetConnectTokenMac(i, connectTokenMac);
                     sendKey.CopyTo(SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     receiveKey.CopyTo(ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     return true;
@@ -1618,6 +1621,7 @@ namespace Netcode
                     ExpireTime[i] = expireTime;
                     LastAccessTime[i] = time;
                     ConnectTokenEntryIndex[i] = connectTokenEntryIndex;
+                    SetConnectTokenMac(i, connectTokenMac);
                     sendKey.CopyTo(SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     receiveKey.CopyTo(ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     if (i + 1 > NumEncryptionMappings)
@@ -1638,6 +1642,7 @@ namespace Netcode
                     ExpireTime[i] = -1.0;
                     LastAccessTime[i] = -1000.0;
                     ConnectTokenEntryIndex[i] = -1;
+                    SetConnectTokenMac(i, default);
                     Address[i] = default;
                     CryptographicOperations.ZeroMemory(SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     CryptographicOperations.ZeroMemory(ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
@@ -1693,6 +1698,20 @@ namespace Netcode
             if (index == -1)
                 return -1;
             return ConnectTokenEntryIndex[index];
+        }
+
+        private void SetConnectTokenMac(int index, ReadOnlySpan<byte> mac)
+        {
+            Span<byte> slot = ConnectTokenMac.AsSpan(index * Protocol.MacBytes, Protocol.MacBytes);
+            if (mac.Length == Protocol.MacBytes)
+                mac.CopyTo(slot);
+            else
+                slot.Clear();
+        }
+
+        public ReadOnlySpan<byte> GetConnectTokenMac(int index)
+        {
+            return ConnectTokenMac.AsSpan(index * Protocol.MacBytes, Protocol.MacBytes);
         }
 
         public Span<byte> GetSendKey(int index)
