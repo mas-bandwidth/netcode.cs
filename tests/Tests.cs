@@ -39,6 +39,7 @@ internal static class TestConstants
     public const int TestServerPort = 40000;
     public const int TestConnectTokenExpiry = 30;
     public const int TestTimeoutSeconds = 15;
+    public const ulong TestUnixTime = 1000;
 
     // TEST KEY ONLY — same fixed key as the C reference test suite. Obviously
     // non-production: it is published in two public repositories.
@@ -114,6 +115,27 @@ internal static class Program
         if (args.Length > 0)
             _filter = args[0];
 
+        if (_functional)
+        {
+            Console.WriteLine("[netcode.cs functional tests]\n");
+
+            RunTest("test_client_create", FunctionalTests.TestClientCreate);
+            RunTest("test_server_create", FunctionalTests.TestServerCreate);
+            RunTest("test_client_server_ipv4_socket_connect", FunctionalTests.TestClientServerIpv4SocketConnect);
+            RunTest("test_client_server_ipv6_socket_connect", FunctionalTests.TestClientServerIpv6SocketConnect);
+            RunTest("test_client_server_dual_socket_connect", FunctionalTests.TestClientServerDualSocketConnect);
+            RunTest("test_client_create_port_in_use", ClientServerTests.TestClientCreatePortInUse);
+            RunTest("test_server_create_port_in_use", ClientServerTests.TestServerCreatePortInUse);
+            RunTest("test_packet_tagging", ClientServerTests.TestPacketTagging);
+            RunTest("test_zero_allocation_socket_steady_state", Hostile.TestZeroAllocationSocketSteadyState);
+
+            Console.WriteLine("\nAll functional tests passed.");
+            return 0;
+        }
+
+        // the unit tier never reads the wall clock: unix time is injected
+        UnixTime.Now = () => TestConstants.TestUnixTime;
+
         Console.WriteLine("[netcode.cs tests]\n");
 
         RunTest("test_socket_connection_reset_control", CoreTests.TestSocketConnectionResetControl);
@@ -142,16 +164,12 @@ internal static class Program
         RunTest("test_network_simulator_determinism", CoreTests.TestNetworkSimulatorDeterminism);
         RunTest("FloatMultiplyAddRoundsTwice", CoreTests.FloatMultiplyAddRoundsTwice);
         RunTest("test_ipv6_traffic_class_option", CoreTests.TestIpv6TrafficClassOption);
-        RunTest("test_client_create", ClientServerTests.TestClientCreate);
-        RunTest("test_server_create", ClientServerTests.TestServerCreate);
+        RunTest("test_client_server_address_families", ClientServerTests.TestClientServerAddressFamilies);
         RunTest("test_server_restart_global_sequence", ClientServerTests.TestServerRestartGlobalSequence);
         RunTest("test_connect_token_history", ClientServerTests.TestConnectTokenHistory);
         RunTest("test_client_reconnect_used_connect_token", ClientServerTests.TestClientReconnectUsedConnectToken);
         RunTest("test_client_error_connect_token_predates_server_start", ClientServerTests.TestClientErrorConnectTokenPredatesServerStart);
         RunTest("test_client_server_connect", ClientServerTests.TestClientServerConnect);
-        RunTest("test_client_server_ipv4_socket_connect", ClientServerTests.TestClientServerIpv4SocketConnect);
-        RunTest("test_client_server_ipv6_socket_connect", ClientServerTests.TestClientServerIpv6SocketConnect);
-        RunTest("test_client_server_dual_socket_connect", ClientServerTests.TestClientServerDualSocketConnect);
         RunTest("test_client_server_keep_alive", ClientServerTests.TestClientServerKeepAlive);
         RunTest("test_client_server_multiple_clients", ClientServerTests.TestClientServerMultipleClients);
         RunTest("test_client_server_multiple_servers", ClientServerTests.TestClientServerMultipleServers);
@@ -173,20 +191,14 @@ internal static class Program
         RunTest("test_client_loopback_requires_callback", ClientServerTests.TestClientLoopbackRequiresCallback);
         RunTest("test_server_loopback_requires_callback", ClientServerTests.TestServerLoopbackRequiresCallback);
 
-        // replay protection within a session (unit), port-in-use create errors and
-        // packet tagging (functional: real loopback sockets on ephemeral ports)
         RunTest("test_replay_protection_duplicate_packet", SessionReplayTests.TestReplayProtectionDuplicatePacket);
         RunTest("test_replay_protection_failed_decrypt", SessionReplayTests.TestReplayProtectionFailedDecrypt);
-        RunTest("test_client_create_port_in_use", ClientServerTests.TestClientCreatePortInUse);
-        RunTest("test_server_create_port_in_use", ClientServerTests.TestServerCreatePortInUse);
-        RunTest("test_packet_tagging", ClientServerTests.TestPacketTagging);
 
         RunTest("test_fuzz_read_packet_raw", Hostile.TestFuzzReadPacketRaw);
         RunTest("test_fuzz_packet_round_trip_corruption", Hostile.TestFuzzPacketRoundTripCorruption);
         RunTest("test_fuzz_connect_token", Hostile.TestFuzzConnectToken);
         RunTest("test_fuzz_parse_address", Hostile.TestFuzzParseAddress);
         RunTest("test_zero_allocation_steady_state", Hostile.TestZeroAllocationSteadyState);
-        RunTest("test_zero_allocation_socket_steady_state", Hostile.TestZeroAllocationSocketSteadyState);
 
         Console.WriteLine("\nAll tests passed.");
         return 0;
@@ -845,7 +857,7 @@ internal static class CoreTests
 
         // encrypt the buffer
 
-        ulong expireTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 30;
+        ulong expireTimestamp = UnixTime.Now() + 30;
         byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
         Rng.GenerateNonce(nonce);
         byte[] key = new byte[Protocol.KeyBytes];
@@ -954,7 +966,7 @@ internal static class CoreTests
 
         byte[] encryptedConnectTokenData = (byte[])connectTokenData.Clone();
 
-        ulong expireTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 30;
+        ulong expireTimestamp = UnixTime.Now() + 30;
         byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
         Rng.GenerateNonce(nonce);
         byte[] key = new byte[Protocol.KeyBytes];
@@ -975,7 +987,7 @@ internal static class CoreTests
             buffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, new byte[Protocol.KeyBytes],
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: true, key,
             AllAllowed, null);
 
@@ -1004,7 +1016,7 @@ internal static class CoreTests
             buffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, packetKey,
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
             AllAllowed, null);
 
@@ -1032,7 +1044,7 @@ internal static class CoreTests
             buffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, packetKey,
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
             AllAllowed, null);
 
@@ -1059,7 +1071,7 @@ internal static class CoreTests
             buffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, packetKey,
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
             AllAllowed, null);
 
@@ -1084,7 +1096,7 @@ internal static class CoreTests
             buffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, packetKey,
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
             AllAllowed, null);
 
@@ -1109,7 +1121,7 @@ internal static class CoreTests
         byte[] connectTokenPrivateData = new byte[Defines.ConnectTokenPrivateBytes];
         connectTokenPrivate.Write(connectTokenPrivateData);
 
-        ulong createTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        ulong createTimestamp = UnixTime.Now();
         ulong expireTimestamp = createTimestamp + 30;
         byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
         Rng.GenerateNonce(nonce);

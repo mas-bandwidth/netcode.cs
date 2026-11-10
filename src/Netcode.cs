@@ -156,6 +156,13 @@ namespace Netcode
         public void Skip(int count) { _position += count; }
     }
 
+    // wall-clock unix seconds, for connect token timestamps. internal so the unit
+    // tests can inject time instead of reading the real clock.
+    internal static class UnixTime
+    {
+        internal static Func<ulong> Now = () => (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+    }
+
     internal static class Rng
     {
         public static void Fill(Span<byte> data) => RandomNumberGenerator.Fill(data);
@@ -830,7 +837,7 @@ namespace Netcode
             Span<byte> nonce = stackalloc byte[Defines.ConnectTokenNonceBytes];
             Rng.GenerateNonce(nonce);
 
-            ulong createTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong createTimestamp = UnixTime.Now();
             ulong expireTimestamp = expireSeconds >= 0 ? createTimestamp + (ulong)expireSeconds : 0xFFFFFFFFFFFFFFFFUL;
 
             return GenerateInternal(parsedPublic.Slice(0, numServerAddresses), parsedInternal.Slice(0, numServerAddresses),
