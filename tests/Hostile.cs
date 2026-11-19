@@ -137,6 +137,8 @@ internal static class Hostile
         rng.Fill(privateKey);
 
         byte[] packetData = new byte[Defines.MaxPayloadBytes];
+        byte[] clientSalt = new byte[Defines.ConnectSaltBytes];
+        byte[] serverNonce = new byte[Defines.ServerNonceBytes];
         byte[] buffer = new byte[2048];
 
         for (int iteration = 0; iteration < 2000; iteration++)
@@ -156,13 +158,14 @@ internal static class Hostile
                 ulong expireTimestamp = rng.NextUInt64() | (1UL << 62) | 1; // cannot be zeroed by one byte flip
                 byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
                 rng.Fill(nonce);
+                rng.Fill(clientSalt);
 
                 byte[] tokenData = new byte[Defines.ConnectTokenPrivateBytes];
                 rng.Fill(tokenData.AsSpan(0, Defines.ConnectTokenPrivateBytes - Protocol.MacBytes));
 
                 Check.That(ConnectTokenPrivate.Encrypt(tokenData, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, privateKey));
 
-                bytesWritten = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, tokenData);
+                bytesWritten = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, tokenData, clientSalt);
                 expectedDataLength = Defines.ConnectTokenPrivateBytes;
                 sequence = 0;
             }
@@ -177,8 +180,18 @@ internal static class Hostile
                 };
 
                 rng.Fill(packetData.AsSpan(0, dataLength));
+                bool hasServerNonce = packetType == PacketType.ConnectionDenied || packetType == PacketType.ConnectionChallenge;
+                if (hasServerNonce)
+                    rng.Fill(serverNonce);
 
-                bytesWritten = PacketIO.WriteEncryptedPacket(buffer, packetType, packetData.AsSpan(0, dataLength), sequence, packetKey, TestConstants.TestProtocolId);
+                bytesWritten = PacketIO.WriteEncryptedPacket(
+                    buffer,
+                    packetType,
+                    packetData.AsSpan(0, dataLength),
+                    sequence,
+                    packetKey,
+                    TestConstants.TestProtocolId,
+                    hasServerNonce ? serverNonce : ReadOnlySpan<byte>.Empty);
                 expectedDataLength = dataLength;
             }
 
@@ -186,8 +199,12 @@ internal static class Hostile
 
             byte[] original = buffer.AsSpan(0, bytesWritten).ToArray();
 
+            int corruptOffset = -1;
             if (corrupt)
-                buffer[rng.Next(bytesWritten)] ^= corruptXor;
+            {
+                corruptOffset = rng.Next(bytesWritten);
+                buffer[corruptOffset] ^= corruptXor;
+            }
 
             ReadPacketResult result = PacketIO.ReadPacket(
                 buffer.AsSpan(0, bytesWritten),
@@ -199,9 +216,29 @@ internal static class Hostile
 
             if (!corrupt)
             {
-                Check.That(result.Type == packetType);
-                Check.That(result.Sequence == sequence);
-                Check.That(result.DataLength == expectedDataLength);
+                if (packetType != PacketType.ConnectionRequest && sequence == ulong.MaxValue)
+                {
+                    Check.That(result.Type == -1);
+                }
+                else
+                {
+                    Check.That(result.Type == packetType);
+                    Check.That(result.Sequence == sequence);
+                    Check.That(result.DataLength == expectedDataLength);
+                    if (packetType == PacketType.ConnectionRequest)
+                        Check.That(buffer.AsSpan(result.NonceOffset, Defines.ConnectSaltBytes).SequenceEqual(clientSalt));
+                    else if (packetType == PacketType.ConnectionDenied || packetType == PacketType.ConnectionChallenge)
+                        Check.That(buffer.AsSpan(result.NonceOffset, Defines.ServerNonceBytes).SequenceEqual(serverNonce));
+                }
+            }
+            else if (packetType == PacketType.ConnectionRequest &&
+                     corruptOffset >= PacketIO.ConnectionRequestPacketBytes - Defines.ConnectSaltBytes)
+            {
+                // client_salt at the tail of a connection request is bound into the derived
+                // packet keys via HChaCha20 (rather than the token's backend MAC), so modifying
+                // it produces the altered salt and causes subsequent packets to fail AEAD.
+                Check.That(result.Type == PacketType.ConnectionRequest);
+                Check.That(!buffer.AsSpan(result.NonceOffset, Defines.ConnectSaltBytes).SequenceEqual(clientSalt));
             }
             else
             {

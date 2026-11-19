@@ -1,11 +1,12 @@
 /*
-    Crypto.cs — the two AEAD constructions netcode uses on the wire.
+    Crypto.cs — the AEAD and key-derivation constructions netcode uses on the wire.
 
     C# port of the slice of libsodium that the C reference implementation vendors
     (see sodium/NOTES.md in mas-bandwidth/netcode):
 
         crypto_aead_chacha20poly1305_ietf_{encrypt,decrypt}   (RFC 8439)
         crypto_aead_xchacha20poly1305_ietf_{encrypt,decrypt}  (HChaCha20 subkey + IETF)
+        crypto_core_hchacha20                                 (NETCODE 1.03 per-connection packet keys)
 
     This is a single, fully managed production path — no platform primitive, no
     P/Invoke — so behavior is identical on every OS and TFM. The BCL's
@@ -421,6 +422,20 @@ namespace Netcode
             HChaCha20(subkey, key, nonce24.Slice(0, 16));
             ietfNonce.Slice(0, 4).Clear();
             nonce24.Slice(16, 8).CopyTo(ietfNonce.Slice(4));
+        }
+
+        /// <summary>
+        /// Derive a 32-byte per-connection packet key from a 32-byte connect token root key,
+        /// 8-byte client salt, and 8-byte server nonce via HChaCha20(key, clientSalt ‖ serverNonce).
+        /// Matches netcode_derive_packet_key (crypto_core_hchacha20 with NULL constant).
+        /// </summary>
+        public static void DerivePacketKey(Span<byte> packetKey, ReadOnlySpan<byte> tokenKey, ReadOnlySpan<byte> clientSalt, ReadOnlySpan<byte> serverNonce)
+        {
+            Span<byte> input = stackalloc byte[16];
+            clientSalt.Slice(0, 8).CopyTo(input.Slice(0, 8));
+            serverNonce.Slice(0, 8).CopyTo(input.Slice(8, 8));
+            HChaCha20(packetKey.Slice(0, KeyBytes), tokenKey.Slice(0, KeyBytes), input);
+            CryptographicOperations.ZeroMemory(input);
         }
     }
 }

@@ -1,7 +1,7 @@
 # netcode.cs port map
 
 C# port of [mas-bandwidth/netcode](https://github.com/mas-bandwidth/netcode)
-(C reference, version 1.4.8, protocol "NETCODE 1.02"). The WIRE is the C
+(C reference, version 1.5.0, protocol "NETCODE 1.03"). The WIRE is the C
 library's, byte-exact; the API is idiomatic C#, mirroring the C library's
 non-blocking update-loop model (games call `Update()` each frame — no async
 redesign).
@@ -29,18 +29,22 @@ redesign).
 
 ## Crypto construction inventory (exact)
 
-Confirmed from `netcode.c` (netcode_encrypt_aead*/netcode_decrypt_aead*) and
-`sodium/NOTES.md` — the C library uses exactly two libsodium constructions:
+Confirmed from `netcode.c` (`netcode_encrypt_aead*`/`netcode_decrypt_aead*`/`netcode_derive_packet_key`) and
+`sodium/NOTES.md` — the C library uses three libsodium constructions:
 
 1. `crypto_aead_xchacha20poly1305_ietf_{encrypt,decrypt}` — **private connect
    token only**. 24-byte random nonce, AD = version info (13) ‖ protocol id
    (u64 LE) ‖ expire timestamp (u64 LE). Encrypts bytes [0,1008), MAC in
    [1008,1024).
-2. `crypto_aead_chacha20poly1305_ietf_{encrypt,decrypt}` (RFC 8439) —
+2. `crypto_core_hchacha20` — **per-connection packet key derivation**
+   (`NETCODE 1.03`). Input = `client_salt` (8B) ‖ `server_nonce` (8B), key =
+   32B root C2S or S2C key from connect token, constant = `NULL` (Sigma).
+3. `crypto_aead_chacha20poly1305_ietf_{encrypt,decrypt}` (RFC 8439) —
    **challenge tokens** (no AD, nonce = 4 zero bytes ‖ sequence u64 LE, key =
    random per server start, sequence starts 0) and **encrypted packets**
-   (AD = version info ‖ protocol id ‖ prefix byte, nonce = 4 zero bytes ‖
-   packet sequence u64 LE).
+   (22-byte AD = version info ‖ protocol id ‖ prefix byte for types 3..6;
+   30-byte AD appending 8-byte `server_nonce` for types 1 and 2; nonce =
+   4 zero bytes ‖ packet sequence u64 LE).
 
 Plus `randombytes_buf` (keys, token nonces) and `crypto_verify_*`
 (constant-time comparison; in netcode used inside the AEAD tag check).
@@ -122,17 +126,21 @@ expire timestamp is below server start time + `ServerConfig.MaxConnectTokenLifet
 - Encryption mapping expires after `timeout` seconds without access, or at
   `expire_time` (token timeout after request, cleared to −1 on connect).
 - Global packet sequence starts at `1UL<<63` on every `Server.Start` (nonce
-  disjointness vs per-client sequences starting at 0 under the same key).
+  disjointness vs per-client sequences starting at 0 under the same derived
+  per-connection server-to-client key; HChaCha20 derivation over `client_salt`
+  and `server_nonce` keeps keys disjoint across attempts and servers).
 - Connect token single-use history: constant-time worst-case scan; pending and
-  consumed states; expiry timestamps; pending same-address retransmits only;
-  no eviction while entries are unexpired; entry time is never refreshed.
+  consumed states; expiry timestamps; pending same-address, same-`client_salt`
+  retransmits within `timeout_seconds` of creation only; half-open valid
+  disconnect consumes the entry and removes the mapping; no eviction while
+  entries are unexpired; entry time is never refreshed.
 - Client timeout uses `last_packet_receive_time + timeout < time`; server
   uses `<= time`. (Yes, they differ in the C source; ported as-is.)
 
 ## Test inventory
 
-The runner (`tests/Tests.cs`, `Program.Main`) has 78 named tests in two tiers.
-The default run is the unit tier (69 tests): it opens no OS sockets, never
+The runner (`tests/Tests.cs`, `Program.Main`) has 85 named tests in two tiers.
+The default run is the unit tier (76 tests): it opens no OS sockets, never
 sleeps, and fixes the clock at `TestConstants.TestUnixTime`. `--functional`
 runs the functional tier (9 tests: client/server create, the three real UDP
 socket connects, the two port-in-use creates, packet tagging, and the socket
@@ -140,12 +148,19 @@ zero-allocation check). `-- soak <n>` runs the bounded soak (`Soak` in
 `tests/ClientServer.cs`) instead.
 
 Same name as a `RUN_TEST` in netcode.c (at the interop pin): crypto_aead_vectors
-(same golden bytes), queue, sequence, address, connect_token (private),
+(same golden bytes), derive_packet_keys_kat, wire_kat_vectors, queue, sequence,
+address, connect_token (private),
 generate_connect_token_out_of_range (runtime check, not assert),
 challenge_token, all 7 packet read/write tests, connect_token_public,
 encryption_manager, replay_protection, network_simulator_determinism,
 client_create and server_create (functional tier), server_restart_global_sequence,
-client_error_connect_token_predates_server_start, client_server_connect
+client_error_connect_token_predates_server_start,
+client_reconnect_after_unfinished_handshake,
+client_reconnect_after_aborted_handshake,
+client_reconnect_sub_timeout_packet_loss,
+client_replayed_challenge_on_reused_token,
+multiple_servers_nonce_disjoint,
+client_server_connect
 (simulator), ipv4/ipv6/dual socket connect (functional tier; real UDP
 loopback), keep_alive, multiple_clients, multiple_servers, the six
 client_error_* state tests, client/server side disconnect,
@@ -216,6 +231,6 @@ functions. Legs (all must pass, `scripts/interop.sh`):
    observable behavior (states, client index, payload bytes).
 4. **Session C# server ↔ C client**: token minted by C, reverse of 3.
 
-CI pins the C clone to a fixed netcode ref (`d6bc96da…` in
-`.github/workflows/ci.yml`, netcode 1.4.10) and builds the C half with
+CI pins the C clone to a fixed netcode ref (`776b822…` in
+`.github/workflows/ci.yml`, netcode 1.5.0) and builds the C half with
 `-ffp-contract=off`.
