@@ -3,7 +3,7 @@
 
     C# port of netcode (https://github.com/mas-bandwidth/netcode), the C reference
     implementation of the netcode protocol: secure client/server connections over
-    UDP. Protocol "NETCODE 1.02"; the wire is byte-identical to the C library.
+    UDP. Protocol "NETCODE 1.03"; the wire is byte-identical to the C library.
 
     This file holds the protocol objects: addresses, connect tokens, challenge
     tokens, packet read/write, replay protection, the encryption manager, packet
@@ -51,15 +51,17 @@ namespace Netcode
         /// <summary>Largest payload accepted by SendPacket / delivered by ReceivePacket.</summary>
         public const int MaxPacketSize = 1200;
         /// <summary>The protocol version string carried on the wire (13 bytes with null terminator).</summary>
-        public const string VersionInfo = "NETCODE 1.02";
+        public const string VersionInfo = "NETCODE 1.03";
     }
 
     internal static class Defines
     {
         public const int ConnectTokenNonceBytes = 24;
         public const int ConnectTokenPrivateBytes = 1024;
+        public const int ConnectSaltBytes = 8;
+        public const int ServerNonceBytes = 8;
         public const int ChallengeTokenBytes = 300;
-        public const int VersionInfoBytes = 13; // "NETCODE 1.02" with null terminator
+        public const int VersionInfoBytes = 13; // "NETCODE 1.03" with null terminator
         public const int MaxPacketBytes = 1300;
         public const int MaxPayloadBytes = 1200;
         public const int MaxAddressStringLength = 256;
@@ -72,8 +74,8 @@ namespace Netcode
         public const double PacketSendRate = 10.0;
         public const int NumDisconnectPackets = 10;
 
-        // "NETCODE 1.02" ASCII with null terminator — 13 bytes
-        public static ReadOnlySpan<byte> VersionInfo => "NETCODE 1.02\0"u8;
+        // "NETCODE 1.03" ASCII with null terminator — 13 bytes
+        public static ReadOnlySpan<byte> VersionInfo => "NETCODE 1.03\0"u8;
     }
 
     // ------------------------------------------------------------------
@@ -922,6 +924,7 @@ namespace Netcode
         public int Type;            // -1 when the packet was rejected
         public ulong Sequence;
         public ulong ConnectTokenExpireTimestamp;
+        public int NonceOffset;     // offset of client_salt (Request) or server_nonce (Denied/Challenge) in the buffer
         public int DataOffset;      // offset of decrypted per-packet-type data in the buffer
         public int DataLength;      // length of decrypted per-packet-type data
     }
@@ -929,7 +932,7 @@ namespace Netcode
     internal static class PacketIO
     {
         public const int ConnectionRequestPacketBytes =
-            1 + Defines.VersionInfoBytes + 8 + 8 + Defines.ConnectTokenNonceBytes + Defines.ConnectTokenPrivateBytes; // 1078
+            1 + Defines.VersionInfoBytes + 8 + 8 + Defines.ConnectTokenNonceBytes + Defines.ConnectTokenPrivateBytes + Defines.ConnectSaltBytes; // 1086
 
         public static int SequenceNumberBytesRequired(ulong sequence)
         {
@@ -950,7 +953,8 @@ namespace Netcode
             ulong protocolId,
             ulong expireTimestamp,
             ReadOnlySpan<byte> nonce,
-            ReadOnlySpan<byte> privateData)
+            ReadOnlySpan<byte> privateData,
+            ReadOnlySpan<byte> clientSalt)
         {
             var writer = new ByteWriter(buffer);
             writer.U8(PacketType.ConnectionRequest);
@@ -959,13 +963,15 @@ namespace Netcode
             writer.U64(expireTimestamp);
             writer.Bytes(nonce);
             writer.Bytes(privateData);
+            writer.Bytes(clientSalt.Slice(0, Defines.ConnectSaltBytes));
             return writer.Position;
         }
 
         /// <summary>
         /// Write an encrypted packet (types 1..6): prefix byte, variable-length
-        /// sequence, encrypted per-type data, MAC. <paramref name="packetData"/> is the
-        /// plaintext per-type data. Returns the number of bytes written.
+        /// sequence, (for types 1 and 2) 8-byte cleartext server nonce, encrypted
+        /// per-type data, MAC. <paramref name="packetData"/> is the plaintext
+        /// per-type data. Returns the number of bytes written.
         /// </summary>
         public static int WriteEncryptedPacket(
             Span<byte> buffer,
@@ -973,7 +979,8 @@ namespace Netcode
             ReadOnlySpan<byte> packetData,
             ulong sequence,
             ReadOnlySpan<byte> writePacketKey,
-            ulong protocolId)
+            ulong protocolId,
+            ReadOnlySpan<byte> serverNonce = default)
         {
             int sequenceBytes = SequenceNumberBytesRequired(sequence);
             byte prefixByte = (byte)(packetType | (sequenceBytes << 4));
@@ -988,17 +995,27 @@ namespace Netcode
                 sequenceTemp >>= 8;
             }
 
+            bool hasServerNonce = packetType == PacketType.ConnectionDenied ||
+                                  packetType == PacketType.ConnectionChallenge;
+            if (hasServerNonce)
+                writer.Bytes(serverNonce.Slice(0, Defines.ServerNonceBytes));
+
             int encryptedStart = writer.Position;
             writer.Bytes(packetData);
             int encryptedFinish = writer.Position;
 
-            Span<byte> additional = stackalloc byte[Defines.VersionInfoBytes + 8 + 1];
+            Span<byte> additionalBuffer = stackalloc byte[Defines.VersionInfoBytes + 8 + 1 + Defines.ServerNonceBytes];
+            int additionalLength;
             {
-                var ad = new ByteWriter(additional);
+                var ad = new ByteWriter(additionalBuffer);
                 ad.Bytes(Defines.VersionInfo);
                 ad.U64(protocolId);
                 ad.U8(prefixByte);
+                if (hasServerNonce)
+                    ad.Bytes(serverNonce.Slice(0, Defines.ServerNonceBytes));
+                additionalLength = ad.Position;
             }
+            ReadOnlySpan<byte> additional = additionalBuffer.Slice(0, additionalLength);
 
             Span<byte> nonce = stackalloc byte[Aead.NonceBytesIetf];
             {
@@ -1016,8 +1033,10 @@ namespace Netcode
         /// Read a packet, following the exact validation order of netcode_read_packet
         /// (and the STANDARD.md "Reading Encrypted Packets" section). Decrypts in
         /// place. For connection request packets the private connect token is
-        /// decrypted in place and DataOffset points at the 1024-byte token buffer.
-        /// Result.Type is -1 when the packet is ignored.
+        /// decrypted in place, DataOffset points at the 1024-byte token buffer, and
+        /// NonceOffset points at the trailing 8-byte client salt. For connection
+        /// denied and challenge packets NonceOffset points at the 8-byte header
+        /// server nonce. Result.Type is -1 when the packet is ignored.
         /// </summary>
         public static ReadPacketResult ReadPacket(
             Span<byte> buffer,
@@ -1104,6 +1123,7 @@ namespace Netcode
                 result.Type = PacketType.ConnectionRequest;
                 result.Sequence = 0;
                 result.ConnectTokenExpireTimestamp = packetExpireTimestamp;
+                result.NonceOffset = tokenOffset + Defines.ConnectTokenPrivateBytes;
                 result.DataOffset = tokenOffset;
                 result.DataLength = Defines.ConnectTokenPrivateBytes;
                 return result;
@@ -1146,7 +1166,12 @@ namespace Netcode
                     return result;
                 }
 
-                if (buffer.Length < 1 + sequenceBytes + Protocol.MacBytes)
+                int headerNonceBytes = (packetType == PacketType.ConnectionDenied ||
+                                        packetType == PacketType.ConnectionChallenge)
+                    ? Defines.ServerNonceBytes
+                    : 0;
+
+                if (buffer.Length < 1 + sequenceBytes + headerNonceBytes + Protocol.MacBytes)
                 {
                     NetcodeLog.Debug("ignored encrypted packet. buffer is too small for sequence bytes + encryption mac\n");
                     return result;
@@ -1175,13 +1200,20 @@ namespace Netcode
 
                 // decrypt the per-packet type data
 
-                Span<byte> additional = stackalloc byte[Defines.VersionInfoBytes + 8 + 1];
+                int nonceOffset = 1 + sequenceBytes;
+
+                Span<byte> additionalBuffer = stackalloc byte[Defines.VersionInfoBytes + 8 + 1 + Defines.ServerNonceBytes];
+                int additionalLength;
                 {
-                    var ad = new ByteWriter(additional);
+                    var ad = new ByteWriter(additionalBuffer);
                     ad.Bytes(Defines.VersionInfo);
                     ad.U64(protocolId);
                     ad.U8(prefixByte);
+                    if (headerNonceBytes > 0)
+                        ad.Bytes(buffer.Slice(nonceOffset, Defines.ServerNonceBytes));
+                    additionalLength = ad.Position;
                 }
+                ReadOnlySpan<byte> additional = additionalBuffer.Slice(0, additionalLength);
 
                 Span<byte> nonce = stackalloc byte[Aead.NonceBytesIetf];
                 {
@@ -1190,7 +1222,7 @@ namespace Netcode
                     n.U64(sequence);
                 }
 
-                int encryptedStart = 1 + sequenceBytes;
+                int encryptedStart = nonceOffset + headerNonceBytes;
                 int encryptedBytes = buffer.Length - encryptedStart;
 
                 if (encryptedBytes < Protocol.MacBytes)
@@ -1261,6 +1293,7 @@ namespace Netcode
 
                 result.Type = packetType;
                 result.Sequence = sequence;
+                result.NonceOffset = headerNonceBytes > 0 ? nonceOffset : 0;
                 result.DataOffset = encryptedStart;
                 result.DataLength = decryptedBytes;
                 return result;
@@ -1562,6 +1595,8 @@ namespace Netcode
         public readonly int[] ClientIndex = new int[MaxEncryptionMappings];
         public readonly int[] ConnectTokenEntryIndex = new int[MaxEncryptionMappings];
         public readonly byte[] ConnectTokenMac = new byte[Protocol.MacBytes * MaxEncryptionMappings];
+        public readonly byte[] ClientSalt = new byte[Defines.ConnectSaltBytes * MaxEncryptionMappings];
+        public readonly byte[] ServerNonce = new byte[Defines.ServerNonceBytes * MaxEncryptionMappings];
         public readonly byte[] SendKey = new byte[Protocol.KeyBytes * MaxEncryptionMappings];
         public readonly byte[] ReceiveKey = new byte[Protocol.KeyBytes * MaxEncryptionMappings];
 
@@ -1587,6 +1622,8 @@ namespace Netcode
 
             Array.Clear(Timeout);
             Array.Clear(ConnectTokenMac);
+            CryptographicOperations.ZeroMemory(ClientSalt);
+            CryptographicOperations.ZeroMemory(ServerNonce);
             CryptographicOperations.ZeroMemory(SendKey);
             CryptographicOperations.ZeroMemory(ReceiveKey);
         }
@@ -1597,13 +1634,25 @@ namespace Netcode
                            (ExpireTime[index] >= 0.0 && ExpireTime[index] < time);
             if (expired && ClientIndex[index] == -1)
             {
+                CryptographicOperations.ZeroMemory(ClientSalt.AsSpan(index * Defines.ConnectSaltBytes, Defines.ConnectSaltBytes));
+                CryptographicOperations.ZeroMemory(ServerNonce.AsSpan(index * Defines.ServerNonceBytes, Defines.ServerNonceBytes));
                 CryptographicOperations.ZeroMemory(SendKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));
                 CryptographicOperations.ZeroMemory(ReceiveKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));
             }
             return expired;
         }
 
-        public bool AddEncryptionMapping(in Address address, ReadOnlySpan<byte> sendKey, ReadOnlySpan<byte> receiveKey, double time, double expireTime, int timeout, int connectTokenEntryIndex = -1, ReadOnlySpan<byte> connectTokenMac = default)
+        public bool AddEncryptionMapping(
+            in Address address,
+            ReadOnlySpan<byte> sendKey,
+            ReadOnlySpan<byte> receiveKey,
+            double time,
+            double expireTime,
+            int timeout,
+            int connectTokenEntryIndex = -1,
+            ReadOnlySpan<byte> connectTokenMac = default,
+            ReadOnlySpan<byte> clientSalt = default,
+            ReadOnlySpan<byte> serverNonce = default)
         {
             for (int i = 0; i < NumEncryptionMappings; i++)
             {
@@ -1614,6 +1663,8 @@ namespace Netcode
                     LastAccessTime[i] = time;
                     ConnectTokenEntryIndex[i] = connectTokenEntryIndex;
                     SetConnectTokenMac(i, connectTokenMac);
+                    SetClientSalt(i, clientSalt);
+                    SetServerNonce(i, serverNonce);
                     sendKey.CopyTo(SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     receiveKey.CopyTo(ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     return true;
@@ -1631,6 +1682,8 @@ namespace Netcode
                     LastAccessTime[i] = time;
                     ConnectTokenEntryIndex[i] = connectTokenEntryIndex;
                     SetConnectTokenMac(i, connectTokenMac);
+                    SetClientSalt(i, clientSalt);
+                    SetServerNonce(i, serverNonce);
                     sendKey.CopyTo(SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     receiveKey.CopyTo(ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     if (i + 1 > NumEncryptionMappings)
@@ -1652,6 +1705,8 @@ namespace Netcode
                     LastAccessTime[i] = -1000.0;
                     ConnectTokenEntryIndex[i] = -1;
                     SetConnectTokenMac(i, default);
+                    CryptographicOperations.ZeroMemory(ClientSalt.AsSpan(i * Defines.ConnectSaltBytes, Defines.ConnectSaltBytes));
+                    CryptographicOperations.ZeroMemory(ServerNonce.AsSpan(i * Defines.ServerNonceBytes, Defines.ServerNonceBytes));
                     Address[i] = default;
                     CryptographicOperations.ZeroMemory(SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     CryptographicOperations.ZeroMemory(ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
@@ -1664,6 +1719,11 @@ namespace Netcode
                             if (!EntryExpired(index, time) || ClientIndex[index] != -1)
                                 break;
                             Address[index].Type = AddressType.None;
+                            SetConnectTokenMac(index, default);
+                            CryptographicOperations.ZeroMemory(ClientSalt.AsSpan(index * Defines.ConnectSaltBytes, Defines.ConnectSaltBytes));
+                            CryptographicOperations.ZeroMemory(ServerNonce.AsSpan(index * Defines.ServerNonceBytes, Defines.ServerNonceBytes));
+                            CryptographicOperations.ZeroMemory(SendKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));
+                            CryptographicOperations.ZeroMemory(ReceiveKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));
                             index--;
                         }
                         NumEncryptionMappings = index + 1;
@@ -1718,9 +1778,41 @@ namespace Netcode
                 slot.Clear();
         }
 
+        private void SetClientSalt(int index, ReadOnlySpan<byte> clientSalt)
+        {
+            Span<byte> slot = ClientSalt.AsSpan(index * Defines.ConnectSaltBytes, Defines.ConnectSaltBytes);
+            if (clientSalt.Length == Defines.ConnectSaltBytes)
+                clientSalt.CopyTo(slot);
+            else
+                CryptographicOperations.ZeroMemory(slot);
+        }
+
+        private void SetServerNonce(int index, ReadOnlySpan<byte> serverNonce)
+        {
+            Span<byte> slot = ServerNonce.AsSpan(index * Defines.ServerNonceBytes, Defines.ServerNonceBytes);
+            if (serverNonce.Length == Defines.ServerNonceBytes)
+                serverNonce.CopyTo(slot);
+            else
+                CryptographicOperations.ZeroMemory(slot);
+        }
+
         public ReadOnlySpan<byte> GetConnectTokenMac(int index)
         {
             return ConnectTokenMac.AsSpan(index * Protocol.MacBytes, Protocol.MacBytes);
+        }
+
+        public ReadOnlySpan<byte> GetClientSalt(int index)
+        {
+            if (index == -1)
+                return ReadOnlySpan<byte>.Empty;
+            return ClientSalt.AsSpan(index * Defines.ConnectSaltBytes, Defines.ConnectSaltBytes);
+        }
+
+        public ReadOnlySpan<byte> GetServerNonce(int index)
+        {
+            if (index == -1)
+                return ReadOnlySpan<byte>.Empty;
+            return ServerNonce.AsSpan(index * Defines.ServerNonceBytes, Defines.ServerNonceBytes);
         }
 
         public Span<byte> GetSendKey(int index)

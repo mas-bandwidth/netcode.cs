@@ -31,8 +31,10 @@ namespace Netcode
         public const int Full = -2;
 
         private readonly ConnectTokenEntryState[] _state = new ConnectTokenEntryState[MaxEntries];
+        private readonly double[] _time = new double[MaxEntries];
         private readonly ulong[] _expireTimestamp = new ulong[MaxEntries];
         private readonly byte[] _mac = new byte[MaxEntries * Protocol.MacBytes];
+        private readonly byte[] _clientSalt = new byte[MaxEntries * Defines.ConnectSaltBytes];
         private readonly Address[] _address = new Address[MaxEntries];
 
         public ConnectTokenHistory() => Reset();
@@ -40,12 +42,21 @@ namespace Netcode
         public void Reset()
         {
             Array.Clear(_state);
+            Array.Fill(_time, -1000.0);
             Array.Clear(_expireTimestamp);
             Array.Clear(_mac);
+            CryptographicOperations.ZeroMemory(_clientSalt);
             Array.Clear(_address);
         }
 
-        public int FindOrAdd(in Address address, ReadOnlySpan<byte> mac, ulong expireTimestamp, ulong currentTimestamp, double time)
+        public int FindOrAdd(
+            in Address address,
+            ReadOnlySpan<byte> mac,
+            ReadOnlySpan<byte> clientSalt,
+            ulong expireTimestamp,
+            ulong currentTimestamp,
+            double time,
+            int timeoutSeconds)
         {
             int matchingTokenIndex = -1;
             int freeTokenIndex = -1;
@@ -53,7 +64,7 @@ namespace Netcode
             for (int i = 0; i < MaxEntries; i++)
             {
                 if (_state[i] != ConnectTokenEntryState.Free &&
-                    mac.SequenceEqual(_mac.AsSpan(i * Protocol.MacBytes, Protocol.MacBytes)))
+                    CryptographicOperations.FixedTimeEquals(mac, _mac.AsSpan(i * Protocol.MacBytes, Protocol.MacBytes)))
                     matchingTokenIndex = i;
 
                 // a token minted without expiry (negative expireSeconds, for development
@@ -71,14 +82,18 @@ namespace Netcode
                     return Full;
 
                 _state[freeTokenIndex] = ConnectTokenEntryState.Pending;
+                _time[freeTokenIndex] = time;
                 _expireTimestamp[freeTokenIndex] = expireTimestamp;
                 _address[freeTokenIndex] = address;
-                mac.CopyTo(_mac.AsSpan(freeTokenIndex * Protocol.MacBytes, Protocol.MacBytes));
+                mac.Slice(0, Protocol.MacBytes).CopyTo(_mac.AsSpan(freeTokenIndex * Protocol.MacBytes, Protocol.MacBytes));
+                clientSalt.Slice(0, Defines.ConnectSaltBytes).CopyTo(_clientSalt.AsSpan(freeTokenIndex * Defines.ConnectSaltBytes, Defines.ConnectSaltBytes));
                 return freeTokenIndex;
             }
 
             if (_state[matchingTokenIndex] == ConnectTokenEntryState.Pending &&
-                _address[matchingTokenIndex].Equals(address))
+                _address[matchingTokenIndex].Equals(address) &&
+                CryptographicOperations.FixedTimeEquals(clientSalt.Slice(0, Defines.ConnectSaltBytes), _clientSalt.AsSpan(matchingTokenIndex * Defines.ConnectSaltBytes, Defines.ConnectSaltBytes)) &&
+                (timeoutSeconds <= 0 || _time[matchingTokenIndex] + timeoutSeconds >= time))
                 return matchingTokenIndex;
 
             return Refused;
@@ -87,7 +102,7 @@ namespace Netcode
         public bool Holds(int index, ReadOnlySpan<byte> mac)
         {
             return _state[index] != ConnectTokenEntryState.Free &&
-                   mac.SequenceEqual(_mac.AsSpan(index * Protocol.MacBytes, Protocol.MacBytes));
+                   CryptographicOperations.FixedTimeEquals(mac, _mac.AsSpan(index * Protocol.MacBytes, Protocol.MacBytes));
         }
 
         public void Consume(int index)
@@ -460,9 +475,16 @@ namespace Netcode
             _connectTokenHistory.Reset();
         }
 
-        private int ConnectTokenEntriesFindOrAdd(in Address address, ReadOnlySpan<byte> mac, ulong expireTimestamp, ulong currentTimestamp, double time)
+        private int ConnectTokenEntriesFindOrAdd(
+            in Address address,
+            ReadOnlySpan<byte> mac,
+            ReadOnlySpan<byte> clientSalt,
+            ulong expireTimestamp,
+            ulong currentTimestamp,
+            double time,
+            int timeoutSeconds)
         {
-            return _connectTokenHistory.FindOrAdd(in address, mac, expireTimestamp, currentTimestamp, time);
+            return _connectTokenHistory.FindOrAdd(in address, mac, clientSalt, expireTimestamp, currentTimestamp, time, timeoutSeconds);
         }
 
         // --------------------------------------------------------------
@@ -503,9 +525,9 @@ namespace Netcode
         // sending
         // --------------------------------------------------------------
 
-        private void SendGlobalPacket(int packetType, ReadOnlySpan<byte> packetData, in Address to, ReadOnlySpan<byte> packetKey)
+        private void SendGlobalPacket(int packetType, ReadOnlySpan<byte> packetData, in Address to, ReadOnlySpan<byte> packetKey, ReadOnlySpan<byte> serverNonce)
         {
-            int packetBytes = PacketIO.WriteEncryptedPacket(_sendBuffer, packetType, packetData, _globalSequence, packetKey, _config.ProtocolId);
+            int packetBytes = PacketIO.WriteEncryptedPacket(_sendBuffer, packetType, packetData, _globalSequence, packetKey, _config.ProtocolId, serverNonce);
 
             SendDispatch.SendPacketToAddress(
                 _config.Simulator,
@@ -680,7 +702,7 @@ namespace Netcode
         // packet processing
         // --------------------------------------------------------------
 
-        private void ProcessConnectionRequestPacket(in Address from, Span<byte> decryptedToken, ulong connectTokenExpireTimestamp, ulong currentTimestamp)
+        private void ProcessConnectionRequestPacket(in Address from, Span<byte> decryptedToken, ReadOnlySpan<byte> clientSalt, ulong connectTokenExpireTimestamp, ulong currentTimestamp)
         {
             var connectTokenPrivate = new ConnectTokenPrivate();
             try
@@ -722,9 +744,11 @@ namespace Netcode
                 int connectTokenEntryIndex = ConnectTokenEntriesFindOrAdd(
                         in from,
                         connectTokenMac,
+                        clientSalt,
                         connectTokenExpireTimestamp,
                         currentTimestamp,
-                        _time);
+                        _time,
+                        connectTokenPrivate.TimeoutSeconds);
                 if (connectTokenEntryIndex == ConnectTokenHistory.Full)
                 {
                     NetcodeLog.Debug("server ignored connection request. connect token history is full\n");
@@ -739,7 +763,13 @@ namespace Netcode
                 if (_numConnectedClients == _maxClients)
                 {
                     NetcodeLog.Debug("server denied connection request. server is full\n");
-                    SendGlobalPacket(PacketType.ConnectionDenied, ReadOnlySpan<byte>.Empty, in from, connectTokenPrivate.ServerToClientKey);
+                    Span<byte> deniedServerNonce = stackalloc byte[Defines.ServerNonceBytes];
+                    Span<byte> deniedSendKey = stackalloc byte[Protocol.KeyBytes];
+                    Rng.Fill(deniedServerNonce);
+                    Aead.DerivePacketKey(deniedSendKey, connectTokenPrivate.ServerToClientKey, clientSalt, deniedServerNonce);
+                    SendGlobalPacket(PacketType.ConnectionDenied, ReadOnlySpan<byte>.Empty, in from, deniedSendKey, deniedServerNonce);
+                    CryptographicOperations.ZeroMemory(deniedServerNonce);
+                    CryptographicOperations.ZeroMemory(deniedSendKey);
                     return;
                 }
 
@@ -751,19 +781,54 @@ namespace Netcode
                     ? _time + connectTokenPrivate.TimeoutSeconds
                     : _time + (double)tokenLifetime;
 
-                if (!_encryptionManager.AddEncryptionMapping(
+                int encryptionIndex = _encryptionManager.FindEncryptionMapping(in from, _time);
+
+                if (encryptionIndex >= 0 &&
+                    _encryptionManager.ClientIndex[encryptionIndex] == -1 &&
+                    CryptographicOperations.FixedTimeEquals(_encryptionManager.GetConnectTokenMac(encryptionIndex), connectTokenMac) &&
+                    CryptographicOperations.FixedTimeEquals(_encryptionManager.GetClientSalt(encryptionIndex), clientSalt))
+                {
+                    _encryptionManager.SetExpireTime(encryptionIndex, expireTime);
+                }
+                else
+                {
+                    Span<byte> serverNonce = stackalloc byte[Defines.ServerNonceBytes];
+                    Span<byte> sendKey = stackalloc byte[Protocol.KeyBytes];
+                    Span<byte> receiveKey = stackalloc byte[Protocol.KeyBytes];
+
+                    Rng.Fill(serverNonce);
+                    Aead.DerivePacketKey(sendKey, connectTokenPrivate.ServerToClientKey, clientSalt, serverNonce);
+                    Aead.DerivePacketKey(receiveKey, connectTokenPrivate.ClientToServerKey, clientSalt, serverNonce);
+
+                    bool added = _encryptionManager.AddEncryptionMapping(
                         in from,
-                        connectTokenPrivate.ServerToClientKey,
-                        connectTokenPrivate.ClientToServerKey,
+                        sendKey,
+                        receiveKey,
                         _time,
                         expireTime,
                         connectTokenPrivate.TimeoutSeconds,
                         connectTokenEntryIndex,
-                        connectTokenMac))
-                {
-                    NetcodeLog.Debug("server ignored connection request. failed to add encryption mapping\n");
-                    return;
+                        connectTokenMac,
+                        clientSalt,
+                        serverNonce);
+
+                    CryptographicOperations.ZeroMemory(serverNonce);
+                    CryptographicOperations.ZeroMemory(sendKey);
+                    CryptographicOperations.ZeroMemory(receiveKey);
+
+                    if (!added)
+                    {
+                        NetcodeLog.Debug("server ignored connection request. failed to add encryption mapping\n");
+                        return;
+                    }
+
+                    encryptionIndex = _encryptionManager.FindEncryptionMapping(in from, _time);
                 }
+
+                ReadOnlySpan<byte> mappingSendKey = _encryptionManager.GetSendKey(encryptionIndex);
+                ReadOnlySpan<byte> mappingServerNonce = _encryptionManager.GetServerNonce(encryptionIndex);
+                if (mappingSendKey.Length == 0 || mappingServerNonce.Length == 0)
+                    return;
 
                 Span<byte> challengePacketData = stackalloc byte[8 + Defines.ChallengeTokenBytes];
                 BinaryPrimitives.WriteUInt64LittleEndian(challengePacketData.Slice(0, 8), _challengeSequence);
@@ -781,12 +846,13 @@ namespace Netcode
 
                 NetcodeLog.Debug("server sent connection challenge packet\n");
 
-                SendGlobalPacket(PacketType.ConnectionChallenge, challengePacketData, in from, connectTokenPrivate.ServerToClientKey);
+                SendGlobalPacket(PacketType.ConnectionChallenge, challengePacketData, in from, mappingSendKey, mappingServerNonce);
             }
             finally
             {
                 CryptographicOperations.ZeroMemory(connectTokenPrivate.ClientToServerKey);
                 CryptographicOperations.ZeroMemory(connectTokenPrivate.ServerToClientKey);
+                CryptographicOperations.ZeroMemory(connectTokenPrivate.UserData);
             }
         }
 
@@ -834,7 +900,10 @@ namespace Netcode
             if (_numConnectedClients == _maxClients)
             {
                 NetcodeLog.Debug("server denied connection response. server is full\n");
-                SendGlobalPacket(PacketType.ConnectionDenied, ReadOnlySpan<byte>.Empty, in from, packetSendKey);
+                ReadOnlySpan<byte> serverNonce = _encryptionManager.GetServerNonce(encryptionIndex);
+                if (serverNonce.Length == 0)
+                    return;
+                SendGlobalPacket(PacketType.ConnectionDenied, ReadOnlySpan<byte>.Empty, in from, packetSendKey, serverNonce);
                 return;
             }
 
@@ -857,12 +926,18 @@ namespace Netcode
                         {
                             if (NetcodeLog.Enabled(LogLevel.Debug))
                                 NetcodeLog.Debug($"server received connection request from {from}\n");
-                            ProcessConnectionRequestPacket(in from, buffer.Slice(packet.DataOffset, packet.DataLength), packet.ConnectTokenExpireTimestamp, currentTimestamp);
+                            ProcessConnectionRequestPacket(
+                                in from,
+                                buffer.Slice(packet.DataOffset, packet.DataLength),
+                                buffer.Slice(packet.NonceOffset, Defines.ConnectSaltBytes),
+                                packet.ConnectTokenExpireTimestamp,
+                                currentTimestamp);
                         }
                     }
                     finally
                     {
                         CryptographicOperations.ZeroMemory(buffer.Slice(packet.DataOffset, packet.DataLength));
+                        CryptographicOperations.ZeroMemory(buffer.Slice(packet.NonceOffset, Defines.ConnectSaltBytes));
                     }
                 }
                 break;
@@ -920,6 +995,18 @@ namespace Netcode
                         if (NetcodeLog.Enabled(LogLevel.Debug))
                             NetcodeLog.Debug($"server received disconnect packet from client {clientIndex}\n");
                         DisconnectClientInternal(clientIndex, sendDisconnectPackets: false, DisconnectReason.ClientDisconnect);
+                    }
+                    else if (encryptionIndex != -1)
+                    {
+                        if (NetcodeLog.Enabled(LogLevel.Debug))
+                            NetcodeLog.Debug($"server received disconnect packet from {from} before connection completed\n");
+                        int connectTokenEntryIndex = _encryptionManager.GetConnectTokenEntryIndex(encryptionIndex);
+                        if (connectTokenEntryIndex >= 0 &&
+                            _connectTokenHistory.Holds(connectTokenEntryIndex, _encryptionManager.GetConnectTokenMac(encryptionIndex)))
+                        {
+                            _connectTokenHistory.Consume(connectTokenEntryIndex);
+                        }
+                        _encryptionManager.RemoveEncryptionMapping(in from, _time);
                     }
                 }
                 break;

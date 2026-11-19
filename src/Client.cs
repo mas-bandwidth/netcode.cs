@@ -8,6 +8,7 @@
 */
 
 using System;
+using System.Security.Cryptography;
 
 namespace Netcode
 {
@@ -95,16 +96,26 @@ namespace Netcode
     /// </summary>
     public sealed class Client : IDisposable
     {
-        private static readonly bool[] AllowedPackets = BuildAllowedPackets();
+        private static readonly bool[] AllowedPacketsSendingRequest = BuildAllowedPackets(
+            PacketType.ConnectionDenied,
+            PacketType.ConnectionChallenge);
 
-        private static bool[] BuildAllowedPackets()
+        private static readonly bool[] AllowedPacketsSendingResponse = BuildAllowedPackets(
+            PacketType.ConnectionDenied,
+            PacketType.ConnectionKeepAlive,
+            PacketType.ConnectionPayload,
+            PacketType.ConnectionDisconnect);
+
+        private static readonly bool[] AllowedPacketsConnected = BuildAllowedPackets(
+            PacketType.ConnectionKeepAlive,
+            PacketType.ConnectionPayload,
+            PacketType.ConnectionDisconnect);
+
+        private static bool[] BuildAllowedPackets(params int[] types)
         {
             var allowed = new bool[PacketType.NumPackets];
-            allowed[PacketType.ConnectionDenied] = true;
-            allowed[PacketType.ConnectionChallenge] = true;
-            allowed[PacketType.ConnectionKeepAlive] = true;
-            allowed[PacketType.ConnectionPayload] = true;
-            allowed[PacketType.ConnectionDisconnect] = true;
+            foreach (int type in types)
+                allowed[type] = true;
             return allowed;
         }
 
@@ -127,6 +138,9 @@ namespace Netcode
         private NetcodeSocket? _socketIpv6;
         private readonly byte[] _writePacketKey = new byte[Protocol.KeyBytes];
         private readonly byte[] _readPacketKey = new byte[Protocol.KeyBytes];
+        private readonly byte[] _clientSalt = new byte[Defines.ConnectSaltBytes];
+        private readonly byte[] _serverNonce = new byte[Defines.ServerNonceBytes];
+        private bool _hasServerNonce;
         private readonly ReplayProtection _replayProtection = new ReplayProtection();
         private readonly PacketQueue _packetReceiveQueue = new PacketQueue();
         private ulong _challengeTokenSequence;
@@ -260,6 +274,9 @@ namespace Netcode
         /// <summary>The server address the client is connecting or connected to.</summary>
         public Address ServerAddress => _serverAddress;
 
+        internal ReadOnlySpan<byte> ClientSalt => _clientSalt;
+        internal bool HasServerNonce => _hasServerNonce;
+
         /// <summary>The port the client socket is bound to.</summary>
         public ushort Port =>
             _address.Type == AddressType.IPv4
@@ -299,9 +316,14 @@ namespace Netcode
             _lastPacketReceiveTime = _time;
             _shouldDisconnect = false;
             _shouldDisconnectState = ClientState.Disconnected;
+            _hasServerNonce = false;
             _challengeTokenSequence = 0;
 
-            Array.Clear(_challengeTokenData);
+            Rng.Fill(_clientSalt);
+            CryptographicOperations.ZeroMemory(_serverNonce);
+            CryptographicOperations.ZeroMemory(_writePacketKey);
+            CryptographicOperations.ZeroMemory(_readPacketKey);
+            CryptographicOperations.ZeroMemory(_challengeTokenData);
 
             _replayProtection.Reset();
         }
@@ -316,12 +338,13 @@ namespace Netcode
             _serverAddressIndex = 0;
             _serverAddress = default;
             ClearConnectToken();
-            Array.Clear(_writePacketKey);
-            Array.Clear(_readPacketKey);
+            CryptographicOperations.ZeroMemory(_writePacketKey);
+            CryptographicOperations.ZeroMemory(_readPacketKey);
 
             SetState(clientState);
 
             ResetBeforeNextConnect();
+            CryptographicOperations.ZeroMemory(_clientSalt);
 
             _packetReceiveQueue.Clear();
         }
@@ -334,10 +357,10 @@ namespace Netcode
             _connectToken.TimeoutSeconds = 0;
             _connectToken.NumServerAddresses = 0;
             Array.Clear(_connectToken.VersionInfo);
-            Array.Clear(_connectToken.Nonce);
-            Array.Clear(_connectToken.PrivateData);
-            Array.Clear(_connectToken.ClientToServerKey);
-            Array.Clear(_connectToken.ServerToClientKey);
+            CryptographicOperations.ZeroMemory(_connectToken.Nonce);
+            CryptographicOperations.ZeroMemory(_connectToken.PrivateData);
+            CryptographicOperations.ZeroMemory(_connectToken.ClientToServerKey);
+            CryptographicOperations.ZeroMemory(_connectToken.ServerToClientKey);
             Array.Clear(_connectToken.ServerAddresses);
         }
 
@@ -374,12 +397,9 @@ namespace Netcode
                     NetcodeLog.Info($"client connecting to server {_serverAddress} [{_serverAddressIndex + 1}/{_connectToken.NumServerAddresses}]\n");
             }
 
-            _connectToken.ServerToClientKey.CopyTo(_readPacketKey.AsSpan());
-            _connectToken.ClientToServerKey.CopyTo(_writePacketKey.AsSpan());
+            ResetBeforeNextConnect();
 
             _connectStartTime = _time;
-
-            ResetBeforeNextConnect();
 
             SetState(ClientState.SendingConnectionRequest);
         }
@@ -394,13 +414,21 @@ namespace Netcode
             {
                 case PacketType.ConnectionDenied:
                 {
-                    if ((_state == ClientState.SendingConnectionRequest ||
-                         _state == ClientState.SendingConnectionResponse)
-                        && from.Equals(_serverAddress))
+                    if (_state == ClientState.SendingConnectionRequest && from.Equals(_serverAddress))
                     {
                         _shouldDisconnect = true;
                         _shouldDisconnectState = ClientState.ConnectionDenied;
                         _lastPacketReceiveTime = _time;
+                    }
+                    else if (_state == ClientState.SendingConnectionResponse && from.Equals(_serverAddress))
+                    {
+                        ReadOnlySpan<byte> packetServerNonce = buffer.Slice(packet.NonceOffset, Defines.ServerNonceBytes);
+                        if (CryptographicOperations.FixedTimeEquals(packetServerNonce, _serverNonce))
+                        {
+                            _shouldDisconnect = true;
+                            _shouldDisconnectState = ClientState.ConnectionDenied;
+                            _lastPacketReceiveTime = _time;
+                        }
                     }
                 }
                 break;
@@ -498,7 +526,84 @@ namespace Netcode
             if (!from.Equals(_serverAddress))
                 return;
 
+            if (_state <= ClientState.Disconnected)
+                return;
+
             ulong currentTimestamp = UnixTime.Now();
+
+            if (_state == ClientState.SendingConnectionRequest)
+            {
+                if (packetData.Length < 1 + 1 + Defines.ServerNonceBytes + Protocol.MacBytes)
+                    return;
+
+                byte prefixByte = packetData[0];
+                int packetType = prefixByte & 0xF;
+                int sequenceBytes = prefixByte >> 4;
+
+                if (packetType != PacketType.ConnectionDenied &&
+                    packetType != PacketType.ConnectionChallenge)
+                    return;
+
+                if (sequenceBytes < 1 || sequenceBytes > 8)
+                    return;
+
+                if (packetData.Length < 1 + sequenceBytes + Defines.ServerNonceBytes + Protocol.MacBytes)
+                    return;
+
+                Span<byte> candidateServerNonce = stackalloc byte[Defines.ServerNonceBytes];
+                packetData.Slice(1 + sequenceBytes, Defines.ServerNonceBytes).CopyTo(candidateServerNonce);
+
+                Span<byte> candidateReadKey = stackalloc byte[Protocol.KeyBytes];
+                Aead.DerivePacketKey(
+                    candidateReadKey,
+                    _connectToken.ServerToClientKey,
+                    _clientSalt,
+                    candidateServerNonce);
+
+                ReadPacketResult requestPacket = PacketIO.ReadPacket(
+                    packetData,
+                    hasReadPacketKey: true,
+                    candidateReadKey,
+                    _connectToken.ProtocolId,
+                    currentTimestamp,
+                    hasPrivateKey: false,
+                    ReadOnlySpan<byte>.Empty,
+                    AllowedPacketsSendingRequest,
+                    _replayProtection);
+
+                if (requestPacket.Type < 0)
+                {
+                    CryptographicOperations.ZeroMemory(candidateReadKey);
+                    CryptographicOperations.ZeroMemory(candidateServerNonce);
+                    return;
+                }
+
+                if (requestPacket.Type == PacketType.ConnectionChallenge)
+                {
+                    candidateServerNonce.CopyTo(_serverNonce);
+                    _hasServerNonce = true;
+                    candidateReadKey.CopyTo(_readPacketKey);
+                    Aead.DerivePacketKey(
+                        _writePacketKey,
+                        _connectToken.ClientToServerKey,
+                        _clientSalt,
+                        candidateServerNonce);
+                }
+
+                CryptographicOperations.ZeroMemory(candidateReadKey);
+                CryptographicOperations.ZeroMemory(candidateServerNonce);
+
+                ProcessPacketInternal(in from, in requestPacket, packetData);
+                return;
+            }
+
+            ReadOnlySpan<bool> allowedPackets;
+            if (_state == ClientState.SendingConnectionResponse)
+                allowedPackets = AllowedPacketsSendingResponse;
+            else if (_state == ClientState.Connected)
+                allowedPackets = AllowedPacketsConnected;
+            else
+                return;
 
             ReadPacketResult packet = PacketIO.ReadPacket(
                 packetData,
@@ -508,7 +613,7 @@ namespace Netcode
                 currentTimestamp,
                 hasPrivateKey: false,
                 ReadOnlySpan<byte>.Empty,
-                AllowedPackets,
+                allowedPackets,
                 _replayProtection);
 
             if (packet.Type < 0)
@@ -576,7 +681,8 @@ namespace Netcode
                     _connectToken.ProtocolId,
                     _connectToken.ExpireTimestamp,
                     _connectToken.Nonce,
-                    _connectToken.PrivateData);
+                    _connectToken.PrivateData,
+                    _clientSalt);
                 _sequence++;
             }
             else
@@ -812,7 +918,7 @@ namespace Netcode
 
             NetcodeLog.Info("client disconnected\n");
 
-            if (!_loopback && sendDisconnectPackets && _state > ClientState.Disconnected)
+            if (!_loopback && sendDisconnectPackets && _state > ClientState.Disconnected && _hasServerNonce)
             {
                 NetcodeLog.Debug("client sent disconnect packets to server\n");
 

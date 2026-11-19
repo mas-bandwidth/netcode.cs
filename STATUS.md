@@ -1,13 +1,13 @@
 # netcode.cs — status
 
-_Last updated: 2026-11-10, at commit ec95e86 on `main`._
+_Last updated: 2026-11-19, on `netcode-1.03`._
 
 ## Where the port stands
 
-**Released: v1.1.0** (`src/Netcode.csproj`, release commit 2026-09-13). A
+**Released: v1.2.0** (`src/Netcode.csproj`). A
 byte-exact C# port of [mas-bandwidth/netcode](https://github.com/mas-bandwidth/netcode)
-(protocol "NETCODE 1.02"; interop is pinned to netcode 1.4.10), idiomatic over the
-same non-blocking update-loop model. Changes since the release are in the git log.
+(protocol "NETCODE 1.03"; interop is pinned to netcode 1.5.0), idiomatic over the
+same non-blocking update-loop model. Changes since the initial release are in the git log.
 
 ### What is built
 
@@ -16,22 +16,22 @@ same non-blocking update-loop model. Changes since the release are in the git lo
   `netcode.c`), and the crypto (`Crypto.cs`). Targets `net8.0` + `net10.0`,
   warnings-as-errors, nullable enabled, no unsafe, zero third-party deps.
 - **Crypto — fully managed, single production path.** XChaCha20-Poly1305
-  (private connect token) + ChaCha20-Poly1305 IETF (challenge tokens, packets),
-  hand-written ChaCha20/Poly1305/HChaCha20, no P/Invoke, no platform crypto.
-  Rationale and the alternatives (BCL `ChaCha20Poly1305`, libsodium P/Invoke)
-  are in `notes/port-map.md`.
-- **Tests** (`tests/`): a console runner with 78 named tests in two tiers. The
-  default run is the unit tier (69 tests): the C suite's tests ported
-  test-for-test, plus seeded hostile fuzz over every parse path, two
-  zero-allocation assertions, a managed-vs-BCL crypto differential and an
+  (private connect token), HChaCha20 per-connection packet key derivation
+  (`client_salt || server_nonce`), and ChaCha20-Poly1305 IETF (challenge tokens,
+  packets), hand-written ChaCha20/Poly1305/HChaCha20, no P/Invoke, no platform
+  crypto. Rationale and the alternatives (BCL `ChaCha20Poly1305`, libsodium
+  P/Invoke) are in `notes/port-map.md`.
+- **Tests** (`tests/`): a console runner with 85 named tests in two tiers. The
+  default run is the unit tier (76 tests): the C suite's tests ported
+  test-for-test (including the `NETCODE 1.03` key-derivation/wire KATs and all
+  five nonce-audit regressions), plus seeded hostile fuzz over every parse path,
+  a zero-allocation assertion, a managed-vs-BCL crypto differential and an
   FP-contraction canary. It opens no OS sockets, never sleeps, and uses an
   injected clock. `--functional` runs the functional tier (9 tests: client and
   server create, the three real UDP socket connects, the two port-in-use
   creates, packet tagging, and the socket zero-allocation check).
   `-- soak <n>` runs the bounded soak. The full list, and which C tests have no
   C# test of the same name, is in `notes/port-map.md`.
-  - `dotnet run -c Release --project tests/Tests.csproj -f net10.0` (unit tier)
-    passed on a Linux x64 bench (.NET SDK 10.0.401) at ec95e86.
 - **Interop gate** (`compat/` + `scripts/interop.sh`): builds the REAL
   `netcode.c` + its vendored libsodium (with `-ffp-contract=off`) and runs four
   legs:
@@ -45,7 +45,7 @@ same non-blocking update-loop model. Changes since the release are in the git lo
     and the functional tier on net10.0 and on the real .NET 8 runtime, `soak 2000`, and a build of the
     compat harness;
   - `C wire compatibility`: the interop gate against netcode pinned at
-    `d6bc96da…` (v1.4.10);
+    `776b822…` (v1.5.0);
   - `STANDARD.md matches upstream`: the vendored spec is diffed against
     mas-bandwidth/netcode `main`.
 - **License**: AGPL-3.0 (`LICENSE`), with the "move to MBSL when ready" note in

@@ -10,23 +10,32 @@ the code does at this revision.
 1. **Long-lived key material.** The code clears key material on the paths below
    (covered by `test_key_cleanup`). Each path names the call it uses:
    - `Server.Stop` (also run by `Server.Dispose`) clears `_challengeKey` with
-     `Array.Clear`, then calls `EncryptionManager.Reset`, which clears the
-     `SendKey` and `ReceiveKey` arrays with `CryptographicOperations.ZeroMemory`.
-     `RemoveEncryptionMapping` and unowned `EntryExpired` entries clear that
-     mapping's keys with `CryptographicOperations.ZeroMemory`. `Server.Dispose`
-     clears `_privateKey` with `CryptographicOperations.ZeroMemory`.
-   - The client's `ResetConnectionData`, run whenever the client leaves a
-     connecting or connected state (`Disconnect`, timeouts, token expiry,
-     denial, server disconnect, `DisconnectLoopback`; `Dispose` disconnects
-     first), clears the read/write packet keys with `Array.Clear`.
-     `ClearConnectToken`, which it calls, clears `_connectToken.PrivateData`
-     and both connect-token keys with `Array.Clear`.
+     `Array.Clear`, resets `ConnectTokenHistory` (which clears `_clientSalt` with
+     `CryptographicOperations.ZeroMemory`), and calls `EncryptionManager.Reset`,
+     which clears `ClientSalt`, `ServerNonce`, `SendKey`, and `ReceiveKey` with
+     `CryptographicOperations.ZeroMemory`. `RemoveEncryptionMapping` (including
+     trailing expired-slot compaction) and unowned `EntryExpired` entries clear
+     those arrays for the retired mapping with `CryptographicOperations.ZeroMemory`.
+     `Server.Dispose` clears `_privateKey` and `_config.PrivateKey` with
+     `CryptographicOperations.ZeroMemory`.
+   - The client's `ResetBeforeNextConnect` and `ResetConnectionData`, run whenever
+     the client leaves or advances a connecting or connected state (`Disconnect`,
+     timeouts, token expiry, denial, server disconnect, server failover,
+     `DisconnectLoopback`; `Dispose` disconnects first), clear `_serverNonce`,
+     `_writePacketKey`, `_readPacketKey`, `_challengeTokenData`, and (on
+     `ResetConnectionData`) `_clientSalt` with `CryptographicOperations.ZeroMemory`.
+     `ClearConnectToken`, which `ResetConnectionData` calls, clears
+     `_connectToken.Nonce`, `_connectToken.PrivateData`, and both connect-token
+     root keys with `CryptographicOperations.ZeroMemory`.
    - `ConnectTokenGenerator.Generate` clears the temporary private buffer and
      the `ConnectTokenPrivate` and `ConnectTokenData` key arrays with
      `CryptographicOperations.ZeroMemory`. `Server.ProcessConnectionRequestPacket`
-     clears the decrypted private keys and the connection-request payload with
-     `CryptographicOperations.ZeroMemory`. The crypto clears its ephemeral
-     subkey, keystream and Poly1305 key with `CryptographicOperations.ZeroMemory`.
+     clears the decrypted private keys, user data, and ephemeral derived keys and
+     nonces with `CryptographicOperations.ZeroMemory`, and `Server.ProcessPacketInternal`
+     clears both the decrypted private token buffer and trailing 8-byte client salt
+     in the receive buffer with `CryptographicOperations.ZeroMemory`. The crypto
+     clears its HChaCha20 key-derivation input, ephemeral subkey, keystream and
+     Poly1305 key with `CryptographicOperations.ZeroMemory`.
    What remains: copies the GC made while moving heap arrays before they were
    cleared cannot be cleared by the library.
 

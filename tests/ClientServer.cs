@@ -180,39 +180,60 @@ internal static class ClientServerTests
 
         ulong currentTimestamp = 1000;
         ulong expireTimestamp = currentTimestamp + 30;
+        int timeoutSeconds = 30;
         byte[] mac = new byte[Protocol.MacBytes];
         mac[0] = 1;
 
-        int index = history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 100.0);
+        byte[] saltA = new byte[Defines.ConnectSaltBytes];
+        byte[] saltB = new byte[Defines.ConnectSaltBytes];
+        saltA.AsSpan().Fill(0xAA);
+        saltB.AsSpan().Fill(0xBB);
+
+        // a connect token the history has not seen creates a pending entry
+        int index = history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 100.0, timeoutSeconds);
         Check.That(index >= 0);
 
-        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 200.0) == index);
-        Check.That(history.FindOrAdd(in addressB, mac, expireTimestamp, currentTimestamp, 200.0) == ConnectTokenHistory.Refused);
+        // a pending entry admits a retransmitted connection request from the same address with the
+        // same client salt within timeoutSeconds, without refreshing entry creation time
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 130.0, timeoutSeconds) == index);
 
+        // a pending entry refuses a different client salt without mutating the entry
+        Check.That(history.FindOrAdd(in addressA, mac, saltB, expireTimestamp, currentTimestamp, 110.0, timeoutSeconds) == ConnectTokenHistory.Refused);
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 120.0, timeoutSeconds) == index);
+
+        // a pending entry refuses every other address
+        Check.That(history.FindOrAdd(in addressB, mac, saltA, expireTimestamp, currentTimestamp, 120.0, timeoutSeconds) == ConnectTokenHistory.Refused);
+
+        // once timeoutSeconds have elapsed since creation, a pending entry admits nothing
+        // (unless timeoutSeconds <= 0, which disables the timeout)
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 130.1, timeoutSeconds) == ConnectTokenHistory.Refused);
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 200.0, -1) == index);
+
+        // a consumed entry admits nothing, including the address and salt that used the connect token
         history.Consume(index);
-        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 300.0) == ConnectTokenHistory.Refused);
-        Check.That(history.FindOrAdd(in addressB, mac, expireTimestamp, currentTimestamp, 300.0) == ConnectTokenHistory.Refused);
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 110.0, timeoutSeconds) == ConnectTokenHistory.Refused);
+        Check.That(history.FindOrAdd(in addressB, mac, saltA, expireTimestamp, currentTimestamp, 110.0, timeoutSeconds) == ConnectTokenHistory.Refused);
 
         for (int i = 1; i < ConnectTokenHistory.MaxEntries; i++)
         {
             mac = new byte[Protocol.MacBytes];
             mac[0] = unchecked((byte)(i + 1));
             mac[1] = unchecked((byte)((i + 1) >> 8));
-            Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 400.0) >= 0);
+            Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 400.0, timeoutSeconds) >= 0);
         }
 
         mac = new byte[Protocol.MacBytes];
         mac[0] = 0xFF;
         mac[1] = 0xFF;
-        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 500.0) == ConnectTokenHistory.Full);
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 500.0, timeoutSeconds) == ConnectTokenHistory.Full);
 
         mac[0] = 1;
         mac[1] = 0;
-        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 500.0) == ConnectTokenHistory.Refused);
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 500.0, timeoutSeconds) == ConnectTokenHistory.Refused);
 
         mac[0] = 0xFF;
         mac[1] = 0xFF;
-        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, expireTimestamp, 600.0) >= 0);
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, expireTimestamp, 600.0, timeoutSeconds) >= 0);
     }
 
     public static void TestClientReconnectUsedConnectToken()
@@ -304,6 +325,497 @@ internal static class ClientServerTests
 
         // the same lifetime issued in the next second does
         ConnectInNextSecond(simulator, client, server, ref time, deltaTime, 0x5678);
+    }
+
+    private sealed class HandshakeWireHarness : IDisposable
+    {
+        public readonly Address ClientAddress = Address.Parse("[::1]:50000");
+        public readonly Address ServerAddress = Address.Parse("[::1]:40000");
+        public readonly Client Client;
+        public readonly Server Server;
+        public readonly System.Collections.Generic.HashSet<(string KeyHex, ulong Sequence)> SeenKeyNonces = new();
+
+        public bool ShuttingDown;
+        public bool DropClientRequestPackets;
+        public bool DropClientResponsePackets;
+        public bool DropClientDisconnectPackets;
+        public int NumConnectionRequests;
+        public int NumConnectionResponses;
+        public byte[]? CapturedChallengePacket;
+        public byte[]? FirstRequestClientSalt;
+        public byte[]? LastRequestClientSalt;
+
+        private byte[] _rootC2s = Array.Empty<byte>();
+        private byte[] _rootS2c = Array.Empty<byte>();
+        private byte[] _activeClientWriteKey = Array.Empty<byte>();
+        private byte[] _activeServerSlotKey = Array.Empty<byte>();
+        private static readonly bool[] AllAllowed = BuildAllAllowed();
+
+        private static bool[] BuildAllAllowed()
+        {
+            var a = new bool[PacketType.NumPackets];
+            Array.Fill(a, true);
+            return a;
+        }
+
+        public HandshakeWireHarness()
+        {
+            var clientConfig = new ClientConfig
+            {
+                OverrideSendAndReceive = true,
+                SendPacketOverride = OnClientSend,
+                ReceivePacketOverride = (ref Address from, Span<byte> data) => 0,
+            };
+            Client = new Client("[::1]:50000", clientConfig, 0.0);
+
+            var serverConfig = CreateServerConfig(null);
+            serverConfig.OverrideSendAndReceive = true;
+            serverConfig.SendPacketOverride = OnServerSend;
+            serverConfig.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+            Server = new Server("[::1]:40000", serverConfig, 0.0);
+            StartServer(Server, 1);
+        }
+
+        public byte[] MintToken(ulong clientId)
+        {
+            byte[] tokenBytes = GenerateConnectToken("[::1]:40000", clientId);
+            var parsed = new ConnectTokenData();
+            Check.That(parsed.Read(tokenBytes));
+            _rootC2s = (byte[])parsed.ClientToServerKey.Clone();
+            _rootS2c = (byte[])parsed.ServerToClientKey.Clone();
+            return tokenBytes;
+        }
+
+        public void RecordAndVerifyEncrypted(ReadOnlySpan<byte> packetData, byte[] key)
+        {
+            byte[] copy = packetData.ToArray();
+            ReadPacketResult parsed = PacketIO.ReadPacket(copy, true, key, TestConstants.TestProtocolId, 0, false, default, AllAllowed, null);
+            Check.That(parsed.Type > 0);
+            Check.That(SeenKeyNonces.Add((Convert.ToHexString(key), parsed.Sequence)));
+        }
+
+        private void OnClientSend(in Address to, ReadOnlySpan<byte> packetData)
+        {
+            if (ShuttingDown)
+                return;
+
+            if (packetData[0] == PacketType.ConnectionRequest)
+            {
+                NumConnectionRequests++;
+                byte[] salt = packetData.Slice(PacketIO.ConnectionRequestPacketBytes - Defines.ConnectSaltBytes, Defines.ConnectSaltBytes).ToArray();
+                FirstRequestClientSalt ??= salt;
+                LastRequestClientSalt = salt;
+                if (DropClientRequestPackets)
+                    return;
+            }
+            else
+            {
+                RecordAndVerifyEncrypted(packetData, _activeClientWriteKey);
+
+                int packetType = packetData[0] & 0xF;
+                if (packetType == PacketType.ConnectionResponse)
+                {
+                    NumConnectionResponses++;
+                    if (DropClientResponsePackets)
+                        return;
+                }
+                else if (packetType == PacketType.ConnectionDisconnect)
+                {
+                    if (DropClientDisconnectPackets)
+                        return;
+                }
+            }
+
+            byte[] delivered = packetData.ToArray();
+            Server.ProcessPacket(in ClientAddress, delivered);
+        }
+
+        private void OnServerSend(in Address to, ReadOnlySpan<byte> packetData)
+        {
+            if (ShuttingDown)
+                return;
+
+            int packetType = packetData[0] & 0xF;
+            if (packetType == PacketType.ConnectionDenied || packetType == PacketType.ConnectionChallenge)
+            {
+                int seqBytes = packetData[0] >> 4;
+                ReadOnlySpan<byte> serverNonce = packetData.Slice(1 + seqBytes, Defines.ServerNonceBytes);
+                byte[] derivedS2c = new byte[Protocol.KeyBytes];
+                Aead.DerivePacketKey(derivedS2c, _rootS2c, LastRequestClientSalt!, serverNonce);
+                RecordAndVerifyEncrypted(packetData, derivedS2c);
+
+                if (packetType == PacketType.ConnectionChallenge)
+                {
+                    CapturedChallengePacket ??= packetData.ToArray();
+                    if (Client.State == ClientState.SendingConnectionRequest)
+                    {
+                        _activeClientWriteKey = new byte[Protocol.KeyBytes];
+                        Aead.DerivePacketKey(_activeClientWriteKey, _rootC2s, Client.ClientSalt, serverNonce);
+                        _activeServerSlotKey = derivedS2c;
+                    }
+                }
+            }
+            else
+            {
+                RecordAndVerifyEncrypted(packetData, _activeServerSlotKey);
+            }
+
+            byte[] delivered = packetData.ToArray();
+            Client.ProcessPacket(in ServerAddress, delivered);
+        }
+
+        public void PumpConnect(byte[] connectToken, ref double time, double deltaTime)
+        {
+            Client.Connect(connectToken);
+            while (true)
+            {
+                Client.Update(time);
+                Server.Update(time);
+                if (Client.State <= ClientState.Disconnected || Client.State == ClientState.Connected)
+                    break;
+                time += deltaTime;
+                Check.That(time < 120.0);
+            }
+        }
+
+        public int ServerEncryptionMappingIndex(double time)
+        {
+            const System.Reflection.BindingFlags Fields = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            var em = (EncryptionManager)typeof(Server).GetField("_encryptionManager", Fields)!.GetValue(Server)!;
+            return em.FindEncryptionMapping(in ClientAddress, time);
+        }
+
+        public void Dispose()
+        {
+            ShuttingDown = true;
+            Server.Dispose();
+            Client.Dispose();
+        }
+    }
+
+    public static void TestClientReconnectAfterUnfinishedHandshake()
+    {
+        using var wire = new HandshakeWireHarness();
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+
+        byte[] connectToken = wire.MintToken(TestConstants.TestClientId);
+
+        // attempt 1: drop every connection response until the client times out
+        wire.DropClientResponsePackets = true;
+        wire.PumpConnect(connectToken, ref time, deltaTime);
+
+        Check.That(wire.Client.State == ClientState.ConnectionResponseTimedOut);
+        Check.That(wire.NumConnectionResponses >= 2);
+        Check.That(wire.Server.NumConnectedClients == 0);
+
+        // attempt 2: retry with the same connect token after the unfinished handshake timed out
+        wire.DropClientResponsePackets = false;
+        wire.PumpConnect(connectToken, ref time, deltaTime);
+
+        Check.That(wire.Client.State == ClientState.ConnectionRequestTimedOut);
+        Check.That(wire.Server.NumConnectedClients == 0);
+        Check.That(wire.SeenKeyNonces.Count > 0);
+    }
+
+    public static void TestClientReconnectAfterAbortedHandshake()
+    {
+        using var wire = new HandshakeWireHarness();
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+
+        byte[] connectToken = wire.MintToken(TestConstants.TestClientId);
+
+        // attempt 1: drop connection responses, then explicitly abort before timeout
+        wire.DropClientResponsePackets = true;
+        wire.Client.Connect(connectToken);
+
+        while (wire.NumConnectionResponses < 2)
+        {
+            wire.Client.Update(time);
+            wire.Server.Update(time);
+            time += deltaTime;
+            Check.That(time < 2.0);
+        }
+
+        Check.That(wire.Client.State == ClientState.SendingConnectionResponse);
+
+        wire.Client.Disconnect();
+        wire.Server.Update(time);
+
+        Check.That(wire.Client.State == ClientState.Disconnected);
+        Check.That(wire.Server.NumConnectedClients == 0);
+        Check.That(wire.ServerEncryptionMappingIndex(time) == -1);
+
+        // attempt 2: immediate retry with the same connect token is refused
+        wire.DropClientResponsePackets = false;
+        wire.PumpConnect(connectToken, ref time, deltaTime);
+
+        Check.That(wire.Client.State == ClientState.ConnectionRequestTimedOut);
+        Check.That(wire.Server.NumConnectedClients == 0);
+        Check.That(wire.SeenKeyNonces.Count > 0);
+    }
+
+    public static void TestClientReconnectSubTimeoutPacketLoss()
+    {
+        using var wire = new HandshakeWireHarness();
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+
+        byte[] connectToken = wire.MintToken(TestConstants.TestClientId);
+
+        // attempt 1: drop both connection responses and disconnect packets so the server's
+        // pending entry and half-open mapping remain live and sub-timeout
+        wire.DropClientResponsePackets = true;
+        wire.DropClientDisconnectPackets = true;
+        wire.Client.Connect(connectToken);
+
+        while (wire.NumConnectionResponses < 2)
+        {
+            wire.Client.Update(time);
+            wire.Server.Update(time);
+            time += deltaTime;
+            Check.That(time < 2.0);
+        }
+
+        byte[] salt1 = wire.FirstRequestClientSalt!;
+        wire.Client.Disconnect();
+        wire.Server.Update(time);
+
+        Check.That(wire.ServerEncryptionMappingIndex(time) != -1);
+
+        // attempt 2: sub-timeout reconnect with the same connect token carries a fresh client_salt,
+        // so the pending entry refuses it and zero (key, nonce) pairs repeat
+        wire.DropClientResponsePackets = false;
+        wire.DropClientDisconnectPackets = false;
+        wire.PumpConnect(connectToken, ref time, deltaTime);
+
+        Check.That(!wire.LastRequestClientSalt!.AsSpan().SequenceEqual(salt1));
+        Check.That(wire.Client.State == ClientState.ConnectionRequestTimedOut);
+        Check.That(wire.Server.NumConnectedClients == 0);
+        Check.That(wire.SeenKeyNonces.Count > 0);
+    }
+
+    public static void TestClientReplayedChallengeOnReusedToken()
+    {
+        using var wire = new HandshakeWireHarness();
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+
+        byte[] connectToken = wire.MintToken(TestConstants.TestClientId);
+
+        wire.DropClientResponsePackets = true;
+        wire.DropClientDisconnectPackets = true;
+        wire.Client.Connect(connectToken);
+
+        while (wire.NumConnectionResponses < 2)
+        {
+            wire.Client.Update(time);
+            wire.Server.Update(time);
+            time += deltaTime;
+            Check.That(time < 2.0);
+        }
+
+        Check.That(wire.CapturedChallengePacket != null);
+        wire.Client.Disconnect();
+
+        // attempt 2: hold the client in SendingConnectionRequest by dropping outgoing requests,
+        // then replay attempt 1's challenge packet. AEAD fails under the fresh client_salt.
+        int responsesBeforeReplay = wire.NumConnectionResponses;
+
+        wire.DropClientRequestPackets = true;
+        wire.DropClientResponsePackets = false;
+        wire.DropClientDisconnectPackets = false;
+
+        wire.Client.Connect(connectToken);
+        wire.Client.Update(time);
+
+        Check.That(wire.Client.State == ClientState.SendingConnectionRequest);
+        Check.That(!wire.Client.HasServerNonce);
+
+        byte[] replayedChallenge = (byte[])wire.CapturedChallengePacket!.Clone();
+        wire.Client.ProcessPacket(in wire.ServerAddress, replayedChallenge);
+
+        Check.That(wire.Client.State == ClientState.SendingConnectionRequest);
+        Check.That(!wire.Client.HasServerNonce);
+
+        time += deltaTime;
+        wire.Client.Update(time);
+
+        Check.That(wire.Client.State == ClientState.SendingConnectionRequest);
+        Check.That(wire.NumConnectionResponses == responsesBeforeReplay);
+    }
+
+    public static void TestMultipleServersNonceDisjoint()
+    {
+        Address clientAddress = Address.Parse("[::1]:50000");
+        Address server1Address = Address.Parse("[::1]:40000");
+        Address server2Address = Address.Parse("[::1]:40001");
+
+        var seenKeyNonces = new System.Collections.Generic.HashSet<(string KeyHex, ulong Sequence)>();
+        var allAllowed = new bool[PacketType.NumPackets];
+        Array.Fill(allAllowed, true);
+
+        bool shuttingDown = false;
+        int numDeniedFromServer1 = 0;
+        int numChallengesFromServer2 = 0;
+        byte[]? saltToServer1 = null;
+        byte[]? saltToServer2 = null;
+        byte[] rootC2s = Array.Empty<byte>();
+        byte[] rootS2c = Array.Empty<byte>();
+        byte[] activeClientWriteKey = Array.Empty<byte>();
+        byte[] activeServer2SlotKey = Array.Empty<byte>();
+
+        Client? clientRef = null;
+        Server? server1Ref = null;
+        Server? server2Ref = null;
+
+        void RecordEncrypted(ReadOnlySpan<byte> packetData, byte[] key)
+        {
+            byte[] copy = packetData.ToArray();
+            ReadPacketResult parsed = PacketIO.ReadPacket(copy, true, key, TestConstants.TestProtocolId, 0, false, default, allAllowed, null);
+            Check.That(parsed.Type > 0);
+            Check.That(seenKeyNonces.Add((Convert.ToHexString(key), parsed.Sequence)));
+        }
+
+        var clientConfig = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> packetData) =>
+            {
+                if (shuttingDown)
+                    return;
+
+                if (packetData[0] == PacketType.ConnectionRequest)
+                {
+                    byte[] salt = packetData.Slice(PacketIO.ConnectionRequestPacketBytes - Defines.ConnectSaltBytes, Defines.ConnectSaltBytes).ToArray();
+                    if (to.Equals(server1Address))
+                        saltToServer1 = salt;
+                    else if (to.Equals(server2Address))
+                        saltToServer2 = salt;
+                }
+                else
+                {
+                    RecordEncrypted(packetData, activeClientWriteKey);
+                }
+
+                byte[] copy = packetData.ToArray();
+                if (to.Equals(server1Address))
+                    server1Ref!.ProcessPacket(in clientAddress, copy);
+                else if (to.Equals(server2Address))
+                    server2Ref!.ProcessPacket(in clientAddress, copy);
+            },
+            ReceivePacketOverride = (ref Address from, Span<byte> data) => 0,
+        };
+
+        var server1Config = CreateServerConfig(null);
+        server1Config.SendLoopbackPacket = (clientIndex, payload, sequence) => { };
+        server1Config.OverrideSendAndReceive = true;
+        server1Config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> packetData) =>
+        {
+            if (shuttingDown)
+                return;
+
+            if ((packetData[0] & 0xF) == PacketType.ConnectionDenied)
+                numDeniedFromServer1++;
+
+            int seqBytes = packetData[0] >> 4;
+            ReadOnlySpan<byte> serverNonce = packetData.Slice(1 + seqBytes, Defines.ServerNonceBytes);
+            byte[] derivedS2c = new byte[Protocol.KeyBytes];
+            Aead.DerivePacketKey(derivedS2c, rootS2c, saltToServer1!, serverNonce);
+            RecordEncrypted(packetData, derivedS2c);
+
+            byte[] copy = packetData.ToArray();
+            clientRef!.ProcessPacket(in server1Address, copy);
+        };
+        server1Config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+
+        var server2Config = CreateServerConfig(null);
+        server2Config.OverrideSendAndReceive = true;
+        server2Config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> packetData) =>
+        {
+            if (shuttingDown)
+                return;
+
+            int packetType = packetData[0] & 0xF;
+            if (packetType == PacketType.ConnectionChallenge)
+            {
+                numChallengesFromServer2++;
+                int seqBytes = packetData[0] >> 4;
+                ReadOnlySpan<byte> serverNonce = packetData.Slice(1 + seqBytes, Defines.ServerNonceBytes);
+                byte[] derivedS2c = new byte[Protocol.KeyBytes];
+                Aead.DerivePacketKey(derivedS2c, rootS2c, saltToServer2!, serverNonce);
+                RecordEncrypted(packetData, derivedS2c);
+
+                if (clientRef!.State == ClientState.SendingConnectionRequest)
+                {
+                    activeClientWriteKey = new byte[Protocol.KeyBytes];
+                    Aead.DerivePacketKey(activeClientWriteKey, rootC2s, clientRef.ClientSalt, serverNonce);
+                    activeServer2SlotKey = derivedS2c;
+                }
+            }
+            else
+            {
+                RecordEncrypted(packetData, activeServer2SlotKey);
+            }
+
+            byte[] copy = packetData.ToArray();
+            clientRef!.ProcessPacket(in server2Address, copy);
+        };
+        server2Config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+
+        using var client = new Client("[::1]:50000", clientConfig, 0.0);
+        using var server1 = new Server("[::1]:40000", server1Config, 0.0);
+        using var server2 = new Server("[::1]:40001", server2Config, 0.0);
+        clientRef = client;
+        server1Ref = server1;
+        server2Ref = server2;
+
+        StartServer(server1, 1);
+        StartServer(server2, 1);
+
+        // fill server1's single slot via loopback so server1.GlobalSequence stays at 1UL << 63
+        server1.ConnectLoopbackClient(0, 100UL, ReadOnlySpan<byte>.Empty);
+        Check.That(server1.NumConnectedClients == 1);
+        Check.That(server1.GlobalSequence == (1UL << 63));
+        Check.That(server2.GlobalSequence == (1UL << 63));
+
+        byte[] connectToken = GenerateConnectToken(new[] { "[::1]:40000", "[::1]:40001" }, TestConstants.TestClientId);
+        var parsedToken = new ConnectTokenData();
+        Check.That(parsedToken.Read(connectToken));
+        rootC2s = (byte[])parsedToken.ClientToServerKey.Clone();
+        rootS2c = (byte[])parsedToken.ServerToClientKey.Clone();
+
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+
+        client.Connect(connectToken);
+
+        while (true)
+        {
+            client.Update(time);
+            server1.Update(time);
+            server2.Update(time);
+
+            if (client.State <= ClientState.Disconnected || client.State == ClientState.Connected)
+                break;
+
+            time += deltaTime;
+            Check.That(time < 10.0);
+        }
+
+        // server1 emitted ConnectionDenied at global sequence 2^63 and server2 emitted
+        // ConnectionChallenge at global sequence 2^63 for the same connect token, under
+        // distinct HChaCha20-derived per-connection keys and rotated client_salt
+        Check.That(numDeniedFromServer1 >= 1);
+        Check.That(numChallengesFromServer2 >= 1);
+        Check.That(!saltToServer1!.AsSpan().SequenceEqual(saltToServer2!));
+        Check.That(server1.GlobalSequence == (1UL << 63) + 1);
+        Check.That(server2.GlobalSequence > (1UL << 63));
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server2.NumConnectedClients == 1);
+
+        shuttingDown = true;
     }
 
     public static void TestClientServerConnect()
@@ -474,7 +986,6 @@ internal static class ClientServerTests
         byte[] tokenBytes = GenerateConnectToken(serverAddress, 0x11);
         var token = new ConnectTokenData();
         Check.That(token.Read(tokenBytes));
-        serverToClientKey = token.ServerToClientKey;
         Check.That(Address.TryParse(serverAddress, out from));
 
         var config = new ClientConfig
@@ -487,18 +998,24 @@ internal static class ClientServerTests
         client.Connect(tokenBytes);
         Check.That(client.State == ClientState.SendingConnectionRequest);
 
+        byte[] serverNonce = new byte[Defines.ServerNonceBytes];
+        new TestRng(0x5E27).Fill(serverNonce);
+
+        serverToClientKey = new byte[Protocol.KeyBytes];
+        Aead.DerivePacketKey(serverToClientKey, token.ServerToClientKey, client.ClientSalt, serverNonce);
+
         byte[] challenge = new byte[8 + Defines.ChallengeTokenBytes];
-        Deliver(client, in from, serverToClientKey, PacketType.ConnectionChallenge, challenge, 1);
+        Deliver(client, in from, serverToClientKey, PacketType.ConnectionChallenge, challenge, 1, serverNonce);
         Check.That(client.State == ClientState.SendingConnectionResponse);
         Check.That(client.ClientIndex == 0);
         Check.That(client.MaxClients == 0);
         return client;
     }
 
-    private static void Deliver(Client client, in Address from, byte[] key, int packetType, ReadOnlySpan<byte> packetData, ulong sequence)
+    private static void Deliver(Client client, in Address from, byte[] key, int packetType, ReadOnlySpan<byte> packetData, ulong sequence, ReadOnlySpan<byte> serverNonce = default)
     {
         byte[] buffer = new byte[Defines.MaxPacketBytes];
-        int written = PacketIO.WriteEncryptedPacket(buffer, packetType, packetData, sequence, key, TestConstants.TestProtocolId);
+        int written = PacketIO.WriteEncryptedPacket(buffer, packetType, packetData, sequence, key, TestConstants.TestProtocolId, serverNonce);
         Check.That(written > 0);
         client.ProcessPacket(in from, buffer.AsSpan(0, written));
     }
@@ -1264,9 +1781,11 @@ internal static class ClientServerTests
                 clientId, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, nonce, tokenBytes));
             var token = new ConnectTokenData();
             Check.That(token.Read(tokenBytes));
+            Span<byte> clientSalt = stackalloc byte[Defines.ConnectSaltBytes];
+            new TestRng(clientId ^ 0x5A17UL).Fill(clientSalt);
             byte[] wire = new byte[Defines.MaxPacketBytes];
             int bytes = PacketIO.WriteConnectionRequestPacket(wire, token.VersionInfo, token.ProtocolId,
-                token.ExpireTimestamp, token.Nonce, token.PrivateData);
+                token.ExpireTimestamp, token.Nonce, token.PrivateData, clientSalt);
             server.Update(time);
             process(in from, wire.AsSpan(0, bytes), 1001);
         }
