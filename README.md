@@ -188,5 +188,5 @@ Differences from the C library, also on purpose:
 
 Never embed a production private key in a client. The fixed key in the test
 suite and interop harness is the C repo's published test key — test-only and
-obviously non-production. Report vulnerabilities privately (see the C repo's
-SECURITY.md for the family process).
+obviously non-production. Report vulnerabilities privately — see
+[SECURITY.md](SECURITY.md).
