@@ -3,7 +3,7 @@
 
     C# port of netcode (https://github.com/mas-bandwidth/netcode), the C reference
     implementation of the netcode protocol: secure client/server connections over
-    UDP. Protocol "NETCODE 1.02"; the wire is byte-identical to the C library.
+    UDP. Protocol "NETCODE 1.03"; the wire is byte-identical to the C library.
 
     This file holds the protocol objects: addresses, connect tokens, challenge
     tokens, packet read/write, replay protection, the encryption manager, packet
@@ -51,15 +51,17 @@ namespace Netcode
         /// <summary>Largest payload accepted by SendPacket / delivered by ReceivePacket.</summary>
         public const int MaxPacketSize = 1200;
         /// <summary>The protocol version string carried on the wire (13 bytes with null terminator).</summary>
-        public const string VersionInfo = "NETCODE 1.02";
+        public const string VersionInfo = "NETCODE 1.03";
     }
 
     internal static class Defines
     {
         public const int ConnectTokenNonceBytes = 24;
         public const int ConnectTokenPrivateBytes = 1024;
+        public const int ConnectSaltBytes = 8;
+        public const int ServerNonceBytes = 8;
         public const int ChallengeTokenBytes = 300;
-        public const int VersionInfoBytes = 13; // "NETCODE 1.02" with null terminator
+        public const int VersionInfoBytes = 13; // "NETCODE 1.03" with null terminator
         public const int MaxPacketBytes = 1300;
         public const int MaxPayloadBytes = 1200;
         public const int MaxAddressStringLength = 256;
@@ -72,8 +74,8 @@ namespace Netcode
         public const double PacketSendRate = 10.0;
         public const int NumDisconnectPackets = 10;
 
-        // "NETCODE 1.02" ASCII with null terminator — 13 bytes
-        public static ReadOnlySpan<byte> VersionInfo => "NETCODE 1.02\0"u8;
+        // "NETCODE 1.03" ASCII with null terminator — 13 bytes
+        public static ReadOnlySpan<byte> VersionInfo => "NETCODE 1.03\0"u8;
     }
 
     // ------------------------------------------------------------------
@@ -146,14 +148,19 @@ namespace Netcode
         }
 
         public int Position => _position;
-        public int Remaining => _buffer.Length - _position;
 
         public byte U8() { byte v = _buffer[_position]; _position += 1; return v; }
         public ushort U16() { ushort v = BinaryPrimitives.ReadUInt16LittleEndian(_buffer.Slice(_position, 2)); _position += 2; return v; }
         public uint U32() { uint v = BinaryPrimitives.ReadUInt32LittleEndian(_buffer.Slice(_position, 4)); _position += 4; return v; }
         public ulong U64() { ulong v = BinaryPrimitives.ReadUInt64LittleEndian(_buffer.Slice(_position, 8)); _position += 8; return v; }
         public void Bytes(Span<byte> destination) { _buffer.Slice(_position, destination.Length).CopyTo(destination); _position += destination.Length; }
-        public void Skip(int count) { _position += count; }
+    }
+
+    // wall-clock unix seconds, for connect token timestamps. internal so the unit
+    // tests can inject time instead of reading the real clock.
+    internal static class UnixTime
+    {
+        internal static Func<ulong> Now = () => (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
     }
 
     internal static class Rng
@@ -275,6 +282,7 @@ namespace Netcode
             if (s.Length > 0 && s[0] == '[')
             {
                 // probably "[addr6]:port"
+                bool hasPort = false;
                 int baseIndex = s.Length - 1;
                 for (int i = 0; i < 6; i++) // ":65535" is the longest possible port suffix
                 {
@@ -286,17 +294,24 @@ namespace Netcode
                         if (!TryParsePort(s.Slice(index + 1), out port))
                             return false;
                         s = s.Slice(0, index - 1);
+                        hasPort = true;
                         break;
                     }
                 }
 
-                // if a port is omitted, strip a trailing ']' so "[addr]" parses as the address.
+                // strip at most one ']': the one removed above with a port, or a
+                // trailing one when a port is omitted so "[addr]" parses as the address.
                 // NOTE: like the C library, a missing ']' is tolerated ("[::1" parses as ::1)
-                if (s[s.Length - 1] == ']')
+                if (!hasPort && s.Length > 0 && s[s.Length - 1] == ']')
                     s = s.Slice(0, s.Length - 1);
 
                 s = s.Slice(1);
             }
+
+            // any bracket or zone marker left in the address part is not a valid
+            // address for IPAddress.TryParse to reinterpret on our behalf
+            if (s.IndexOf('[') >= 0 || s.IndexOf(']') >= 0 || s.IndexOf('%') >= 0)
+                return false;
 
             if (TryParseIpv6(s, ref address))
             {
@@ -422,7 +437,7 @@ namespace Netcode
                 {
                     ushort g = GetIPv6(i);
                     bytes[i * 2] = (byte)(g >> 8);
-                    bytes[i * 2 + 1] = (byte)g;
+                    bytes[i * 2 + 1] = unchecked((byte)g);
                 }
                 var ip = new IPAddress(bytes);
                 return Port == 0 ? ip.ToString() : $"[{ip}]:{Port}";
@@ -509,8 +524,8 @@ namespace Netcode
         {
             var writer = new ByteWriter(buffer);
             writer.U64(ClientId);
-            writer.U32((uint)TimeoutSeconds);
-            writer.U32((uint)NumServerAddresses);
+            writer.U32(unchecked((uint)TimeoutSeconds));
+            writer.U32(unchecked((uint)NumServerAddresses));
             for (int i = 0; i < NumServerAddresses; i++)
                 WriteAddress(ref writer, in ServerAddresses[i]);
             writer.Bytes(ClientToServerKey);
@@ -526,8 +541,8 @@ namespace Netcode
 
             var reader = new ByteReader(buffer);
             ClientId = reader.U64();
-            TimeoutSeconds = (int)reader.U32();
-            NumServerAddresses = (int)reader.U32();
+            TimeoutSeconds = unchecked((int)reader.U32());
+            NumServerAddresses = unchecked((int)reader.U32());
 
             if (NumServerAddresses <= 0 || NumServerAddresses > Protocol.MaxServersPerConnect)
                 return false;
@@ -571,8 +586,6 @@ namespace Netcode
             byte type = reader.U8();
             if (type == (byte)AddressType.IPv4)
             {
-                if (reader.Remaining < 6)
-                    return false;
                 byte a = reader.U8(), b = reader.U8(), c = reader.U8(), d = reader.U8();
                 address.SetIPv4(a, b, c, d);
                 address.Port = reader.U16();
@@ -580,8 +593,6 @@ namespace Netcode
             }
             if (type == (byte)AddressType.IPv6)
             {
-                if (reader.Remaining < 18)
-                    return false;
                 address.Type = AddressType.IPv6;
                 for (int j = 0; j < 8; j++)
                     address.SetIPv6Group(j, reader.U16());
@@ -695,8 +706,8 @@ namespace Netcode
             writer.U64(ExpireTimestamp);
             writer.Bytes(Nonce);
             writer.Bytes(PrivateData);
-            writer.U32((uint)TimeoutSeconds);
-            writer.U32((uint)NumServerAddresses);
+            writer.U32(unchecked((uint)TimeoutSeconds));
+            writer.U32(unchecked((uint)NumServerAddresses));
             for (int i = 0; i < NumServerAddresses; i++)
                 ConnectTokenPrivate.WriteAddress(ref writer, in ServerAddresses[i]);
             writer.Bytes(ClientToServerKey);
@@ -730,8 +741,8 @@ namespace Netcode
             reader.Bytes(Nonce);
             reader.Bytes(PrivateData);
 
-            TimeoutSeconds = (int)reader.U32();
-            NumServerAddresses = (int)reader.U32();
+            TimeoutSeconds = unchecked((int)reader.U32());
+            NumServerAddresses = unchecked((int)reader.U32());
 
             if (NumServerAddresses <= 0 || NumServerAddresses > Protocol.MaxServersPerConnect)
             {
@@ -764,10 +775,19 @@ namespace Netcode
         /// Generate a connect token into <paramref name="output"/> (2048 bytes).
         /// <paramref name="publicServerAddresses"/> go into the public portion the
         /// client connects to; <paramref name="internalServerAddresses"/> go into the
-        /// encrypted private portion the server validates against. expireSeconds
-        /// and timeoutSeconds negative values disable expiry/timeout (dev only).
-        /// Returns false on invalid input.
+        /// encrypted private portion the server validates against. A negative
+        /// expireSeconds disables expiry and a negative timeoutSeconds disables
+        /// timeout; both are for development and testing only. Returns false on
+        /// invalid input.
         /// </summary>
+        /// <remarks>
+        /// A negative <paramref name="expireSeconds"/> sets the token's expire timestamp
+        /// to <c>ulong.MaxValue</c>. Such a token always passes the server's minimum
+        /// connect token expire timestamp, so it remains valid across server restarts for
+        /// as long as the server uses the same private key and protocol id. Its entry in
+        /// the server's connect token history never satisfies the expiry check that
+        /// reclaims entries, so that entry is never reusable during the server run.
+        /// </remarks>
         public static bool Generate(
             string[] publicServerAddresses,
             string[] internalServerAddresses,
@@ -822,7 +842,7 @@ namespace Netcode
             Span<byte> nonce = stackalloc byte[Defines.ConnectTokenNonceBytes];
             Rng.GenerateNonce(nonce);
 
-            ulong createTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            ulong createTimestamp = UnixTime.Now();
             ulong expireTimestamp = expireSeconds >= 0 ? createTimestamp + (ulong)expireSeconds : 0xFFFFFFFFFFFFFFFFUL;
 
             return GenerateInternal(parsedPublic.Slice(0, numServerAddresses), parsedInternal.Slice(0, numServerAddresses),
@@ -847,27 +867,38 @@ namespace Netcode
             connectTokenPrivate.Generate(clientId, timeoutSeconds, internalAddresses, userData);
 
             Span<byte> privateData = stackalloc byte[Defines.ConnectTokenPrivateBytes];
-            connectTokenPrivate.Write(privateData);
-
-            if (!ConnectTokenPrivate.Encrypt(privateData, Defines.VersionInfo, protocolId, expireTimestamp, nonce, privateKey))
-                return false;
-
             var connectToken = new ConnectTokenData();
-            Defines.VersionInfo.CopyTo(connectToken.VersionInfo);
-            connectToken.ProtocolId = protocolId;
-            connectToken.CreateTimestamp = createTimestamp;
-            connectToken.ExpireTimestamp = expireTimestamp;
-            nonce.CopyTo(connectToken.Nonce);
-            privateData.CopyTo(connectToken.PrivateData);
-            connectToken.NumServerAddresses = publicAddresses.Length;
-            for (int i = 0; i < publicAddresses.Length; i++)
-                connectToken.ServerAddresses[i] = publicAddresses[i];
-            connectTokenPrivate.ClientToServerKey.CopyTo(connectToken.ClientToServerKey, 0);
-            connectTokenPrivate.ServerToClientKey.CopyTo(connectToken.ServerToClientKey, 0);
-            connectToken.TimeoutSeconds = timeoutSeconds;
+            try
+            {
+                connectTokenPrivate.Write(privateData);
 
-            connectToken.Write(output);
-            return true;
+                if (!ConnectTokenPrivate.Encrypt(privateData, Defines.VersionInfo, protocolId, expireTimestamp, nonce, privateKey))
+                    return false;
+
+                Defines.VersionInfo.CopyTo(connectToken.VersionInfo);
+                connectToken.ProtocolId = protocolId;
+                connectToken.CreateTimestamp = createTimestamp;
+                connectToken.ExpireTimestamp = expireTimestamp;
+                nonce.CopyTo(connectToken.Nonce);
+                privateData.CopyTo(connectToken.PrivateData);
+                connectToken.NumServerAddresses = publicAddresses.Length;
+                for (int i = 0; i < publicAddresses.Length; i++)
+                    connectToken.ServerAddresses[i] = publicAddresses[i];
+                connectTokenPrivate.ClientToServerKey.CopyTo(connectToken.ClientToServerKey, 0);
+                connectTokenPrivate.ServerToClientKey.CopyTo(connectToken.ServerToClientKey, 0);
+                connectToken.TimeoutSeconds = timeoutSeconds;
+
+                connectToken.Write(output);
+                return true;
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(privateData);
+                CryptographicOperations.ZeroMemory(connectTokenPrivate.ClientToServerKey);
+                CryptographicOperations.ZeroMemory(connectTokenPrivate.ServerToClientKey);
+                CryptographicOperations.ZeroMemory(connectToken.ClientToServerKey);
+                CryptographicOperations.ZeroMemory(connectToken.ServerToClientKey);
+            }
         }
     }
 
@@ -893,6 +924,7 @@ namespace Netcode
         public int Type;            // -1 when the packet was rejected
         public ulong Sequence;
         public ulong ConnectTokenExpireTimestamp;
+        public int NonceOffset;     // offset of client_salt (Request) or server_nonce (Denied/Challenge) in the buffer
         public int DataOffset;      // offset of decrypted per-packet-type data in the buffer
         public int DataLength;      // length of decrypted per-packet-type data
     }
@@ -900,7 +932,7 @@ namespace Netcode
     internal static class PacketIO
     {
         public const int ConnectionRequestPacketBytes =
-            1 + Defines.VersionInfoBytes + 8 + 8 + Defines.ConnectTokenNonceBytes + Defines.ConnectTokenPrivateBytes; // 1078
+            1 + Defines.VersionInfoBytes + 8 + 8 + Defines.ConnectTokenNonceBytes + Defines.ConnectTokenPrivateBytes + Defines.ConnectSaltBytes; // 1086
 
         public static int SequenceNumberBytesRequired(ulong sequence)
         {
@@ -921,7 +953,8 @@ namespace Netcode
             ulong protocolId,
             ulong expireTimestamp,
             ReadOnlySpan<byte> nonce,
-            ReadOnlySpan<byte> privateData)
+            ReadOnlySpan<byte> privateData,
+            ReadOnlySpan<byte> clientSalt)
         {
             var writer = new ByteWriter(buffer);
             writer.U8(PacketType.ConnectionRequest);
@@ -930,13 +963,15 @@ namespace Netcode
             writer.U64(expireTimestamp);
             writer.Bytes(nonce);
             writer.Bytes(privateData);
+            writer.Bytes(clientSalt.Slice(0, Defines.ConnectSaltBytes));
             return writer.Position;
         }
 
         /// <summary>
         /// Write an encrypted packet (types 1..6): prefix byte, variable-length
-        /// sequence, encrypted per-type data, MAC. <paramref name="packetData"/> is the
-        /// plaintext per-type data. Returns the number of bytes written.
+        /// sequence, (for types 1 and 2) 8-byte cleartext server nonce, encrypted
+        /// per-type data, MAC. <paramref name="packetData"/> is the plaintext
+        /// per-type data. Returns the number of bytes written.
         /// </summary>
         public static int WriteEncryptedPacket(
             Span<byte> buffer,
@@ -944,7 +979,8 @@ namespace Netcode
             ReadOnlySpan<byte> packetData,
             ulong sequence,
             ReadOnlySpan<byte> writePacketKey,
-            ulong protocolId)
+            ulong protocolId,
+            ReadOnlySpan<byte> serverNonce = default)
         {
             int sequenceBytes = SequenceNumberBytesRequired(sequence);
             byte prefixByte = (byte)(packetType | (sequenceBytes << 4));
@@ -959,17 +995,27 @@ namespace Netcode
                 sequenceTemp >>= 8;
             }
 
+            bool hasServerNonce = packetType == PacketType.ConnectionDenied ||
+                                  packetType == PacketType.ConnectionChallenge;
+            if (hasServerNonce)
+                writer.Bytes(serverNonce.Slice(0, Defines.ServerNonceBytes));
+
             int encryptedStart = writer.Position;
             writer.Bytes(packetData);
             int encryptedFinish = writer.Position;
 
-            Span<byte> additional = stackalloc byte[Defines.VersionInfoBytes + 8 + 1];
+            Span<byte> additionalBuffer = stackalloc byte[Defines.VersionInfoBytes + 8 + 1 + Defines.ServerNonceBytes];
+            int additionalLength;
             {
-                var ad = new ByteWriter(additional);
+                var ad = new ByteWriter(additionalBuffer);
                 ad.Bytes(Defines.VersionInfo);
                 ad.U64(protocolId);
                 ad.U8(prefixByte);
+                if (hasServerNonce)
+                    ad.Bytes(serverNonce.Slice(0, Defines.ServerNonceBytes));
+                additionalLength = ad.Position;
             }
+            ReadOnlySpan<byte> additional = additionalBuffer.Slice(0, additionalLength);
 
             Span<byte> nonce = stackalloc byte[Aead.NonceBytesIetf];
             {
@@ -987,8 +1033,10 @@ namespace Netcode
         /// Read a packet, following the exact validation order of netcode_read_packet
         /// (and the STANDARD.md "Reading Encrypted Packets" section). Decrypts in
         /// place. For connection request packets the private connect token is
-        /// decrypted in place and DataOffset points at the 1024-byte token buffer.
-        /// Result.Type is -1 when the packet is ignored.
+        /// decrypted in place, DataOffset points at the 1024-byte token buffer, and
+        /// NonceOffset points at the trailing 8-byte client salt. For connection
+        /// denied and challenge packets NonceOffset points at the 8-byte header
+        /// server nonce. Result.Type is -1 when the packet is ignored.
         /// </summary>
         public static ReadPacketResult ReadPacket(
             Span<byte> buffer,
@@ -1054,7 +1102,7 @@ namespace Netcode
                     return result;
                 }
 
-                if (packetExpireTimestamp < minConnectTokenExpireTimestamp)
+                if (packetExpireTimestamp <= minConnectTokenExpireTimestamp)
                 {
                     NetcodeLog.Debug("ignored connection request packet. connect token predates the server start\n");
                     return result;
@@ -1075,6 +1123,7 @@ namespace Netcode
                 result.Type = PacketType.ConnectionRequest;
                 result.Sequence = 0;
                 result.ConnectTokenExpireTimestamp = packetExpireTimestamp;
+                result.NonceOffset = tokenOffset + Defines.ConnectTokenPrivateBytes;
                 result.DataOffset = tokenOffset;
                 result.DataLength = Defines.ConnectTokenPrivateBytes;
                 return result;
@@ -1117,7 +1166,12 @@ namespace Netcode
                     return result;
                 }
 
-                if (buffer.Length < 1 + sequenceBytes + Protocol.MacBytes)
+                int headerNonceBytes = (packetType == PacketType.ConnectionDenied ||
+                                        packetType == PacketType.ConnectionChallenge)
+                    ? Defines.ServerNonceBytes
+                    : 0;
+
+                if (buffer.Length < 1 + sequenceBytes + headerNonceBytes + Protocol.MacBytes)
                 {
                     NetcodeLog.Debug("ignored encrypted packet. buffer is too small for sequence bytes + encryption mac\n");
                     return result;
@@ -1126,6 +1180,12 @@ namespace Netcode
                 ulong sequence = 0;
                 for (int i = 0; i < sequenceBytes; i++)
                     sequence |= (ulong)buffer[1 + i] << (8 * i);
+
+                if (sequence == ulong.MaxValue)
+                {
+                    NetcodeLog.Debug("ignored encrypted packet. sequence number is out of range\n");
+                    return result;
+                }
 
                 // ignore the packet if it has already been received
 
@@ -1140,13 +1200,20 @@ namespace Netcode
 
                 // decrypt the per-packet type data
 
-                Span<byte> additional = stackalloc byte[Defines.VersionInfoBytes + 8 + 1];
+                int nonceOffset = 1 + sequenceBytes;
+
+                Span<byte> additionalBuffer = stackalloc byte[Defines.VersionInfoBytes + 8 + 1 + Defines.ServerNonceBytes];
+                int additionalLength;
                 {
-                    var ad = new ByteWriter(additional);
+                    var ad = new ByteWriter(additionalBuffer);
                     ad.Bytes(Defines.VersionInfo);
                     ad.U64(protocolId);
                     ad.U8(prefixByte);
+                    if (headerNonceBytes > 0)
+                        ad.Bytes(buffer.Slice(nonceOffset, Defines.ServerNonceBytes));
+                    additionalLength = ad.Position;
                 }
+                ReadOnlySpan<byte> additional = additionalBuffer.Slice(0, additionalLength);
 
                 Span<byte> nonce = stackalloc byte[Aead.NonceBytesIetf];
                 {
@@ -1155,7 +1222,7 @@ namespace Netcode
                     n.U64(sequence);
                 }
 
-                int encryptedStart = 1 + sequenceBytes;
+                int encryptedStart = nonceOffset + headerNonceBytes;
                 int encryptedBytes = buffer.Length - encryptedStart;
 
                 if (encryptedBytes < Protocol.MacBytes)
@@ -1226,6 +1293,7 @@ namespace Netcode
 
                 result.Type = packetType;
                 result.Sequence = sequence;
+                result.NonceOffset = headerNonceBytes > 0 ? nonceOffset : 0;
                 result.DataOffset = encryptedStart;
                 result.DataLength = decryptedBytes;
                 return result;
@@ -1255,6 +1323,9 @@ namespace Netcode
 
         public bool AlreadyReceived(ulong sequence)
         {
+            if (sequence == ulong.MaxValue)
+                return true;
+
             // written so it cannot overflow: "sequence + BUFFER_SIZE <= most_recent"
             // wraps for sequence values near UINT64_MAX and falsely rejects them
 
@@ -1275,6 +1346,9 @@ namespace Netcode
 
         public void AdvanceSequence(ulong sequence)
         {
+            if (sequence == ulong.MaxValue)
+                return;
+
             if (sequence > MostRecentSequence)
                 MostRecentSequence = sequence;
 
@@ -1348,6 +1422,13 @@ namespace Netcode
     /// Deterministic network conditions simulator for tests: latency, jitter,
     /// packet loss and duplicates. Same xorshift64* generator and seed as the C
     /// library, so a given configuration drops and delays the same packets.
+    /// Buffers: each slot of the packet-entry ring copies its packet into a
+    /// MaxPacketBytes buffer, allocated when the slot has none, and reuses that
+    /// buffer on later overwrites until the packet is moved out. Update moves a
+    /// due entry, buffer included, to the pending-receive list and empties its
+    /// slot; delivery, or the next Update for an undelivered entry, drops the
+    /// pending reference. A slot whose packet was moved out allocates a fresh
+    /// buffer the next time it is filled. Not allocation-free; it is a test tool.
     /// </summary>
     public sealed class NetworkSimulator
     {
@@ -1513,6 +1594,9 @@ namespace Netcode
         public readonly Address[] Address = new Address[MaxEncryptionMappings];
         public readonly int[] ClientIndex = new int[MaxEncryptionMappings];
         public readonly int[] ConnectTokenEntryIndex = new int[MaxEncryptionMappings];
+        public readonly byte[] ConnectTokenMac = new byte[Protocol.MacBytes * MaxEncryptionMappings];
+        public readonly byte[] ClientSalt = new byte[Defines.ConnectSaltBytes * MaxEncryptionMappings];
+        public readonly byte[] ServerNonce = new byte[Defines.ServerNonceBytes * MaxEncryptionMappings];
         public readonly byte[] SendKey = new byte[Protocol.KeyBytes * MaxEncryptionMappings];
         public readonly byte[] ReceiveKey = new byte[Protocol.KeyBytes * MaxEncryptionMappings];
 
@@ -1537,17 +1621,38 @@ namespace Netcode
             }
 
             Array.Clear(Timeout);
-            Array.Clear(SendKey);
-            Array.Clear(ReceiveKey);
+            Array.Clear(ConnectTokenMac);
+            CryptographicOperations.ZeroMemory(ClientSalt);
+            CryptographicOperations.ZeroMemory(ServerNonce);
+            CryptographicOperations.ZeroMemory(SendKey);
+            CryptographicOperations.ZeroMemory(ReceiveKey);
         }
 
         public bool EntryExpired(int index, double time)
         {
-            return (Timeout[index] > 0 && LastAccessTime[index] + Timeout[index] < time) ||
-                   (ExpireTime[index] >= 0.0 && ExpireTime[index] < time);
+            bool expired = (Timeout[index] > 0 && LastAccessTime[index] + Timeout[index] < time) ||
+                           (ExpireTime[index] >= 0.0 && ExpireTime[index] < time);
+            if (expired && ClientIndex[index] == -1)
+            {
+                CryptographicOperations.ZeroMemory(ClientSalt.AsSpan(index * Defines.ConnectSaltBytes, Defines.ConnectSaltBytes));
+                CryptographicOperations.ZeroMemory(ServerNonce.AsSpan(index * Defines.ServerNonceBytes, Defines.ServerNonceBytes));
+                CryptographicOperations.ZeroMemory(SendKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));
+                CryptographicOperations.ZeroMemory(ReceiveKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));
+            }
+            return expired;
         }
 
-        public bool AddEncryptionMapping(in Address address, ReadOnlySpan<byte> sendKey, ReadOnlySpan<byte> receiveKey, double time, double expireTime, int timeout, int connectTokenEntryIndex = -1)
+        public bool AddEncryptionMapping(
+            in Address address,
+            ReadOnlySpan<byte> sendKey,
+            ReadOnlySpan<byte> receiveKey,
+            double time,
+            double expireTime,
+            int timeout,
+            int connectTokenEntryIndex = -1,
+            ReadOnlySpan<byte> connectTokenMac = default,
+            ReadOnlySpan<byte> clientSalt = default,
+            ReadOnlySpan<byte> serverNonce = default)
         {
             for (int i = 0; i < NumEncryptionMappings; i++)
             {
@@ -1557,6 +1662,9 @@ namespace Netcode
                     ExpireTime[i] = expireTime;
                     LastAccessTime[i] = time;
                     ConnectTokenEntryIndex[i] = connectTokenEntryIndex;
+                    SetConnectTokenMac(i, connectTokenMac);
+                    SetClientSalt(i, clientSalt);
+                    SetServerNonce(i, serverNonce);
                     sendKey.CopyTo(SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     receiveKey.CopyTo(ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     return true;
@@ -1573,6 +1681,9 @@ namespace Netcode
                     ExpireTime[i] = expireTime;
                     LastAccessTime[i] = time;
                     ConnectTokenEntryIndex[i] = connectTokenEntryIndex;
+                    SetConnectTokenMac(i, connectTokenMac);
+                    SetClientSalt(i, clientSalt);
+                    SetServerNonce(i, serverNonce);
                     sendKey.CopyTo(SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     receiveKey.CopyTo(ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
                     if (i + 1 > NumEncryptionMappings)
@@ -1593,9 +1704,12 @@ namespace Netcode
                     ExpireTime[i] = -1.0;
                     LastAccessTime[i] = -1000.0;
                     ConnectTokenEntryIndex[i] = -1;
+                    SetConnectTokenMac(i, default);
+                    CryptographicOperations.ZeroMemory(ClientSalt.AsSpan(i * Defines.ConnectSaltBytes, Defines.ConnectSaltBytes));
+                    CryptographicOperations.ZeroMemory(ServerNonce.AsSpan(i * Defines.ServerNonceBytes, Defines.ServerNonceBytes));
                     Address[i] = default;
-                    SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes).Clear();
-                    ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes).Clear();
+                    CryptographicOperations.ZeroMemory(SendKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
+                    CryptographicOperations.ZeroMemory(ReceiveKey.AsSpan(i * Protocol.KeyBytes, Protocol.KeyBytes));
 
                     if (i + 1 == NumEncryptionMappings)
                     {
@@ -1605,6 +1719,11 @@ namespace Netcode
                             if (!EntryExpired(index, time) || ClientIndex[index] != -1)
                                 break;
                             Address[index].Type = AddressType.None;
+                            SetConnectTokenMac(index, default);
+                            CryptographicOperations.ZeroMemory(ClientSalt.AsSpan(index * Defines.ConnectSaltBytes, Defines.ConnectSaltBytes));
+                            CryptographicOperations.ZeroMemory(ServerNonce.AsSpan(index * Defines.ServerNonceBytes, Defines.ServerNonceBytes));
+                            CryptographicOperations.ZeroMemory(SendKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));
+                            CryptographicOperations.ZeroMemory(ReceiveKey.AsSpan(index * Protocol.KeyBytes, Protocol.KeyBytes));
                             index--;
                         }
                         NumEncryptionMappings = index + 1;
@@ -1648,6 +1767,52 @@ namespace Netcode
             if (index == -1)
                 return -1;
             return ConnectTokenEntryIndex[index];
+        }
+
+        private void SetConnectTokenMac(int index, ReadOnlySpan<byte> mac)
+        {
+            Span<byte> slot = ConnectTokenMac.AsSpan(index * Protocol.MacBytes, Protocol.MacBytes);
+            if (mac.Length == Protocol.MacBytes)
+                mac.CopyTo(slot);
+            else
+                slot.Clear();
+        }
+
+        private void SetClientSalt(int index, ReadOnlySpan<byte> clientSalt)
+        {
+            Span<byte> slot = ClientSalt.AsSpan(index * Defines.ConnectSaltBytes, Defines.ConnectSaltBytes);
+            if (clientSalt.Length == Defines.ConnectSaltBytes)
+                clientSalt.CopyTo(slot);
+            else
+                CryptographicOperations.ZeroMemory(slot);
+        }
+
+        private void SetServerNonce(int index, ReadOnlySpan<byte> serverNonce)
+        {
+            Span<byte> slot = ServerNonce.AsSpan(index * Defines.ServerNonceBytes, Defines.ServerNonceBytes);
+            if (serverNonce.Length == Defines.ServerNonceBytes)
+                serverNonce.CopyTo(slot);
+            else
+                CryptographicOperations.ZeroMemory(slot);
+        }
+
+        public ReadOnlySpan<byte> GetConnectTokenMac(int index)
+        {
+            return ConnectTokenMac.AsSpan(index * Protocol.MacBytes, Protocol.MacBytes);
+        }
+
+        public ReadOnlySpan<byte> GetClientSalt(int index)
+        {
+            if (index == -1)
+                return ReadOnlySpan<byte>.Empty;
+            return ClientSalt.AsSpan(index * Defines.ConnectSaltBytes, Defines.ConnectSaltBytes);
+        }
+
+        public ReadOnlySpan<byte> GetServerNonce(int index)
+        {
+            if (index == -1)
+                return ReadOnlySpan<byte>.Empty;
+            return ServerNonce.AsSpan(index * Defines.ServerNonceBytes, Defines.ServerNonceBytes);
         }
 
         public Span<byte> GetSendKey(int index)
@@ -1702,8 +1867,48 @@ namespace Netcode
             _sendAddress = sendAddress;
         }
 
+        internal const int BufferSizeMinimum = 64 * 1024;
+
+        // linux and windows clamp a socket buffer request that exceeds the OS limit, but the BSDs reject it
+        // instead (a stock NetBSD rejects anything over about 227 KiB). halve the request until one is accepted.
+        // a larger buffer is an optimisation, never a requirement: if no request down to the minimum is accepted,
+        // the socket keeps the OS default. returns the size accepted, or 0 if the OS default was kept.
+
+        internal static int BufferSizeBackOff(int requestedSize, Func<int, bool> trySize)
+        {
+            for (int size = requestedSize; size >= BufferSizeMinimum; size /= 2)
+            {
+                if (trySize(size))
+                    return size;
+            }
+            return 0;
+        }
+
+        private static void IncreaseBufferSize(Socket socket, SocketOptionName option, int requestedSize, string name)
+        {
+            int size = BufferSizeBackOff(requestedSize, trySize =>
+            {
+                try
+                {
+                    socket.SetSocketOption(SocketOptionLevel.Socket, option, trySize);
+                    return true;
+                }
+                catch (SocketException)
+                {
+                    return false;
+                }
+            });
+            if (size == 0)
+                NetcodeLog.Info($"socket {name} buffer size kept at the OS default ({requestedSize} was not accepted)\n");
+            else if (size != requestedSize)
+                NetcodeLog.Info($"socket {name} buffer size reduced from {requestedSize} to {size}\n");
+        }
+        // for tests: how many OS sockets have been asked for, so the unit tier can prove it opened none
+        internal static int NumCreated;
+
         public static CreateError Create(in Address address, int sendBufferSize, int receiveBufferSize, bool enablePacketTagging, out NetcodeSocket? result)
         {
+            System.Threading.Interlocked.Increment(ref NumCreated);
             result = null;
 
             AddressFamily family = address.Type == AddressType.IPv6 ? AddressFamily.InterNetworkV6 : AddressFamily.InterNetwork;
@@ -1725,40 +1930,19 @@ namespace Netcode
                 {
                     // stop hard client disconnects surfacing as recvfrom errors (ICMP port unreachable)
                     const int SIO_UDP_CONNRESET = unchecked((int)0x9800000C);
-                    try
+                    CreateError controlError = ConfigureConnectionReset(socket, () =>
                     {
                         socket.IOControl(SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
-                    }
-                    catch (SocketException)
-                    {
-                        // best effort; matches the spirit, not the letter, of the C code path
-                    }
+                    });
+                    if (controlError != CreateError.None)
+                        return controlError;
                 }
 
                 if (address.Type == AddressType.IPv6)
                     socket.DualMode = false; // force IPv6 only, like the C library
 
-                try
-                {
-                    socket.SendBufferSize = sendBufferSize;
-                }
-                catch (SocketException)
-                {
-                    socket.Dispose();
-                    NetcodeLog.Error("error: failed to set socket send buffer size\n");
-                    return CreateError.SockoptSndbufFailed;
-                }
-
-                try
-                {
-                    socket.ReceiveBufferSize = receiveBufferSize;
-                }
-                catch (SocketException)
-                {
-                    socket.Dispose();
-                    NetcodeLog.Error("error: failed to set socket receive buffer size\n");
-                    return CreateError.SockoptRcvbufFailed;
-                }
+                IncreaseBufferSize(socket, SocketOptionName.SendBuffer, sendBufferSize, "send");
+                IncreaseBufferSize(socket, SocketOptionName.ReceiveBuffer, receiveBufferSize, "receive");
 
                 try
                 {
@@ -1809,6 +1993,21 @@ namespace Netcode
             }
         }
 
+        internal static CreateError ConfigureConnectionReset(IDisposable handle, Action control)
+        {
+            try
+            {
+                control();
+            }
+            catch (SocketException)
+            {
+                handle.Dispose();
+                NetcodeLog.Error("error: failed to configure socket connection reset handling\n");
+                return CreateError.CreateFailed;
+            }
+            return CreateError.None;
+        }
+
         private static bool TryEnablePacketTagging(Socket socket, AddressType type)
         {
             // DSCP EF (46): low latency. best effort per platform; Windows would need
@@ -1820,9 +2019,9 @@ namespace Netcode
             {
                 if (type == AddressType.IPv6)
                 {
-                    // IPV6_TCLASS: 67 on linux, 36 on macOS/BSD
-                    int optname = OperatingSystem.IsLinux() ? 67 : 36;
-                    socket.SetRawSocketOption(41 /* IPPROTO_IPV6 */, optname, BitConverter.GetBytes(46));
+                    int optname = Ipv6TrafficClassOption(CurrentOS());
+                    if (optname >= 0)
+                        socket.SetRawSocketOption(41 /* IPPROTO_IPV6 */, optname, BitConverter.GetBytes(46));
                 }
                 else
                 {
@@ -1836,6 +2035,30 @@ namespace Netcode
             }
         }
 
+        internal enum SocketOS { Other, Linux, Android, MacOS, IOS, MacCatalyst, TvOS, FreeBSD }
+
+        private static SocketOS CurrentOS()
+        {
+            if (OperatingSystem.IsAndroid()) return SocketOS.Android;
+            if (OperatingSystem.IsLinux()) return SocketOS.Linux;
+            if (OperatingSystem.IsMacCatalyst()) return SocketOS.MacCatalyst;
+            if (OperatingSystem.IsMacOS()) return SocketOS.MacOS;
+            if (OperatingSystem.IsTvOS()) return SocketOS.TvOS;
+            if (OperatingSystem.IsIOS()) return SocketOS.IOS;
+            if (OperatingSystem.IsFreeBSD()) return SocketOS.FreeBSD;
+            return SocketOS.Other;
+        }
+
+        // IPV6_TCLASS as each OS's headers define it (the C reference uses the header
+        // constant); -1 where it is not known, and IPv6 tagging is skipped there
+        internal static int Ipv6TrafficClassOption(SocketOS os) => os switch
+        {
+            SocketOS.Linux or SocketOS.Android => 67,
+            SocketOS.MacOS or SocketOS.IOS or SocketOS.MacCatalyst or SocketOS.TvOS => 36,
+            SocketOS.FreeBSD => 61,
+            _ => -1,
+        };
+
         private static IPEndPoint ToEndPoint(in Address address)
         {
             if (address.Type == AddressType.IPv6)
@@ -1845,7 +2068,7 @@ namespace Netcode
                 {
                     ushort g = address.GetIPv6(i);
                     bytes[i * 2] = (byte)(g >> 8);
-                    bytes[i * 2 + 1] = (byte)g;
+                    bytes[i * 2 + 1] = unchecked((byte)g);
                 }
                 return new IPEndPoint(new IPAddress(bytes), address.Port);
             }
@@ -1879,7 +2102,7 @@ namespace Netcode
                 {
                     ushort g = address.GetIPv6(i);
                     buffer[8 + i * 2] = (byte)(g >> 8);
-                    buffer[8 + i * 2 + 1] = (byte)g;
+                    buffer[8 + i * 2 + 1] = unchecked((byte)g);
                 }
                 buffer.Slice(24, 4).Clear(); // scope id
             }
@@ -1925,28 +2148,42 @@ namespace Netcode
             // and the next call throws ArgumentOutOfRangeException ("SocketAddress is
             // too small"). .NET 9 moved that assignment after the error check. Re-arm
             // the size each call; it is a field store, nothing allocates.
-            _receiveAddress.Size = SocketAddress.GetMaximumAddressSize(_socket.AddressFamily);
+            //
+            // A zero-length datagram and a datagram that raises
+            // SocketError.MessageSize are both queued datagrams. Skip them and
+            // keep reading. Return 0 only when the queue is empty (WouldBlock)
+            // or on a genuine socket error.
+            while (true)
+            {
+                _receiveAddress.Size = SocketAddress.GetMaximumAddressSize(_socket.AddressFamily);
 
-            int result;
-            try
-            {
-                result = _socket.ReceiveFrom(packetData, SocketFlags.None, _receiveAddress);
-            }
-            catch (SocketException e)
-            {
-                if (e.SocketErrorCode != SocketError.WouldBlock &&
-                    e.SocketErrorCode != SocketError.ConnectionReset)
+                int result;
+                try
                 {
-                    NetcodeLog.Error($"error: recvfrom failed with error {e.SocketErrorCode}\n");
+                    if (!_socket.Poll(0, SelectMode.SelectRead))
+                        return 0;
+
+                    result = _socket.ReceiveFrom(packetData, SocketFlags.None, _receiveAddress);
                 }
-                return 0;
+                catch (SocketException e)
+                {
+                    if (e.SocketErrorCode == SocketError.MessageSize)
+                        continue;
+
+                    if (e.SocketErrorCode != SocketError.WouldBlock &&
+                        e.SocketErrorCode != SocketError.ConnectionReset)
+                    {
+                        NetcodeLog.Error($"error: recvfrom failed with error {e.SocketErrorCode}\n");
+                    }
+                    return 0;
+                }
+
+                if (result == 0)
+                    continue;
+
+                SocketAddressToAddress(_receiveAddress, ref from);
+                return result;
             }
-
-            if (result <= 0)
-                return 0;
-
-            SocketAddressToAddress(_receiveAddress, ref from);
-            return result;
         }
 
         public void Dispose()

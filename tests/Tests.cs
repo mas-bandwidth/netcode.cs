@@ -15,6 +15,8 @@
 */
 
 using System;
+using System.Net.Sockets;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 
 namespace Netcode.Tests;
@@ -38,6 +40,7 @@ internal static class TestConstants
     public const int TestServerPort = 40000;
     public const int TestConnectTokenExpiry = 30;
     public const int TestTimeoutSeconds = 15;
+    public const ulong TestUnixTime = 1000;
 
     // TEST KEY ONLY — same fixed key as the C reference test suite. Obviously
     // non-production: it is published in two public repositories.
@@ -73,13 +76,14 @@ internal sealed class TestRng
     public void Fill(Span<byte> data)
     {
         for (int i = 0; i < data.Length; i++)
-            data[i] = (byte)NextUInt64();
+            data[i] = unchecked((byte)NextUInt64());
     }
 }
 
 internal static class Program
 {
     private static string? _filter;
+    private static bool _functional;
 
     private static void RunTest(string name, Action test)
     {
@@ -87,6 +91,10 @@ internal static class Program
             return;
         Console.WriteLine(name);
         test();
+
+        // the unit tier opens no OS sockets: anything that needs one belongs to --functional
+        if (!_functional)
+            Check.That(NetcodeSocket.NumCreated == 0);
     }
 
     private static int Main(string[] args)
@@ -97,20 +105,59 @@ internal static class Program
             return Soak.Run(iterations);
         }
 
+        // the default run is the unit tier: no OS sockets, no sleeps, injected time.
+        // --functional runs the tier that uses real sockets and real time.
+        if (args.Length > 0 && args[0] == "--functional")
+        {
+            _functional = true;
+            args = args[1..];
+        }
+
         if (args.Length > 0)
             _filter = args[0];
 
+        if (_functional)
+        {
+            Console.WriteLine("[netcode.cs functional tests]\n");
+
+            RunTest("test_client_create", FunctionalTests.TestClientCreate);
+            RunTest("test_server_create", FunctionalTests.TestServerCreate);
+            RunTest("test_client_server_ipv4_socket_connect", FunctionalTests.TestClientServerIpv4SocketConnect);
+            RunTest("test_client_server_ipv6_socket_connect", FunctionalTests.TestClientServerIpv6SocketConnect);
+            RunTest("test_client_server_dual_socket_connect", FunctionalTests.TestClientServerDualSocketConnect);
+            RunTest("test_client_create_port_in_use", ClientServerTests.TestClientCreatePortInUse);
+            RunTest("test_server_create_port_in_use", ClientServerTests.TestServerCreatePortInUse);
+            RunTest("test_packet_tagging", ClientServerTests.TestPacketTagging);
+            RunTest("test_zero_allocation_socket_steady_state", Hostile.TestZeroAllocationSocketSteadyState);
+
+            Console.WriteLine("\nAll functional tests passed.");
+            return 0;
+        }
+
+        // the unit tier never reads the wall clock: unix time is injected
+        UnixTime.Now = () => TestConstants.TestUnixTime;
+
         Console.WriteLine("[netcode.cs tests]\n");
 
+        RunTest("test_socket_connection_reset_control", CoreTests.TestSocketConnectionResetControl);
+
         RunTest("test_crypto_aead_vectors", CoreTests.TestCryptoAeadVectors);
+        RunTest("test_derive_packet_keys_kat", CoreTests.TestDerivePacketKeysKat);
+        RunTest("test_wire_kat_vectors", CoreTests.TestWireKatVectors);
+        RunTest("test_crypto_poly1305_vectors", CoreTests.TestCryptoPoly1305Vectors);
         RunTest("test_crypto_differential_bcl", Hostile.TestCryptoDifferentialBcl);
         RunTest("test_queue", CoreTests.TestQueue);
+        RunTest("test_unused_members_removed", CoreTests.TestUnusedMembersRemoved);
         RunTest("test_sequence", CoreTests.TestSequence);
+        RunTest("test_socket_buffer_size_back_off", CoreTests.TestSocketBufferSizeBackOff);
         RunTest("test_address", CoreTests.TestAddress);
         RunTest("test_connect_token", CoreTests.TestConnectToken);
         RunTest("test_generate_connect_token_out_of_range", CoreTests.TestGenerateConnectTokenOutOfRange);
         RunTest("test_challenge_token", CoreTests.TestChallengeToken);
+        RunTest("test_challenge_token_server_serialization", CoreTests.TestChallengeTokenServerSerialization);
+        RunTest("test_managed_crypto_and_negative_timeout", CoreTests.TestManagedCryptoAndNegativeTimeout);
         RunTest("test_connection_request_packet", CoreTests.TestConnectionRequestPacket);
+        RunTest("test_connection_request_packet_start_floor", CoreTests.TestConnectionRequestPacketStartFloor);
         RunTest("test_connection_denied_packet", () => CoreTests.TestEmptyPacket(PacketType.ConnectionDenied));
         RunTest("test_connection_challenge_packet", () => CoreTests.TestChallengeResponsePacket(PacketType.ConnectionChallenge));
         RunTest("test_connection_response_packet", () => CoreTests.TestChallengeResponsePacket(PacketType.ConnectionResponse));
@@ -118,21 +165,27 @@ internal static class Program
         RunTest("test_connection_payload_packet", CoreTests.TestConnectionPayloadPacket);
         RunTest("test_connection_disconnect_packet", () => CoreTests.TestEmptyPacket(PacketType.ConnectionDisconnect));
         RunTest("test_connect_token_public", CoreTests.TestConnectTokenPublic);
+        RunTest("test_key_cleanup", CoreTests.TestKeyCleanup);
+        RunTest("test_reclaimed_connect_token_is_not_consumed", CoreTests.TestReclaimedConnectTokenIsNotConsumed);
         RunTest("test_encryption_manager", CoreTests.TestEncryptionManager);
         RunTest("test_replay_protection", CoreTests.TestReplayProtection);
         RunTest("test_network_simulator_determinism", CoreTests.TestNetworkSimulatorDeterminism);
         RunTest("FloatMultiplyAddRoundsTwice", CoreTests.FloatMultiplyAddRoundsTwice);
-        RunTest("test_client_create", ClientServerTests.TestClientCreate);
-        RunTest("test_server_create", ClientServerTests.TestServerCreate);
+        RunTest("test_ipv6_traffic_class_option", CoreTests.TestIpv6TrafficClassOption);
+        RunTest("test_client_server_address_families", ClientServerTests.TestClientServerAddressFamilies);
         RunTest("test_server_restart_global_sequence", ClientServerTests.TestServerRestartGlobalSequence);
         RunTest("test_connect_token_history", ClientServerTests.TestConnectTokenHistory);
         RunTest("test_client_reconnect_used_connect_token", ClientServerTests.TestClientReconnectUsedConnectToken);
         RunTest("test_client_error_connect_token_predates_server_start", ClientServerTests.TestClientErrorConnectTokenPredatesServerStart);
+        RunTest("test_client_error_connect_token_at_server_start", ClientServerTests.TestClientErrorConnectTokenAtServerStart);
+        RunTest("test_client_reconnect_after_unfinished_handshake", ClientServerTests.TestClientReconnectAfterUnfinishedHandshake);
+        RunTest("test_client_reconnect_after_aborted_handshake", ClientServerTests.TestClientReconnectAfterAbortedHandshake);
+        RunTest("test_client_reconnect_sub_timeout_packet_loss", ClientServerTests.TestClientReconnectSubTimeoutPacketLoss);
+        RunTest("test_client_replayed_challenge_on_reused_token", ClientServerTests.TestClientReplayedChallengeOnReusedToken);
+        RunTest("test_multiple_servers_nonce_disjoint", ClientServerTests.TestMultipleServersNonceDisjoint);
         RunTest("test_client_server_connect", ClientServerTests.TestClientServerConnect);
-        RunTest("test_client_server_ipv4_socket_connect", ClientServerTests.TestClientServerIpv4SocketConnect);
-        RunTest("test_client_server_ipv6_socket_connect", ClientServerTests.TestClientServerIpv6SocketConnect);
-        RunTest("test_client_server_dual_socket_connect", ClientServerTests.TestClientServerDualSocketConnect);
         RunTest("test_client_server_keep_alive", ClientServerTests.TestClientServerKeepAlive);
+        RunTest("test_client_packet_from_other_address_leaves_replay_protection", ClientServerTests.TestClientPacketFromOtherAddressLeavesReplayProtection);
         RunTest("test_client_server_multiple_clients", ClientServerTests.TestClientServerMultipleClients);
         RunTest("test_client_server_multiple_servers", ClientServerTests.TestClientServerMultipleServers);
         RunTest("test_client_error_connect_token_expired", ClientServerTests.TestClientErrorConnectTokenExpired);
@@ -143,14 +196,23 @@ internal static class Program
         RunTest("test_client_error_connection_denied", ClientServerTests.TestClientErrorConnectionDenied);
         RunTest("test_client_side_disconnect", ClientServerTests.TestClientSideDisconnect);
         RunTest("test_server_side_disconnect", ClientServerTests.TestServerSideDisconnect);
+        RunTest("test_server_side_disconnect_multiple_servers", ClientServerTests.TestServerSideDisconnectMultipleServers);
         RunTest("test_server_client_disconnect_reason", ClientServerTests.TestServerClientDisconnectReason);
         RunTest("test_client_reconnect", ClientServerTests.TestClientReconnect);
         RunTest("test_disable_timeout", ClientServerTests.TestDisableTimeout);
+        RunTest("test_pending_encryption_mapping_expiry", ClientServerTests.TestPendingEncryptionMappingExpiry);
         RunTest("test_loopback", ClientServerTests.TestLoopback);
+        RunTest("test_loopback_disconnect_reentry", ClientServerTests.TestLoopbackDisconnectReentry);
+        RunTest("test_receive_packet_short_buffer", ReceiveBufferTests.TestReceivePacketShortBuffer);
         RunTest("test_client_create_missing_override_callback", ClientServerTests.TestClientCreateMissingOverrideCallback);
         RunTest("test_server_create_missing_override_callback", ClientServerTests.TestServerCreateMissingOverrideCallback);
         RunTest("test_client_loopback_requires_callback", ClientServerTests.TestClientLoopbackRequiresCallback);
         RunTest("test_server_loopback_requires_callback", ClientServerTests.TestServerLoopbackRequiresCallback);
+
+        RunTest("test_replay_protection_duplicate_packet", SessionReplayTests.TestReplayProtectionDuplicatePacket);
+        RunTest("test_replay_protection_failed_decrypt", SessionReplayTests.TestReplayProtectionFailedDecrypt);
+        RunTest("test_client_server_config_snapshot", ConfigSnapshotTests.TestClientServerConfigSnapshot);
+
         RunTest("test_fuzz_read_packet_raw", Hostile.TestFuzzReadPacketRaw);
         RunTest("test_fuzz_packet_round_trip_corruption", Hostile.TestFuzzPacketRoundTripCorruption);
         RunTest("test_fuzz_connect_token", Hostile.TestFuzzConnectToken);
@@ -164,6 +226,32 @@ internal static class Program
 
 internal static class CoreTests
 {
+    private sealed class ControlHandle : IDisposable
+    {
+        public int DisposeCount;
+        public void Dispose() => DisposeCount++;
+    }
+
+    public static void TestSocketConnectionResetControl()
+    {
+        var failedHandle = new ControlHandle();
+        int controlCalls = 0;
+        NetcodeSocket.CreateError error = NetcodeSocket.ConfigureConnectionReset(failedHandle, () =>
+        {
+            controlCalls++;
+            throw new SocketException((int)SocketError.OperationNotSupported);
+        });
+        Check.That(error == NetcodeSocket.CreateError.CreateFailed);
+        Check.That(controlCalls == 1);
+        Check.That(failedHandle.DisposeCount == 1);
+
+        var successfulHandle = new ControlHandle();
+        error = NetcodeSocket.ConfigureConnectionReset(successfulHandle, () => controlCalls++);
+        Check.That(error == NetcodeSocket.CreateError.None);
+        Check.That(controlCalls == 2);
+        Check.That(successfulHandle.DisposeCount == 0);
+    }
+
     // Canary inputs for FloatMultiplyAddRoundsTwice. Deliberately mutable static
     // fields, not constants: the JIT must not be able to fold the test expression
     // at compile time, or the canary would prove nothing about the runtime.
@@ -193,6 +281,21 @@ internal static class CoreTests
         double db = _canaryDoubleA;
         double dc = _canaryDoubleC;
         Check.That(BitConverter.DoubleToInt64Bits(da * db + dc) == 0L);
+    }
+
+    public static void TestIpv6TrafficClassOption()
+    {
+        // IPV6_TCLASS as each OS's own headers define it
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.Linux) == 67);
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.Android) == 67);
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.MacOS) == 36);
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.IOS) == 36);
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.MacCatalyst) == 36);
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.TvOS) == 36);
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.FreeBSD) == 61);
+
+        // no known option number: IPv6 tagging is skipped
+        Check.That(NetcodeSocket.Ipv6TrafficClassOption(NetcodeSocket.SocketOS.Other) == -1);
     }
 
     public static void TestCryptoAeadVectors()
@@ -286,6 +389,329 @@ internal static class CoreTests
         Check.That(!Aead.DecryptIetf(buffer, katCtIetf.Length, katAd, katNpubIetf, katKey));
     }
 
+    private static void FillKatPattern(Span<byte> data, byte multiplier, byte addend)
+    {
+        for (int i = 0; i < data.Length; i++)
+            data[i] = unchecked((byte)(i * multiplier + addend));
+    }
+
+    public static void TestDerivePacketKeysKat()
+    {
+        // Known-answer vectors for NETCODE 1.03 per-connection HChaCha20 key derivation:
+        //   derived_key = crypto_core_hchacha20( client_salt[8] || server_nonce[8], token_key[32], NULL )
+        // Inputs:
+        //   c2s_key      (32B, i*3 + 1):   0104070a0d101316191c1f2225282b2e3134373a3d404346494c4f5255585b5e
+        //   s2c_key      (32B, i*5 + 2):   02070c11161b20252a2f34393e43484d52575c61666b70757a7f84898e93989d
+        //   client_salt  (8B,  i*19 + 21): 15283b4e6174879a
+        //   server_nonce (8B,  i*23 + 29): 1d344b627990a7be
+        // Outputs:
+        //   derived_c2s_key: a5225053ddedabd2fdf737924c4e7cda5c2f334fe78957b499adf7e0ad1471df
+        //   derived_s2c_key: 8be2caf26f26a9bc1710172def250ad1b5bcf543138d7534994ae65ddc25a6fb
+
+        byte[] expectedC2sInput = Convert.FromHexString("0104070a0d101316191c1f2225282b2e3134373a3d404346494c4f5255585b5e");
+        byte[] expectedS2cInput = Convert.FromHexString("02070c11161b20252a2f34393e43484d52575c61666b70757a7f84898e93989d");
+        byte[] expectedSaltInput = Convert.FromHexString("15283b4e6174879a");
+        byte[] expectedNonceInput = Convert.FromHexString("1d344b627990a7be");
+        byte[] katDerivedC2s = Convert.FromHexString("a5225053ddedabd2fdf737924c4e7cda5c2f334fe78957b499adf7e0ad1471df");
+        byte[] katDerivedS2c = Convert.FromHexString("8be2caf26f26a9bc1710172def250ad1b5bcf543138d7534994ae65ddc25a6fb");
+
+        byte[] c2sKey = new byte[Protocol.KeyBytes];
+        byte[] s2cKey = new byte[Protocol.KeyBytes];
+        byte[] clientSalt = new byte[Defines.ConnectSaltBytes];
+        byte[] serverNonce = new byte[Defines.ServerNonceBytes];
+        byte[] derivedC2s = new byte[Protocol.KeyBytes];
+        byte[] derivedS2c = new byte[Protocol.KeyBytes];
+        byte[] alteredKey = new byte[Protocol.KeyBytes];
+
+        FillKatPattern(c2sKey, 3, 1);
+        FillKatPattern(s2cKey, 5, 2);
+        FillKatPattern(clientSalt, 19, 21);
+        FillKatPattern(serverNonce, 23, 29);
+
+        Check.That(c2sKey.AsSpan().SequenceEqual(expectedC2sInput));
+        Check.That(s2cKey.AsSpan().SequenceEqual(expectedS2cInput));
+        Check.That(clientSalt.AsSpan().SequenceEqual(expectedSaltInput));
+        Check.That(serverNonce.AsSpan().SequenceEqual(expectedNonceInput));
+
+        Aead.DerivePacketKey(derivedC2s, c2sKey, clientSalt, serverNonce);
+        Aead.DerivePacketKey(derivedS2c, s2cKey, clientSalt, serverNonce);
+
+        Check.That(derivedC2s.AsSpan().SequenceEqual(katDerivedC2s));
+        Check.That(derivedS2c.AsSpan().SequenceEqual(katDerivedS2c));
+        Check.That(!derivedC2s.AsSpan().SequenceEqual(c2sKey));
+        Check.That(!derivedS2c.AsSpan().SequenceEqual(s2cKey));
+        Check.That(!derivedC2s.AsSpan().SequenceEqual(derivedS2c));
+
+        clientSalt[0] ^= 0x01;
+        Aead.DerivePacketKey(alteredKey, c2sKey, clientSalt, serverNonce);
+        Check.That(!alteredKey.AsSpan().SequenceEqual(derivedC2s));
+        clientSalt[0] ^= 0x01;
+
+        serverNonce[0] ^= 0x01;
+        Aead.DerivePacketKey(alteredKey, s2cKey, clientSalt, serverNonce);
+        Check.That(!alteredKey.AsSpan().SequenceEqual(derivedS2c));
+        serverNonce[0] ^= 0x01;
+    }
+
+    public static void TestWireKatVectors()
+    {
+        // Known-answer wire vectors from netcode.c test_wire_kat_vectors for NETCODE 1.03
+        // encrypted packets (22-byte AAD and 30-byte server_nonce AAD) and challenge token.
+
+        byte[] katPacketKeepAlive =
+        {
+            0x44,0x77,0x66,0x55,0x44,0x8e,0x81,0x04,0xbd,0xf6,0xca,0x06,0xd9,0xa8,0x32,0x8e,
+            0x8c,0x6b,0x42,0xbb,0x0a,0x7e,0x84,0xd1,0xab,0x70,0xf5,0xaa,0x31,
+        };
+        byte[] katPacketDenied =
+        {
+            0x81,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x80,0x1d,0x34,0x4b,0x62,0x79,0x90,0xa7,
+            0xbe,0xea,0xa7,0xd8,0x85,0x75,0x91,0xae,0x63,0x25,0xd0,0xed,0x98,0xfd,0x6a,0x36,
+            0xe5,
+        };
+        byte[] katPacketChallenge =
+        {
+            0x82,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x80,0x1d,0x34,0x4b,0x62,0x79,0x90,0xa7,
+            0xbe,0xf9,0x17,0xe3,0xd7,0xd3,0x9f,0x8c,0x91,0x85,0x5b,0xe7,0x2a,0xa4,0x34,0x42,
+            0x8d,0x7b,0xc6,0x42,0x6b,0xe5,0x1c,0x90,0x06,0x69,0xb8,0x5e,0x1f,0x0c,0x60,0xf0,
+            0x6d,0x74,0xc8,0x0f,0x93,0x01,0x13,0x40,0xb5,0x7d,0x46,0x3e,0xa4,0x7f,0x72,0x57,
+            0x20,0xb1,0x5d,0x74,0x22,0x07,0xa5,0xd9,0xfe,0xe5,0x79,0x11,0x7b,0x0c,0x50,0xf3,
+            0xd6,0x86,0xf6,0x01,0x82,0xec,0x61,0x71,0x43,0x1d,0x65,0x98,0x8a,0xbc,0xe1,0xfb,
+            0x8f,0x92,0x44,0x79,0x9b,0xf9,0xfe,0xe8,0x6f,0xd3,0x87,0x1d,0xd4,0x39,0xa2,0x83,
+            0x28,0x16,0x98,0xc8,0xe5,0x8a,0xf7,0xc2,0x62,0xdc,0x75,0x31,0x38,0x2c,0xef,0xd1,
+            0xa7,0xb7,0x54,0x0e,0xbd,0x04,0x2e,0x53,0xe6,0xe0,0x47,0x07,0x68,0xb9,0x8d,0x59,
+            0x44,0x3c,0x27,0x08,0x1e,0xaa,0x51,0x08,0x0c,0x52,0xa6,0xdf,0x14,0x6e,0xa8,0x7a,
+            0x4d,0xe9,0x99,0x84,0xa8,0xfe,0x49,0x41,0x01,0x46,0x89,0xee,0xbb,0xfe,0xa0,0xb6,
+            0x06,0x8e,0xc1,0x29,0x73,0x34,0xa1,0xe0,0x2a,0x6e,0x0f,0xee,0xe9,0x3b,0xd1,0x71,
+            0x97,0x8d,0x36,0x6d,0x2d,0x0c,0x1f,0x38,0x3e,0xd6,0xd6,0x62,0x84,0x2b,0x3f,0x8a,
+            0x2e,0x5e,0xec,0x1b,0xa8,0xac,0xea,0x0c,0x7c,0x14,0xa6,0x3a,0x8c,0x8f,0x81,0x90,
+            0xf1,0x33,0xf1,0x8e,0x8f,0xff,0x17,0x40,0x07,0x57,0xc8,0xba,0x69,0xda,0x47,0x93,
+            0xf6,0xfd,0x52,0x71,0x9d,0x76,0x30,0x56,0xb1,0x2c,0xba,0x04,0x42,0x07,0x7e,0xe0,
+            0x35,0xb2,0xa3,0x9e,0x49,0x61,0xcc,0xfd,0x4e,0x26,0xc6,0x19,0xaa,0x63,0x92,0x40,
+            0x40,0x8f,0x3e,0x38,0xd7,0xea,0xd8,0x84,0x04,0xe6,0x9c,0x49,0xb1,0xe9,0x99,0x78,
+            0xc6,0xf2,0xda,0xa8,0xd4,0x31,0xf3,0x5b,0x26,0xca,0xe7,0xc6,0xf5,0xa9,0x9c,0x64,
+            0x11,0x7c,0xb0,0x92,0xcc,0xac,0x74,0xc0,0xf3,0xbb,0xa7,0xe2,0xec,0x2c,0x1c,0x2c,
+            0x6f,0x0b,0xa3,0xf6,0x76,0x24,0xf9,0xd4,0x9d,0xd3,0x12,0x4c,0xfa,0xf7,0xae,0xf6,
+            0xfd,0x46,0xdf,0x8c,0xa9,
+        };
+        byte[] katChallengeToken =
+        {
+            0x90,0xdd,0x66,0x4e,0x43,0x0a,0xaf,0x1f,0x6e,0x69,0x65,0xda,0x41,0x17,0xde,0xeb,
+            0x38,0x47,0x06,0xe5,0x5e,0x84,0xb2,0xb5,0x0c,0x33,0xb9,0x83,0x45,0xbb,0xdc,0x8c,
+            0x84,0xbb,0x85,0x25,0x9d,0xf0,0x2c,0x82,0x1e,0x20,0xa1,0x4d,0xeb,0x55,0x6c,0xdb,
+            0xc0,0xfd,0x3c,0x52,0x69,0xff,0xad,0xfc,0xa3,0xef,0x2a,0x32,0x9f,0x70,0xe3,0xcb,
+            0x65,0x2c,0xcb,0xf3,0x16,0x7f,0xd2,0x88,0x48,0x7c,0x4e,0x8f,0xbb,0xa2,0x2e,0x64,
+            0x94,0xc2,0x15,0xa3,0xc1,0xdf,0x36,0x3e,0x66,0x74,0x0e,0x62,0x39,0xe7,0xfd,0x8e,
+            0x99,0xa4,0x20,0x18,0xb3,0x7d,0x61,0x8d,0xf6,0x9a,0x6d,0x7f,0xaf,0xcb,0x11,0x51,
+            0xee,0xf7,0x13,0x90,0x1f,0xda,0xa4,0x25,0x09,0x04,0x50,0x37,0xc3,0xf0,0x92,0x8b,
+            0x55,0x47,0x19,0x71,0xdd,0xb8,0x65,0xf0,0x5a,0xed,0x73,0xac,0x60,0x77,0xfa,0x12,
+            0x6e,0x33,0xb5,0x70,0xce,0x3b,0x0b,0x10,0xa3,0x0b,0x36,0xc5,0xf2,0x83,0x55,0xd8,
+            0xa2,0x03,0x97,0x02,0x05,0x1b,0xcf,0x91,0xd6,0xdb,0x76,0xf3,0xb3,0x29,0x52,0x1a,
+            0xc7,0x52,0xc7,0xa8,0x91,0x6e,0x3d,0x69,0x81,0xc1,0xa6,0x22,0xa7,0x85,0xea,0xfc,
+            0x5b,0x08,0x83,0x8e,0xc5,0x4e,0x31,0xc1,0xa4,0x5b,0x49,0x4f,0x20,0x86,0x07,0x58,
+            0x45,0xbf,0xde,0x03,0xed,0x5f,0xe2,0xfa,0xfc,0xa1,0xbf,0xe8,0x00,0x66,0x27,0xb7,
+            0x57,0x3a,0xec,0xdf,0xc9,0x7d,0x1b,0x06,0x01,0xc4,0xb6,0x02,0x2f,0x8f,0xa6,0x24,
+            0x70,0x41,0x4a,0x92,0x63,0x01,0x08,0xa6,0x68,0xb2,0xbf,0x57,0x47,0x8d,0x6a,0x3a,
+            0xe9,0xc6,0xbc,0xb0,0x87,0x08,0x16,0x9b,0x2e,0x02,0xba,0x68,0x1f,0xe6,0x2f,0x23,
+            0x58,0xa7,0xd8,0x3f,0xf2,0x67,0x03,0xd2,0xf5,0xd1,0x0f,0x6e,0x66,0x2c,0x66,0x8d,
+            0x54,0x1c,0x0c,0xcf,0xeb,0x94,0x99,0xb5,0x0f,0xa5,0x06,0x96,
+        };
+
+        const ulong protocolId = 0x1122334455667788UL;
+        const ulong packetSequence = 0x44556677UL;
+        const ulong challengeSequence = 0xFFEEDDCCBBAA9988UL;
+
+        byte[] packetKey = new byte[Protocol.KeyBytes];
+        byte[] s2cKey = new byte[Protocol.KeyBytes];
+        byte[] clientSalt = new byte[Defines.ConnectSaltBytes];
+        byte[] serverNonce = new byte[Defines.ServerNonceBytes];
+        byte[] derivedS2c = new byte[Protocol.KeyBytes];
+
+        FillKatPattern(packetKey, 7, 1);
+        FillKatPattern(s2cKey, 5, 2);
+        FillKatPattern(clientSalt, 19, 21);
+        FillKatPattern(serverNonce, 23, 29);
+        Aead.DerivePacketKey(derivedS2c, s2cKey, clientSalt, serverNonce);
+
+        // 1. Keep-alive packet (22-byte AAD)
+        byte[] keepAliveData = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(keepAliveData.AsSpan(0, 4), 10);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(keepAliveData.AsSpan(4, 4), 16);
+
+        byte[] buf = new byte[Defines.MaxPacketBytes];
+        int keepAliveBytes = PacketIO.WriteEncryptedPacket(buf, PacketType.ConnectionKeepAlive, keepAliveData, packetSequence, packetKey, protocolId);
+        Check.That(keepAliveBytes == katPacketKeepAlive.Length);
+        Check.That(buf.AsSpan(0, keepAliveBytes).SequenceEqual(katPacketKeepAlive));
+
+        // 2. Connection denied packet (server_nonce header + 30-byte AAD)
+        int deniedBytes = PacketIO.WriteEncryptedPacket(buf, PacketType.ConnectionDenied, ReadOnlySpan<byte>.Empty, 1UL << 63, derivedS2c, protocolId, serverNonce);
+        Check.That(deniedBytes == katPacketDenied.Length);
+        Check.That(buf.AsSpan(0, deniedBytes).SequenceEqual(katPacketDenied));
+
+        byte[] deniedWork = (byte[])katPacketDenied.Clone();
+        ReadPacketResult outDenied = PacketIO.ReadPacket(deniedWork, true, derivedS2c, protocolId, 0, false, default, AllAllowed, null);
+        Check.That(outDenied.Type == PacketType.ConnectionDenied);
+        Check.That(outDenied.Sequence == (1UL << 63));
+        Check.That(deniedWork.AsSpan(outDenied.NonceOffset, Defines.ServerNonceBytes).SequenceEqual(serverNonce));
+
+        deniedWork = (byte[])katPacketDenied.Clone();
+        deniedWork[9] ^= 0x01;
+        Check.That(PacketIO.ReadPacket(deniedWork, true, derivedS2c, protocolId, 0, false, default, AllAllowed, null).Type == -1);
+
+        // 3. Connection challenge packet (server_nonce header + 30-byte AAD)
+        byte[] challengePayload = new byte[8 + Defines.ChallengeTokenBytes];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(challengePayload.AsSpan(0, 8), challengeSequence);
+        katChallengeToken.CopyTo(challengePayload.AsSpan(8));
+
+        int challengeBytes = PacketIO.WriteEncryptedPacket(buf, PacketType.ConnectionChallenge, challengePayload, (1UL << 63) + 1, derivedS2c, protocolId, serverNonce);
+        Check.That(challengeBytes == katPacketChallenge.Length);
+        Check.That(buf.AsSpan(0, challengeBytes).SequenceEqual(katPacketChallenge));
+
+        byte[] challengeWork = (byte[])katPacketChallenge.Clone();
+        ReadPacketResult outChallenge = PacketIO.ReadPacket(challengeWork, true, derivedS2c, protocolId, 0, false, default, AllAllowed, null);
+        Check.That(outChallenge.Type == PacketType.ConnectionChallenge);
+        Check.That(outChallenge.Sequence == (1UL << 63) + 1);
+        Check.That(challengeWork.AsSpan(outChallenge.NonceOffset, Defines.ServerNonceBytes).SequenceEqual(serverNonce));
+        Check.That(System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(challengeWork.AsSpan(outChallenge.DataOffset, 8)) == challengeSequence);
+        Check.That(challengeWork.AsSpan(outChallenge.DataOffset + 8, Defines.ChallengeTokenBytes).SequenceEqual(katChallengeToken));
+
+        challengeWork = (byte[])katPacketChallenge.Clone();
+        challengeWork[9] ^= 0x01;
+        Check.That(PacketIO.ReadPacket(challengeWork, true, derivedS2c, protocolId, 0, false, default, AllAllowed, null).Type == -1);
+    }
+
+    public static void TestCryptoPoly1305Vectors()
+    {
+        // RFC 8439 Section 2.5.2 and Appendix A.3, bytes as published. Keys are
+        // r ‖ s; vectors 5-11 are the RFC's limb-carry and final-reduction edge
+        // cases (accumulator at or just below 2^130 - 5, s overflowing 2^128).
+
+        const string ietfText =
+            "416e79207375626d697373696f6e20746f20746865204945544620696e74656e" +
+            "6465642062792074686520436f6e7472696275746f7220666f72207075626c69" +
+            "636174696f6e20617320616c6c206f722070617274206f6620616e2049455446" +
+            "20496e7465726e65742d4472616674206f722052464320616e6420616e792073" +
+            "746174656d656e74206d6164652077697468696e2074686520636f6e74657874" +
+            "206f6620616e204945544620616374697669747920697320636f6e7369646572" +
+            "656420616e20224945544620436f6e747269627574696f6e222e205375636820" +
+            "73746174656d656e747320696e636c756465206f72616c2073746174656d656e" +
+            "747320696e20494554462073657373696f6e732c2061732077656c6c20617320" +
+            "7772697474656e20616e6420656c656374726f6e696320636f6d6d756e696361" +
+            "74696f6e73206d61646520617420616e792074696d65206f7220706c6163652c" +
+            "207768696368206172652061646472657373656420746f";
+
+        string[][] vectors =
+        {
+            // Section 2.5.2
+            new[]
+            {
+                "85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b",
+                "43727970746f6772617068696320466f72756d2052657365617263682047726f7570",
+                "a8061dc1305136c6c22b8baf0c0127a9",
+            },
+            // A.3 #1
+            new[]
+            {
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+                "00000000000000000000000000000000",
+            },
+            // A.3 #2
+            new[]
+            {
+                "0000000000000000000000000000000036e5f6b5c5e06070f0efca96227a863e",
+                ietfText,
+                "36e5f6b5c5e06070f0efca96227a863e",
+            },
+            // A.3 #3
+            new[]
+            {
+                "36e5f6b5c5e06070f0efca96227a863e00000000000000000000000000000000",
+                ietfText,
+                "f3477e7cd95417af89a6b8794c310cf0",
+            },
+            // A.3 #4
+            new[]
+            {
+                "1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075c0",
+                "2754776173206272696c6c69672c20616e642074686520736c6974687920746f" +
+                "7665730a446964206779726520616e642067696d626c6520696e207468652077" +
+                "6162653a0a416c6c206d696d737920776572652074686520626f726f676f7665" +
+                "732c0a416e6420746865206d6f6d65207261746873206f757467726162652e",
+                "4541669a7eaaee61e708dc7cbcc5eb62",
+            },
+            // A.3 #5: partially reduced final result not fully reduced
+            new[]
+            {
+                "02000000000000000000000000000000" + "00000000000000000000000000000000",
+                "ffffffffffffffffffffffffffffffff",
+                "03000000000000000000000000000000",
+            },
+            // A.3 #6: addition of s overflows modulo 2^128
+            new[]
+            {
+                "02000000000000000000000000000000" + "ffffffffffffffffffffffffffffffff",
+                "02000000000000000000000000000000",
+                "03000000000000000000000000000000",
+            },
+            // A.3 #7: data limb all ones with carry from lower limb
+            new[]
+            {
+                "01000000000000000000000000000000" + "00000000000000000000000000000000",
+                "ffffffffffffffffffffffffffffffff" +
+                "f0ffffffffffffffffffffffffffffff" +
+                "11000000000000000000000000000000",
+                "05000000000000000000000000000000",
+            },
+            // A.3 #8: polynomial result exactly 2^130 - 5
+            new[]
+            {
+                "01000000000000000000000000000000" + "00000000000000000000000000000000",
+                "ffffffffffffffffffffffffffffffff" +
+                "fbfefefefefefefefefefefefefefefe" +
+                "01010101010101010101010101010101",
+                "00000000000000000000000000000000",
+            },
+            // A.3 #9: polynomial result exactly 2^130 - 6
+            new[]
+            {
+                "02000000000000000000000000000000" + "00000000000000000000000000000000",
+                "fdffffffffffffffffffffffffffffff",
+                "faffffffffffffffffffffffffffffff",
+            },
+            // A.3 #10: 5*H+L reduction produces a 131-bit intermediate result
+            new[]
+            {
+                "01000000000000000400000000000000" + "00000000000000000000000000000000",
+                "e33594d7505e43b90000000000000000" +
+                "3394d7505e4379cd0100000000000000" +
+                "00000000000000000000000000000000" +
+                "01000000000000000000000000000000",
+                "14000000000000005500000000000000",
+            },
+            // A.3 #11: 5*H+L reduction produces a 131-bit final result
+            new[]
+            {
+                "01000000000000000400000000000000" + "00000000000000000000000000000000",
+                "e33594d7505e43b90000000000000000" +
+                "3394d7505e4379cd0100000000000000" +
+                "00000000000000000000000000000000",
+                "13000000000000000000000000000000",
+            },
+        };
+
+        Span<byte> mac = stackalloc byte[16];
+        foreach (string[] v in vectors)
+        {
+            byte[] key = Convert.FromHexString(v[0]);
+            byte[] message = Convert.FromHexString(v[1]);
+            byte[] tag = Convert.FromHexString(v[2]);
+            Check.That(key.Length == 32 && tag.Length == 16);
+            Aead.Poly1305Mac(mac, message, key);
+            Check.That(mac.SequenceEqual(tag));
+        }
+    }
+
     public static void TestQueue()
     {
         var queue = new PacketQueue();
@@ -299,7 +725,6 @@ internal static class CoreTests
 
         // add some packets to the queue and make sure they pop off in the correct order
 
-        var rng = new TestRng(0x1234);
         const int NumPackets = 100;
         byte[] payload = new byte[Protocol.MaxPacketSize];
 
@@ -359,8 +784,22 @@ internal static class CoreTests
 
         Check.That(queue.Count == 0);
         Check.That(queue.Pop(popped, out _) == -1);
+    }
 
-        _ = rng;
+    public static void TestUnusedMembersRemoved()
+    {
+        const System.Reflection.BindingFlags Declared =
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.Static |
+            System.Reflection.BindingFlags.DeclaredOnly;
+
+        Check.That(typeof(ByteReader).GetMethod("Skip", Declared) == null);
+        Check.That(typeof(ByteReader).GetProperty("Remaining", Declared) == null);
+        Check.That(typeof(Aead).GetField("NonceBytesX", Declared) == null);
+        Check.That(typeof(ConnectTokenHistory).GetMethod("State", Declared) == null);
+        Check.That(typeof(ConnectTokenHistory).GetMethod("EntryTime", Declared) == null);
     }
 
     public static void TestSequence()
@@ -374,6 +813,45 @@ internal static class CoreTests
         Check.That(PacketIO.SequenceNumberBytesRequired(0x112233445566) == 6);
         Check.That(PacketIO.SequenceNumberBytesRequired(0x11223344556677) == 7);
         Check.That(PacketIO.SequenceNumberBytesRequired(0x1122334455667788) == 8);
+    }
+
+    public static void TestSocketBufferSizeBackOff()
+    {
+        const int requested = 4 * 1024 * 1024;
+
+        // an OS that accepts the request (or clamps it, as linux and windows do) takes it on the first try
+
+        {
+            var tried = new System.Collections.Generic.List<int>();
+            Check.That(NetcodeSocket.BufferSizeBackOff(requested, size => { tried.Add(size); return size <= requested; }) == requested);
+            Check.That(tried.Count == 1);
+        }
+
+        // an OS that refuses anything over 227 KiB refuses 4M, 2M, 1M, 512K and 256K, and takes 128K
+
+        {
+            var tried = new System.Collections.Generic.List<int>();
+            Check.That(NetcodeSocket.BufferSizeBackOff(requested, size => { tried.Add(size); return size <= 227 * 1024; }) == 128 * 1024);
+            Check.That(string.Join(",", tried) == "4194304,2097152,1048576,524288,262144,131072");
+        }
+
+        // an OS that refuses every request down to the minimum keeps its default: not an error, and never a request below the minimum
+
+        {
+            var tried = new System.Collections.Generic.List<int>();
+            Check.That(NetcodeSocket.BufferSizeBackOff(requested, size => { tried.Add(size); return false; }) == 0);
+            Check.That(tried.Count == 7);
+            Check.That(tried[tried.Count - 1] == NetcodeSocket.BufferSizeMinimum);
+            Check.That(NetcodeSocket.BufferSizeMinimum == 64 * 1024);
+        }
+
+        // a request already below the minimum is not made at all
+
+        {
+            var tried = new System.Collections.Generic.List<int>();
+            Check.That(NetcodeSocket.BufferSizeBackOff(32 * 1024, size => { tried.Add(size); return true; }) == 0);
+            Check.That(tried.Count == 0);
+        }
     }
 
     public static void TestAddress()
@@ -412,6 +890,32 @@ internal static class CoreTests
             Check.That(!Address.TryParse("[::1]:65536", out _));
             Check.That(!Address.TryParse("[::1]:", out _));
             Check.That(!Address.TryParse("[::1]:40k", out _));
+        }
+
+        // brackets and zone ids: at most one bracket pair is stripped, and any
+        // bracket or zone marker left in the address part must be rejected
+
+        {
+            Check.That(!Address.TryParse("[[::1]]", out _));
+            Check.That(!Address.TryParse("[::1]]:80", out _));
+            Check.That(!Address.TryParse("[::1]:80]", out _));
+            Check.That(!Address.TryParse("[::1]]", out _));
+            Check.That(!Address.TryParse("fe80::1%eth0", out _));
+            Check.That(!Address.TryParse("[fe80::1%eth0]", out _));
+            Check.That(!Address.TryParse("[fe80::1%eth0]:80", out _));
+
+            Check.That(Address.TryParse("127.0.0.1", out Address address));
+            Check.That(address.Type == AddressType.IPv4 && address.Port == 0);
+            Check.That(Address.TryParse("127.0.0.1:80", out address));
+            Check.That(address.Type == AddressType.IPv4 && address.Port == 80);
+            Check.That(Address.TryParse("::1", out address));
+            Check.That(address.Type == AddressType.IPv6 && address.Port == 0);
+            Check.That(Address.TryParse("[::1]", out address));
+            Check.That(address.Type == AddressType.IPv6 && address.Port == 0);
+            Check.That(Address.TryParse("[::1]:80", out address));
+            Check.That(address.Type == AddressType.IPv6 && address.Port == 80);
+            Check.That(Address.TryParse("fe80::1", out address));
+            Check.That(address.Type == AddressType.IPv6 && address.Port == 0);
         }
 
         {
@@ -576,7 +1080,7 @@ internal static class CoreTests
 
         // encrypt the buffer
 
-        ulong expireTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 30;
+        ulong expireTimestamp = UnixTime.Now() + 30;
         byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
         Rng.GenerateNonce(nonce);
         byte[] key = new byte[Protocol.KeyBytes];
@@ -658,6 +1162,119 @@ internal static class CoreTests
         Check.That(outputToken.UserData.AsSpan().SequenceEqual(inputToken.UserData));
     }
 
+    public static void TestChallengeTokenServerSerialization()
+    {
+        // the server and the tests must share one challenge token serialization
+        // path: round-trip the token, then pin that the server calls the helpers.
+
+        var inputToken = new ChallengeToken();
+        inputToken.ClientId = TestConstants.TestClientId;
+        new TestRng(0x78).Fill(inputToken.UserData);
+
+        byte[] buffer = new byte[Defines.ChallengeTokenBytes];
+        inputToken.Write(buffer);
+
+        var outputToken = new ChallengeToken();
+        Check.That(outputToken.Read(buffer));
+        Check.That(outputToken.ClientId == inputToken.ClientId);
+        Check.That(outputToken.UserData.AsSpan().SequenceEqual(inputToken.UserData));
+
+        byte[] expected = new byte[Defines.ChallengeTokenBytes];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(expected.AsSpan(0, 8), inputToken.ClientId);
+        inputToken.UserData.AsSpan().CopyTo(expected.AsSpan(8));
+        Check.That(buffer.AsSpan().SequenceEqual(expected));
+
+        bool serverWrites = false;
+        bool serverReads = false;
+
+        foreach (MethodInfo method in typeof(Server).GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic))
+        {
+            byte[]? il = method.GetMethodBody()?.GetILAsByteArray();
+            if (il == null)
+                continue;
+            for (int i = 0; i + 4 < il.Length; i++)
+            {
+                if (il[i] != 0x28 && il[i] != 0x6F) // call / callvirt
+                    continue;
+                int token = BitConverter.ToInt32(il, i + 1);
+                MethodBase? called;
+                try
+                {
+                    called = method.Module.ResolveMethod(token);
+                }
+                catch (Exception e) when (e is ArgumentException or BadImageFormatException)
+                {
+                    continue;
+                }
+                if (called != null && called.DeclaringType == typeof(ChallengeToken) && called.Name == "Write")
+                    serverWrites = true;
+                else if (called != null && called.DeclaringType == typeof(ChallengeToken) && called.Name == "Read")
+                    serverReads = true;
+            }
+        }
+
+        Check.That(serverWrites);
+        Check.That(serverReads);
+    }
+
+    public static void TestManagedCryptoAndNegativeTimeout()
+    {
+        byte[] key = new byte[Aead.KeyBytes];
+        for (int i = 0; i < key.Length; i++)
+            key[i] = (byte)(i + 1);
+
+        byte[] message = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17 };
+
+        byte[] ietfNonce = new byte[Aead.NonceBytesIetf];
+        for (int i = 0; i < ietfNonce.Length; i++)
+            ietfNonce[i] = (byte)i;
+
+        byte[] xNonce = new byte[Defines.ConnectTokenNonceBytes];
+        for (int i = 0; i < xNonce.Length; i++)
+            xNonce[i] = (byte)i;
+
+        byte[] buffer = new byte[message.Length + Aead.MacBytes];
+        message.CopyTo(buffer, 0);
+        Aead.EncryptIetf(buffer, message.Length, ReadOnlySpan<byte>.Empty, ietfNonce, key);
+        Check.That(Aead.DecryptIetf(buffer, buffer.Length, ReadOnlySpan<byte>.Empty, ietfNonce, key));
+        Check.That(buffer.AsSpan(0, message.Length).SequenceEqual(message));
+
+        message.CopyTo(buffer, 0);
+        Aead.EncryptX(buffer, message.Length, ReadOnlySpan<byte>.Empty, xNonce, key);
+        Check.That(Aead.DecryptX(buffer, buffer.Length, ReadOnlySpan<byte>.Empty, xNonce, key));
+        Check.That(buffer.AsSpan(0, message.Length).SequenceEqual(message));
+
+        Address address = default;
+        address.SetIPv4(127, 0, 0, 1);
+        address.Port = TestConstants.TestServerPort;
+
+        var token = new ConnectTokenPrivate();
+        token.ClientId = TestConstants.TestClientId;
+        token.TimeoutSeconds = -1;
+        token.NumServerAddresses = 1;
+        token.ServerAddresses[0] = address;
+
+        byte[] tokenBuffer = new byte[Defines.ConnectTokenPrivateBytes];
+        token.Write(tokenBuffer);
+
+        var readToken = new ConnectTokenPrivate();
+        Check.That(readToken.Read(tokenBuffer));
+        Check.That(readToken.TimeoutSeconds == -1);
+
+        var data = new ConnectTokenData();
+        Defines.VersionInfo.CopyTo(data.VersionInfo);
+        data.TimeoutSeconds = -1;
+        data.NumServerAddresses = 1;
+        data.ServerAddresses[0] = address;
+
+        byte[] dataBuffer = new byte[Protocol.ConnectTokenBytes];
+        data.Write(dataBuffer);
+
+        var readData = new ConnectTokenData();
+        Check.That(readData.Read(dataBuffer));
+        Check.That(readData.TimeoutSeconds == -1);
+    }
+
     private static readonly bool[] AllAllowed = CreateAllAllowed();
 
     private static bool[] CreateAllAllowed()
@@ -685,7 +1302,7 @@ internal static class CoreTests
 
         byte[] encryptedConnectTokenData = (byte[])connectTokenData.Clone();
 
-        ulong expireTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds() + 30;
+        ulong expireTimestamp = UnixTime.Now() + 30;
         byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
         Rng.GenerateNonce(nonce);
         byte[] key = new byte[Protocol.KeyBytes];
@@ -695,58 +1312,178 @@ internal static class CoreTests
 
         // write a connection request packet wrapping the encrypted connect token
 
+        byte[] clientSalt = new byte[Defines.ConnectSaltBytes];
+        Rng.Fill(clientSalt);
+
         byte[] buffer = new byte[2048];
-        int bytesWritten = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, encryptedConnectTokenData);
+        int bytesWritten = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, encryptedConnectTokenData, clientSalt);
 
         Check.That(bytesWritten == PacketIO.ConnectionRequestPacketBytes);
 
         // read the packet back in (the connect token data is decrypted as part of the read)
 
+        byte[] readBuffer = new byte[2048];
+        buffer.AsSpan(0, bytesWritten).CopyTo(readBuffer);
+
         ReadPacketResult result = PacketIO.ReadPacket(
-            buffer.AsSpan(0, bytesWritten),
+            readBuffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, new byte[Protocol.KeyBytes],
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: true, key,
             AllAllowed, null);
 
         Check.That(result.Type == PacketType.ConnectionRequest);
         Check.That(result.DataLength == Defines.ConnectTokenPrivateBytes);
-        Check.That(buffer.AsSpan(result.DataOffset, Defines.ConnectTokenPrivateBytes - Protocol.MacBytes)
+        Check.That(readBuffer.AsSpan(result.NonceOffset, Defines.ConnectSaltBytes).SequenceEqual(clientSalt));
+        Check.That(readBuffer.AsSpan(result.DataOffset, Defines.ConnectTokenPrivateBytes - Protocol.MacBytes)
             .SequenceEqual(connectTokenData.AsSpan(0, Defines.ConnectTokenPrivateBytes - Protocol.MacBytes)));
 
         var outputToken = new ConnectTokenPrivate();
-        Check.That(outputToken.Read(buffer.AsSpan(result.DataOffset, result.DataLength)));
+        Check.That(outputToken.Read(readBuffer.AsSpan(result.DataOffset, result.DataLength)));
         Check.That(outputToken.ClientId == TestConstants.TestClientId);
+
+        // a 1078-byte NETCODE 1.02 request or wrong version string must be rejected
+
+        buffer.AsSpan(0, bytesWritten).CopyTo(readBuffer);
+        Check.That(PacketIO.ReadPacket(
+            readBuffer.AsSpan(0, bytesWritten - Defines.ConnectSaltBytes),
+            hasReadPacketKey: true, new byte[Protocol.KeyBytes],
+            TestConstants.TestProtocolId,
+            UnixTime.Now(),
+            hasPrivateKey: true, key,
+            AllAllowed, null).Type == -1);
+
+        buffer.AsSpan(0, bytesWritten).CopyTo(readBuffer);
+        readBuffer[1 + 11] = (byte)'2';
+        Check.That(PacketIO.ReadPacket(
+            readBuffer.AsSpan(0, bytesWritten),
+            hasReadPacketKey: true, new byte[Protocol.KeyBytes],
+            TestConstants.TestProtocolId,
+            UnixTime.Now(),
+            hasPrivateKey: true, key,
+            AllAllowed, null).Type == -1);
+    }
+
+    public static void TestConnectionRequestPacketStartFloor()
+    {
+        Address serverAddress = TestServerAddress();
+
+        byte[] userData = new byte[Protocol.UserDataBytes];
+        new TestRng(0x99).Fill(userData);
+
+        var inputToken = new ConnectTokenPrivate();
+        Span<Address> addresses = stackalloc Address[1] { serverAddress };
+        inputToken.Generate(TestConstants.TestClientId, TestConstants.TestTimeoutSeconds, addresses, userData);
+
+        byte[] connectTokenData = new byte[Defines.ConnectTokenPrivateBytes];
+        inputToken.Write(connectTokenData);
+
+        byte[] key = new byte[Protocol.KeyBytes];
+        Rng.GenerateKey(key);
+
+        ulong currentTimestamp = 1000;
+        ulong minConnectTokenExpireTimestamp = currentTimestamp + 30;
+
+        static ReadPacketResult ReadRequest(byte[] connectTokenData, byte[] key, ulong expireTimestamp, ulong currentTimestamp, ulong minConnectTokenExpireTimestamp)
+        {
+            byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
+            Rng.GenerateNonce(nonce);
+            byte[] clientSalt = new byte[Defines.ConnectSaltBytes];
+            Rng.Fill(clientSalt);
+            byte[] encryptedConnectTokenData = (byte[])connectTokenData.Clone();
+            Check.That(ConnectTokenPrivate.Encrypt(encryptedConnectTokenData, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, key));
+
+            byte[] buffer = new byte[2048];
+            int bytesWritten = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, encryptedConnectTokenData, clientSalt);
+            Check.That(bytesWritten == PacketIO.ConnectionRequestPacketBytes);
+
+            return PacketIO.ReadPacket(
+                buffer.AsSpan(0, bytesWritten),
+                hasReadPacketKey: true, new byte[Protocol.KeyBytes],
+                TestConstants.TestProtocolId,
+                currentTimestamp,
+                hasPrivateKey: true, key,
+                AllAllowed, null,
+                minConnectTokenExpireTimestamp);
+        }
+
+        // a token expiring in the same second the server started is refused
+        Check.That(ReadRequest(connectTokenData, key, minConnectTokenExpireTimestamp, currentTimestamp, minConnectTokenExpireTimestamp).Type == -1);
+
+        // one second past the start floor is accepted
+        ReadPacketResult accepted = ReadRequest(connectTokenData, key, minConnectTokenExpireTimestamp + 1, currentTimestamp, minConnectTokenExpireTimestamp);
+        Check.That(accepted.Type == PacketType.ConnectionRequest);
+        Check.That(accepted.ConnectTokenExpireTimestamp == minConnectTokenExpireTimestamp + 1);
     }
 
     public static void TestEmptyPacket(int packetType)
     {
-        // denied and disconnect packets: no data, encrypted
+        // denied and disconnect packets: no data, encrypted (denied carries 8-byte server_nonce)
 
         byte[] buffer = new byte[Defines.MaxPacketBytes];
         byte[] packetKey = new byte[Protocol.KeyBytes];
         Rng.GenerateKey(packetKey);
 
-        int bytesWritten = PacketIO.WriteEncryptedPacket(buffer, packetType, ReadOnlySpan<byte>.Empty, 1000, packetKey, TestConstants.TestProtocolId);
-        Check.That(bytesWritten > 0);
+        byte[] serverNonce = new byte[Defines.ServerNonceBytes];
+        Rng.Fill(serverNonce);
+        bool hasServerNonce = packetType == PacketType.ConnectionDenied;
+
+        int bytesWritten = PacketIO.WriteEncryptedPacket(
+            buffer,
+            packetType,
+            ReadOnlySpan<byte>.Empty,
+            1000,
+            packetKey,
+            TestConstants.TestProtocolId,
+            hasServerNonce ? serverNonce : ReadOnlySpan<byte>.Empty);
+        Check.That(bytesWritten == 1 + 2 + (hasServerNonce ? Defines.ServerNonceBytes : 0) + Protocol.MacBytes);
+
+        byte[] readBuffer = new byte[Defines.MaxPacketBytes];
+        buffer.AsSpan(0, bytesWritten).CopyTo(readBuffer);
 
         ReadPacketResult result = PacketIO.ReadPacket(
-            buffer.AsSpan(0, bytesWritten),
+            readBuffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, packetKey,
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
             AllAllowed, null);
 
         Check.That(result.Type == packetType);
         Check.That(result.Sequence == 1000);
         Check.That(result.DataLength == 0);
+
+        if (hasServerNonce)
+        {
+            Check.That(readBuffer.AsSpan(result.NonceOffset, Defines.ServerNonceBytes).SequenceEqual(serverNonce));
+
+            // tampering with server_nonce or truncating below header_nonce_bytes + MAC is rejected
+            buffer.AsSpan(0, bytesWritten).CopyTo(readBuffer);
+            readBuffer[1 + (readBuffer[0] >> 4)] ^= 0x01;
+            Check.That(PacketIO.ReadPacket(
+                readBuffer.AsSpan(0, bytesWritten),
+                hasReadPacketKey: true, packetKey,
+                TestConstants.TestProtocolId,
+                UnixTime.Now(),
+                hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
+                AllAllowed, null).Type == -1);
+
+            buffer.AsSpan(0, bytesWritten).CopyTo(readBuffer);
+            Check.That(PacketIO.ReadPacket(
+                readBuffer.AsSpan(0, bytesWritten - 1),
+                hasReadPacketKey: true, packetKey,
+                TestConstants.TestProtocolId,
+                UnixTime.Now(),
+                hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
+                AllAllowed, null).Type == -1);
+        }
     }
 
     public static void TestChallengeResponsePacket(int packetType)
     {
         // challenge and response packets: challenge token sequence + 300 bytes of token data
+        // (challenge also carries 8-byte cleartext server_nonce bound in 30-byte AAD)
 
         byte[] packetData = new byte[8 + Defines.ChallengeTokenBytes];
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(packetData.AsSpan(0, 8), 0);
@@ -756,21 +1493,51 @@ internal static class CoreTests
         byte[] packetKey = new byte[Protocol.KeyBytes];
         Rng.GenerateKey(packetKey);
 
-        int bytesWritten = PacketIO.WriteEncryptedPacket(buffer, packetType, packetData, 1000, packetKey, TestConstants.TestProtocolId);
-        Check.That(bytesWritten > 0);
+        byte[] serverNonce = new byte[Defines.ServerNonceBytes];
+        Rng.Fill(serverNonce);
+        bool hasServerNonce = packetType == PacketType.ConnectionChallenge;
+
+        int bytesWritten = PacketIO.WriteEncryptedPacket(
+            buffer,
+            packetType,
+            packetData,
+            1000,
+            packetKey,
+            TestConstants.TestProtocolId,
+            hasServerNonce ? serverNonce : ReadOnlySpan<byte>.Empty);
+        Check.That(bytesWritten == 1 + 2 + (hasServerNonce ? Defines.ServerNonceBytes : 0) + 8 + Defines.ChallengeTokenBytes + Protocol.MacBytes);
+
+        byte[] readBuffer = new byte[Defines.MaxPacketBytes];
+        buffer.AsSpan(0, bytesWritten).CopyTo(readBuffer);
 
         ReadPacketResult result = PacketIO.ReadPacket(
-            buffer.AsSpan(0, bytesWritten),
+            readBuffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, packetKey,
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
             AllAllowed, null);
 
         Check.That(result.Type == packetType);
         Check.That(result.Sequence == 1000);
         Check.That(result.DataLength == 8 + Defines.ChallengeTokenBytes);
-        Check.That(buffer.AsSpan(result.DataOffset, result.DataLength).SequenceEqual(packetData));
+        Check.That(readBuffer.AsSpan(result.DataOffset, result.DataLength).SequenceEqual(packetData));
+
+        if (hasServerNonce)
+        {
+            Check.That(readBuffer.AsSpan(result.NonceOffset, Defines.ServerNonceBytes).SequenceEqual(serverNonce));
+
+            // tampering with server_nonce in the cleartext header is rejected by AEAD
+            buffer.AsSpan(0, bytesWritten).CopyTo(readBuffer);
+            readBuffer[1 + (readBuffer[0] >> 4)] ^= 0x01;
+            Check.That(PacketIO.ReadPacket(
+                readBuffer.AsSpan(0, bytesWritten),
+                hasReadPacketKey: true, packetKey,
+                TestConstants.TestProtocolId,
+                UnixTime.Now(),
+                hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
+                AllAllowed, null).Type == -1);
+        }
     }
 
     public static void TestConnectionKeepAlivePacket()
@@ -790,7 +1557,7 @@ internal static class CoreTests
             buffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, packetKey,
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
             AllAllowed, null);
 
@@ -815,7 +1582,7 @@ internal static class CoreTests
             buffer.AsSpan(0, bytesWritten),
             hasReadPacketKey: true, packetKey,
             TestConstants.TestProtocolId,
-            (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
+            UnixTime.Now(),
             hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
             AllAllowed, null);
 
@@ -840,7 +1607,7 @@ internal static class CoreTests
         byte[] connectTokenPrivateData = new byte[Defines.ConnectTokenPrivateBytes];
         connectTokenPrivate.Write(connectTokenPrivateData);
 
-        ulong createTimestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        ulong createTimestamp = UnixTime.Now();
         ulong expireTimestamp = createTimestamp + 30;
         byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
         Rng.GenerateNonce(nonce);
@@ -880,6 +1647,193 @@ internal static class CoreTests
         Check.That(outputConnectToken.ClientToServerKey.AsSpan().SequenceEqual(inputConnectToken.ClientToServerKey));
         Check.That(outputConnectToken.ServerToClientKey.AsSpan().SequenceEqual(inputConnectToken.ServerToClientKey));
         Check.That(outputConnectToken.TimeoutSeconds == inputConnectToken.TimeoutSeconds);
+    }
+
+    private delegate void ProcessAtTime(in Address from, Span<byte> packet, ulong timestamp);
+
+    public static void TestKeyCleanup()
+    {
+        const System.Reflection.BindingFlags Fields = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var key = (byte[])TestConstants.PrivateKey.Clone();
+        var config = new ServerConfig
+        {
+            ProtocolId = TestConstants.TestProtocolId,
+            PrivateKey = key,
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> packet) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> packet) => 0,
+        };
+        using var server = new Server("127.0.0.1:40000", config, 1000);
+        var ownedKey = (byte[])typeof(Server).GetField("_privateKey", Fields)!.GetValue(server)!;
+        Check.That(ownedKey.AsSpan().SequenceEqual(key));
+        var snapshotKey = ((ServerConfig)typeof(Server).GetField("_config", Fields)!.GetValue(server)!).PrivateKey;
+        Check.That(!ReferenceEquals(snapshotKey, key));
+        typeof(Server).GetField("_running", Fields)!.SetValue(server, true);
+        var process = typeof(Server).GetMethod("ReadAndProcessPacket", Fields)!.CreateDelegate<ProcessAtTime>(server);
+        Address.TryParse("127.0.0.1:40000", out Address serverAddress);
+        Address.TryParse("127.0.0.1:50000", out Address clientAddress);
+        foreach (int mode in new[] { 0, 1, 2 })
+        {
+            server.Flags = mode == 2 ? Server.FlagIgnoreConnectionRequestPackets : 0;
+            var token = new ConnectTokenPrivate();
+            token.Generate(1, 15, new[] { mode != 1 ? serverAddress : clientAddress }, new byte[Protocol.UserDataBytes]);
+            byte[] privateData = new byte[Defines.ConnectTokenPrivateBytes];
+            token.Write(privateData);
+            byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
+            byte[] clientSalt = new byte[Defines.ConnectSaltBytes];
+            clientSalt.AsSpan().Fill(0x55);
+            Check.That(ConnectTokenPrivate.Encrypt(privateData, Defines.VersionInfo, config.ProtocolId, 1030, nonce, key));
+            byte[] packet = new byte[PacketIO.ConnectionRequestPacketBytes];
+            Check.That(PacketIO.WriteConnectionRequestPacket(packet, Defines.VersionInfo, config.ProtocolId, 1030, nonce, privateData, clientSalt) == packet.Length);
+            process(in clientAddress, packet, 1000);
+            Check.That(packet.AsSpan(packet.Length - Defines.ConnectTokenPrivateBytes - Defines.ConnectSaltBytes).IndexOfAnyExcept((byte)0) == -1);
+        }
+        server.Dispose();
+        Check.That(ownedKey.AsSpan().IndexOfAnyExcept((byte)0) == -1);
+        Check.That(snapshotKey.AsSpan().IndexOfAnyExcept((byte)0) == -1);
+        Check.That(key.AsSpan().SequenceEqual(TestConstants.PrivateKey));
+
+        var ownedManager = new EncryptionManager();
+        Check.That(ownedManager.AddEncryptionMapping(in serverAddress, key, key, 1000, 1001, 15));
+        ownedManager.SetExpireTime(0, -1);
+        ownedManager.ClientIndex[0] = 0;
+        Check.That(ownedManager.AddEncryptionMapping(in clientAddress, key, key, 1030, -1, 15));
+        Check.That(ownedManager.SendKey.AsSpan(0, Protocol.KeyBytes).SequenceEqual(key));
+        Check.That(ownedManager.ReceiveKey.AsSpan(0, Protocol.KeyBytes).SequenceEqual(key));
+        Check.That(ownedManager.RemoveEncryptionMapping(in clientAddress, 1030));
+        Check.That(ownedManager.SendKey.AsSpan(0, Protocol.KeyBytes).SequenceEqual(key));
+        Check.That(ownedManager.ReceiveKey.AsSpan(0, Protocol.KeyBytes).SequenceEqual(key));
+        Check.That(ownedManager.Touch(0, in serverAddress, 1030));
+        Check.That(ownedManager.FindEncryptionMapping(in serverAddress, 1030) == 0);
+        Check.That(ownedManager.GetSendKey(0).SequenceEqual(key));
+        Check.That(ownedManager.GetReceiveKey(0).SequenceEqual(key));
+
+        byte[] testSalt = { 1, 2, 3, 4, 5, 6, 7, 8 };
+        byte[] testNonce = { 9, 10, 11, 12, 13, 14, 15, 16 };
+        byte[] testMac = new byte[Protocol.MacBytes];
+        testMac.AsSpan().Fill(0xCC);
+        var manager = new EncryptionManager();
+        Check.That(manager.AddEncryptionMapping(in serverAddress, key, key, 1000, 1001, 15, 0, testMac, testSalt, testNonce));
+        Check.That(manager.AddEncryptionMapping(in clientAddress, key, key, 1000, -1, 15, 1, testMac, testSalt, testNonce));
+        Check.That(manager.RemoveEncryptionMapping(in clientAddress, 1002));
+        Check.That(manager.SendKey.AsSpan(0, 2 * Protocol.KeyBytes).IndexOfAnyExcept((byte)0) == -1);
+        Check.That(manager.ReceiveKey.AsSpan(0, 2 * Protocol.KeyBytes).IndexOfAnyExcept((byte)0) == -1);
+        Check.That(manager.ClientSalt.AsSpan(0, 2 * Defines.ConnectSaltBytes).IndexOfAnyExcept((byte)0) == -1);
+        Check.That(manager.ServerNonce.AsSpan(0, 2 * Defines.ServerNonceBytes).IndexOfAnyExcept((byte)0) == -1);
+        Check.That(manager.AddEncryptionMapping(in serverAddress, key, key, 1000, 1001, 15, 0, testMac, testSalt, testNonce));
+        Check.That(manager.FindEncryptionMapping(in serverAddress, 1002) == -1);
+        Check.That(manager.SendKey.AsSpan(0, Protocol.KeyBytes).IndexOfAnyExcept((byte)0) == -1);
+        Check.That(manager.ReceiveKey.AsSpan(0, Protocol.KeyBytes).IndexOfAnyExcept((byte)0) == -1);
+        Check.That(manager.ClientSalt.AsSpan(0, Defines.ConnectSaltBytes).IndexOfAnyExcept((byte)0) == -1);
+        Check.That(manager.ServerNonce.AsSpan(0, Defines.ServerNonceBytes).IndexOfAnyExcept((byte)0) == -1);
+
+        var clientConfig = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0,
+        };
+        using var client = new Client("127.0.0.1:0", clientConfig, 0.0);
+        byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
+        string[] addrs = { "127.0.0.1:40000" };
+        Check.That(ConnectTokenGenerator.Generate(addrs, addrs, 30, 15, 0x99, TestConstants.TestProtocolId, TestConstants.PrivateKey, new byte[Protocol.UserDataBytes], connectToken));
+        client.Connect(connectToken);
+        Check.That(client.ClientSalt.IndexOfAnyExcept((byte)0) != -1);
+        byte[] serverNonceForClient = { 1, 2, 3, 4, 5, 6, 7, 8 };
+        var parsedToken = new ConnectTokenData();
+        Check.That(parsedToken.Read(connectToken));
+        byte[] derivedS2c = new byte[Protocol.KeyBytes];
+        Aead.DerivePacketKey(derivedS2c, parsedToken.ServerToClientKey, client.ClientSalt, serverNonceForClient);
+        byte[] challengeBuf = new byte[Defines.MaxPacketBytes];
+        int challengeLen = PacketIO.WriteEncryptedPacket(challengeBuf, PacketType.ConnectionChallenge, new byte[8 + Defines.ChallengeTokenBytes], 1, derivedS2c, TestConstants.TestProtocolId, serverNonceForClient);
+        client.ProcessPacket(in serverAddress, challengeBuf.AsSpan(0, challengeLen));
+        Check.That(client.HasServerNonce);
+        client.Disconnect();
+        Check.That(!client.HasServerNonce);
+        Check.That(client.ClientSalt.IndexOfAnyExcept((byte)0) == -1);
+        var clientReadKey = (byte[])typeof(Client).GetField("_readPacketKey", Fields)!.GetValue(client)!;
+        var clientWriteKey = (byte[])typeof(Client).GetField("_writePacketKey", Fields)!.GetValue(client)!;
+        var clientServerNonce = (byte[])typeof(Client).GetField("_serverNonce", Fields)!.GetValue(client)!;
+        Check.That(clientReadKey.AsSpan().IndexOfAnyExcept((byte)0) == -1);
+        Check.That(clientWriteKey.AsSpan().IndexOfAnyExcept((byte)0) == -1);
+        Check.That(clientServerNonce.AsSpan().IndexOfAnyExcept((byte)0) == -1);
+    }
+
+    private static byte[] ReclaimRequest(ConnectTokenPrivate token, in Address serverAddress, ulong expireTimestamp, out byte[] clientSalt)
+    {
+        byte[] privateData = new byte[Defines.ConnectTokenPrivateBytes];
+        token.Write(privateData);
+        byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
+        clientSalt = new byte[Defines.ConnectSaltBytes];
+        Rng.Fill(clientSalt);
+        Check.That(ConnectTokenPrivate.Encrypt(privateData, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, TestConstants.PrivateKey));
+        byte[] packet = new byte[PacketIO.ConnectionRequestPacketBytes];
+        Check.That(PacketIO.WriteConnectionRequestPacket(packet, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, privateData, clientSalt) == packet.Length);
+        return packet;
+    }
+
+    public static void TestReclaimedConnectTokenIsNotConsumed()
+    {
+        // T1's connect token expires on the timestamp passed in while its encryption mapping is
+        // still live on server time, and T2 reclaims that history slot. Completing T1 must not
+        // mark T2 consumed, so T2's retried connection request still gets a challenge.
+
+        const System.Reflection.BindingFlags Fields = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        var sent = new System.Collections.Generic.List<(Address To, byte[] Packet)>();
+        var config = new ServerConfig
+        {
+            ProtocolId = TestConstants.TestProtocolId,
+            PrivateKey = (byte[])TestConstants.PrivateKey.Clone(),
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> packet) => sent.Add((to, packet.ToArray())),
+            ReceivePacketOverride = (ref Address from, Span<byte> packet) => 0,
+        };
+        using var server = new Server("127.0.0.1:40000", config, 1000);
+        typeof(Server).GetField("_running", Fields)!.SetValue(server, true);
+        typeof(Server).GetField("_maxClients", Fields)!.SetValue(server, 2);
+        var process = typeof(Server).GetMethod("ReadAndProcessPacket", Fields)!.CreateDelegate<ProcessAtTime>(server);
+        Address.TryParse("127.0.0.1:40000", out Address serverAddress);
+        Address.TryParse("127.0.0.1:21001", out Address fromT1);
+        Address.TryParse("127.0.0.1:21002", out Address fromT2);
+
+        const ulong now = 1000;
+        const ulong t1Expire = 1030;
+
+        var t1 = new ConnectTokenPrivate();
+        t1.Generate(1, 15, new[] { serverAddress }, new byte[Protocol.UserDataBytes]);
+        process(in fromT1, ReclaimRequest(t1, in serverAddress, t1Expire, out byte[] t1ClientSalt), now);
+        Check.That(sent.Count == 1 && sent[0].To.Equals(fromT1));
+        Check.That((sent[0].Packet[0] & 0xF) == PacketType.ConnectionChallenge);
+        byte[] t1Challenge = sent[0].Packet;
+
+        var t2 = new ConnectTokenPrivate();
+        t2.Generate(2, 15, new[] { serverAddress }, new byte[Protocol.UserDataBytes]);
+        byte[] t2Request = ReclaimRequest(t2, in serverAddress, t1Expire + 30, out _);
+        process(in fromT2, (byte[])t2Request.Clone(), t1Expire);
+        Check.That(sent.Count == 2 && sent[1].To.Equals(fromT2));
+        Check.That((sent[1].Packet[0] & 0xF) == PacketType.ConnectionChallenge);
+
+        var challengeAllowed = new bool[PacketType.NumPackets];
+        challengeAllowed[PacketType.ConnectionChallenge] = true;
+        int t1SeqBytes = t1Challenge[0] >> 4;
+        ReadOnlySpan<byte> t1ServerNonce = t1Challenge.AsSpan(1 + t1SeqBytes, Defines.ServerNonceBytes);
+        byte[] t1DerivedS2cKey = new byte[Protocol.KeyBytes];
+        byte[] t1DerivedC2sKey = new byte[Protocol.KeyBytes];
+        Aead.DerivePacketKey(t1DerivedS2cKey, t1.ServerToClientKey, t1ClientSalt, t1ServerNonce);
+        Aead.DerivePacketKey(t1DerivedC2sKey, t1.ClientToServerKey, t1ClientSalt, t1ServerNonce);
+
+        ReadPacketResult challenge = PacketIO.ReadPacket(t1Challenge, true, t1DerivedS2cKey, TestConstants.TestProtocolId, t1Expire, false, default, challengeAllowed, null);
+        Check.That(challenge.Type == PacketType.ConnectionChallenge);
+        byte[] response = new byte[Defines.MaxPacketBytes];
+        int responseBytes = PacketIO.WriteEncryptedPacket(response, PacketType.ConnectionResponse, t1Challenge.AsSpan(challenge.DataOffset, challenge.DataLength), 0, t1DerivedC2sKey, TestConstants.TestProtocolId);
+        process(in fromT1, response.AsSpan(0, responseBytes), t1Expire);
+        Check.That(server.ClientConnected(0));
+        Check.That(server.NumConnectedClients == 1);
+
+        int before = sent.Count;
+        process(in fromT2, (byte[])t2Request.Clone(), t1Expire);
+        Check.That(sent.Count == before + 1 && sent[before].To.Equals(fromT2));
+        Check.That((sent[before].Packet[0] & 0xF) == PacketType.ConnectionChallenge);
     }
 
     public static void TestEncryptionManager()
@@ -1073,6 +2027,74 @@ internal static class CoreTests
         // while packets that fell out of the window are rejected as before
 
         Check.That(replayProtection.AlreadyReceived(ulong.MaxValue - 1 - Defines.ReplayProtectionBufferSize));
+
+        // the empty-slot sentinel value ulong.MaxValue is reserved and rejected
+
+        Check.That(replayProtection.AlreadyReceived(ulong.MaxValue));
+
+        replayProtection.Reset();
+
+        for (ulong sequence = 1; sequence <= 4; sequence++)
+        {
+            Check.That(!replayProtection.AlreadyReceived(sequence));
+            replayProtection.AdvanceSequence(sequence);
+        }
+
+        Check.That(replayProtection.AlreadyReceived(ulong.MaxValue));
+        replayProtection.AdvanceSequence(ulong.MaxValue);
+        Check.That(replayProtection.MostRecentSequence == 4);
+        Check.That(!replayProtection.AlreadyReceived(5));
+
+        byte[] packetData = new byte[8];
+        byte[] buffer = new byte[Defines.MaxPacketBytes];
+        byte[] packetKey = new byte[Protocol.KeyBytes];
+        Rng.GenerateKey(packetKey);
+
+        int sentinelBytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionKeepAlive, packetData, ulong.MaxValue, packetKey, TestConstants.TestProtocolId);
+        Check.That(sentinelBytes > 0);
+
+        ReadPacketResult sentinelResult = PacketIO.ReadPacket(
+            buffer.AsSpan(0, sentinelBytes),
+            hasReadPacketKey: true, packetKey,
+            TestConstants.TestProtocolId,
+            0,
+            hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
+            AllAllowed, replayProtection);
+        Check.That(sentinelResult.Type == -1);
+
+        ReadPacketResult sentinelNoReplayResult = PacketIO.ReadPacket(
+            buffer.AsSpan(0, sentinelBytes),
+            hasReadPacketKey: true, packetKey,
+            TestConstants.TestProtocolId,
+            0,
+            hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
+            AllAllowed, null);
+        Check.That(sentinelNoReplayResult.Type == -1);
+
+        int nextBytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionKeepAlive, packetData, 5, packetKey, TestConstants.TestProtocolId);
+        Check.That(nextBytes > 0);
+
+        ReadPacketResult nextResult = PacketIO.ReadPacket(
+            buffer.AsSpan(0, nextBytes),
+            hasReadPacketKey: true, packetKey,
+            TestConstants.TestProtocolId,
+            0,
+            hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
+            AllAllowed, replayProtection);
+        Check.That(nextResult.Type == PacketType.ConnectionKeepAlive);
+        Check.That(nextResult.Sequence == 5);
+
+        byte[] deniedServerNonce = new byte[Defines.ServerNonceBytes];
+        Rng.Fill(deniedServerNonce);
+        int deniedMaxBytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionDenied, ReadOnlySpan<byte>.Empty, ulong.MaxValue, packetKey, TestConstants.TestProtocolId, deniedServerNonce);
+        Check.That(deniedMaxBytes > 1 + Defines.ServerNonceBytes + Protocol.MacBytes);
+        Check.That(PacketIO.ReadPacket(buffer.AsSpan(0, deniedMaxBytes), true, packetKey, TestConstants.TestProtocolId, 1000, false, default, AllAllowed, null).Type == -1);
+
+        int deniedNearMaxBytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionDenied, ReadOnlySpan<byte>.Empty, ulong.MaxValue - 1, packetKey, TestConstants.TestProtocolId, deniedServerNonce);
+        Check.That(deniedNearMaxBytes > 1 + Defines.ServerNonceBytes + Protocol.MacBytes);
+        ReadPacketResult deniedNearMaxResult = PacketIO.ReadPacket(buffer.AsSpan(0, deniedNearMaxBytes), true, packetKey, TestConstants.TestProtocolId, 1000, false, default, AllAllowed, null);
+        Check.That(deniedNearMaxResult.Type == PacketType.ConnectionDenied);
+        Check.That(deniedNearMaxResult.Sequence == ulong.MaxValue - 1);
     }
 
     public static void TestNetworkSimulatorDeterminism()
@@ -1091,7 +2113,7 @@ internal static class CoreTests
         for (int i = 0; i < NumPackets; i++)
         {
             for (int j = 0; j < packetData.Length; j++)
-                packetData[j] = (byte)(i + j);
+                packetData[j] = unchecked((byte)(i + j));
             simulatorA.SendPacket(in from, in to, packetData);
             simulatorB.SendPacket(in from, in to, packetData);
         }
@@ -1121,5 +2143,366 @@ internal static class CoreTests
         }
 
         Check.That(totalReceived > 0);
+    }
+}
+
+internal static class ReceiveBufferTests
+{
+    public static void TestReceivePacketShortBuffer()
+    {
+        byte[] queued = new byte[500];
+        for (int i = 0; i < queued.Length; i++)
+            queued[i] = (byte)(i % 251);
+
+        byte[] shortBuffer = new byte[Protocol.MaxPacketSize - 1];
+        byte[] fullBuffer = new byte[Protocol.MaxPacketSize];
+
+        var clientConfig = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0,
+            SendLoopbackPacket = (int clientIndex, ReadOnlySpan<byte> payload, ulong sequence) => { },
+        };
+        using var client = new Client("127.0.0.1:40000", clientConfig, 1000.0);
+        client.ConnectLoopback(0, 1);
+        Check.That(client.State == ClientState.Connected);
+        client.ProcessLoopbackPacket(queued, 42);
+
+        ArgumentException? clientError = null;
+        try
+        {
+            client.ReceivePacket(shortBuffer, out _);
+        }
+        catch (ArgumentException e)
+        {
+            clientError = e;
+        }
+        Check.That(clientError != null);
+        Check.That(clientError!.ParamName == "payload");
+
+        int clientLength = client.ReceivePacket(fullBuffer, out ulong clientSequence);
+        Check.That(clientLength == queued.Length);
+        Check.That(clientSequence == 42UL);
+        Check.That(fullBuffer.AsSpan(0, clientLength).SequenceEqual(queued));
+
+        bool clientThrewWhenEmpty = false;
+        try
+        {
+            client.ReceivePacket(shortBuffer, out _);
+        }
+        catch (ArgumentException)
+        {
+            clientThrewWhenEmpty = true;
+        }
+        Check.That(clientThrewWhenEmpty);
+
+        var serverConfig = new ServerConfig
+        {
+            ProtocolId = TestConstants.TestProtocolId,
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0,
+            SendLoopbackPacket = (int clientIndex, ReadOnlySpan<byte> payload, ulong sequence) => { },
+        };
+        TestConstants.PrivateKey.CopyTo(serverConfig.PrivateKey, 0);
+        using var server = new Server("127.0.0.1:40001", serverConfig, 1000.0);
+        server.Start(1);
+        server.ConnectLoopbackClient(0, 0x11111111, ReadOnlySpan<byte>.Empty);
+        Check.That(server.ClientConnected(0));
+        server.ProcessLoopbackPacket(0, queued, 43);
+
+        ArgumentException? serverError = null;
+        try
+        {
+            server.ReceivePacket(0, shortBuffer, out _);
+        }
+        catch (ArgumentException e)
+        {
+            serverError = e;
+        }
+        Check.That(serverError != null);
+        Check.That(serverError!.ParamName == "payload");
+
+        int serverLength = server.ReceivePacket(0, fullBuffer, out ulong serverSequence);
+        Check.That(serverLength == queued.Length);
+        Check.That(serverSequence == 43UL);
+        Check.That(fullBuffer.AsSpan(0, serverLength).SequenceEqual(queued));
+
+        bool serverThrewWhenEmpty = false;
+        try
+        {
+            server.ReceivePacket(0, shortBuffer, out _);
+        }
+        catch (ArgumentException)
+        {
+            serverThrewWhenEmpty = true;
+        }
+        Check.That(serverThrewWhenEmpty);
+    }
+}
+
+// replay protection through PacketIO.ReadPacket within one session: the same
+// encrypted datagram read twice, and a datagram that fails authentication.
+// unit tests: no sockets, no real time (timestamps are fixed, starting at 1000).
+internal static class SessionReplayTests
+{
+    private const ulong TestTimestamp = 1000;
+
+    private static readonly bool[] Allowed = CreateAllowed();
+
+    private static bool[] CreateAllowed()
+    {
+        var allowed = new bool[PacketType.NumPackets];
+        allowed[PacketType.ConnectionKeepAlive] = true;
+        allowed[PacketType.ConnectionPayload] = true;
+        allowed[PacketType.ConnectionDisconnect] = true;
+        return allowed;
+    }
+
+    private static byte[] WritePacket(int packetType, byte[] packetData, ulong sequence, byte[] key)
+    {
+        byte[] buffer = new byte[Defines.MaxPacketBytes];
+        int bytes = PacketIO.WriteEncryptedPacket(buffer, packetType, packetData, sequence, key, TestConstants.TestProtocolId);
+        Check.That(bytes > 0);
+        return buffer.AsSpan(0, bytes).ToArray();
+    }
+
+    // ReadPacket decrypts in place, so every read gets its own copy of the datagram
+    private static ReadPacketResult Read(byte[] datagram, byte[] receiveBuffer, byte[] key, ReplayProtection replayProtection)
+    {
+        datagram.CopyTo(receiveBuffer, 0);
+        return PacketIO.ReadPacket(
+            receiveBuffer.AsSpan(0, datagram.Length),
+            hasReadPacketKey: true, key,
+            TestConstants.TestProtocolId,
+            TestTimestamp,
+            hasPrivateKey: false, ReadOnlySpan<byte>.Empty,
+            Allowed, replayProtection);
+    }
+
+    public static void TestReplayProtectionDuplicatePacket()
+    {
+        var rng = new TestRng(0x5EED1000);
+
+        byte[] key = new byte[Protocol.KeyBytes];
+        rng.Fill(key);
+
+        byte[] payload = new byte[64];
+        rng.Fill(payload);
+
+        byte[] keepAliveData = new byte[8];
+
+        byte[] receiveBuffer = new byte[Defines.MaxPacketBytes];
+
+        var replayProtection = new ReplayProtection();
+
+        byte[] payloadPacket = WritePacket(PacketType.ConnectionPayload, payload, 1000, key);
+
+        // the first read of the datagram is accepted
+
+        ReadPacketResult first = Read(payloadPacket, receiveBuffer, key, replayProtection);
+        Check.That(first.Type == PacketType.ConnectionPayload);
+        Check.That(first.Sequence == 1000);
+        Check.That(first.DataLength == payload.Length);
+        Check.That(receiveBuffer.AsSpan(first.DataOffset, first.DataLength).SequenceEqual(payload));
+        Check.That(replayProtection.MostRecentSequence == 1000);
+
+        // the identical datagram read again in the same session is ignored
+
+        ReadPacketResult second = Read(payloadPacket, receiveBuffer, key, replayProtection);
+        Check.That(second.Type == -1);
+
+        // the next sequence is still accepted, and its duplicate ignored too
+
+        byte[] keepAlivePacket = WritePacket(PacketType.ConnectionKeepAlive, keepAliveData, 1001, key);
+
+        ReadPacketResult third = Read(keepAlivePacket, receiveBuffer, key, replayProtection);
+        Check.That(third.Type == PacketType.ConnectionKeepAlive);
+        Check.That(third.Sequence == 1001);
+
+        Check.That(Read(keepAlivePacket, receiveBuffer, key, replayProtection).Type == -1);
+
+        // an older sequence inside the window that was never received is still accepted once
+
+        byte[] olderPacket = WritePacket(PacketType.ConnectionPayload, payload, 999, key);
+
+        Check.That(Read(olderPacket, receiveBuffer, key, replayProtection).Type == PacketType.ConnectionPayload);
+        Check.That(Read(olderPacket, receiveBuffer, key, replayProtection).Type == -1);
+        Check.That(Read(payloadPacket, receiveBuffer, key, replayProtection).Type == -1);
+    }
+
+    public static void TestReplayProtectionFailedDecrypt()
+    {
+        var rng = new TestRng(0x5EED2000);
+
+        byte[] key = new byte[Protocol.KeyBytes];
+        rng.Fill(key);
+
+        byte[] wrongKey = new byte[Protocol.KeyBytes];
+        rng.Fill(wrongKey);
+
+        byte[] payload = new byte[64];
+        rng.Fill(payload);
+
+        byte[] receiveBuffer = new byte[Defines.MaxPacketBytes];
+
+        var replayProtection = new ReplayProtection();
+
+        byte[] authentic = WritePacket(PacketType.ConnectionPayload, payload, 1000, key);
+
+        // the same datagram with one byte of its tag changed fails authentication
+
+        byte[] tampered = (byte[])authentic.Clone();
+        tampered[tampered.Length - 1] ^= 0x01;
+
+        Check.That(Read(tampered, receiveBuffer, key, replayProtection).Type == -1);
+        Check.That(replayProtection.MostRecentSequence == 0);
+        Check.That(!replayProtection.AlreadyReceived(1000));
+
+        // so does a datagram at a much higher sequence under the wrong key
+
+        byte[] forgedAhead = WritePacket(PacketType.ConnectionPayload, payload, 1000 + Defines.ReplayProtectionBufferSize * 4, wrongKey);
+
+        Check.That(Read(forgedAhead, receiveBuffer, key, replayProtection).Type == -1);
+        Check.That(replayProtection.MostRecentSequence == 0);
+        Check.That(!replayProtection.AlreadyReceived(1000));
+
+        // neither moved the window: the authentic datagram at that sequence is accepted
+
+        ReadPacketResult result = Read(authentic, receiveBuffer, key, replayProtection);
+        Check.That(result.Type == PacketType.ConnectionPayload);
+        Check.That(result.Sequence == 1000);
+        Check.That(receiveBuffer.AsSpan(result.DataOffset, result.DataLength).SequenceEqual(payload));
+        Check.That(replayProtection.MostRecentSequence == 1000);
+
+        // and once accepted, the tampered copy and the authentic copy are both ignored
+
+        Check.That(Read(tampered, receiveBuffer, key, replayProtection).Type == -1);
+        Check.That(Read(authentic, receiveBuffer, key, replayProtection).Type == -1);
+        Check.That(replayProtection.MostRecentSequence == 1000);
+    }
+}
+
+internal static class ConfigSnapshotTests
+{
+    private static byte[] GenerateConnectToken(string serverAddress, ulong clientId)
+    {
+        byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
+        byte[] userData = new byte[Protocol.UserDataBytes];
+        new TestRng(0xC0FFEE).Fill(userData);
+        Check.That(ConnectTokenGenerator.Generate(
+            new[] { serverAddress },
+            new[] { serverAddress },
+            TestConstants.TestConnectTokenExpiry,
+            TestConstants.TestTimeoutSeconds,
+            clientId,
+            TestConstants.TestProtocolId,
+            TestConstants.PrivateKey,
+            userData,
+            connectToken));
+        return connectToken;
+    }
+
+    public static void TestClientServerConfigSnapshot()
+    {
+        var simulator = new NetworkSimulator
+        {
+            LatencyMilliseconds = 250,
+            JitterMilliseconds = 250,
+            PacketLossPercent = 5,
+            DuplicatePacketPercent = 10,
+        };
+
+        double time = 1000.0;
+        double deltaTime = 1.0 / 10.0;
+
+        var clientConfig = new ClientConfig { Simulator = simulator };
+        var serverConfig = new ServerConfig
+        {
+            ProtocolId = TestConstants.TestProtocolId,
+            Simulator = simulator,
+        };
+        TestConstants.PrivateKey.CopyTo(serverConfig.PrivateKey, 0);
+
+        using var client = new Client("[::]:50000", clientConfig, time);
+        using var server = new Server("[::1]:40000", serverConfig, time);
+
+        clientConfig.Simulator = null;
+        clientConfig.OnStateChange = null;
+        clientConfig.SendLoopbackPacket = null;
+        clientConfig.OverrideSendAndReceive = true;
+        clientConfig.SendPacketOverride = null;
+        clientConfig.ReceivePacketOverride = null;
+        clientConfig.EnablePacketTagging = true;
+
+        serverConfig.Simulator = null;
+        serverConfig.OnClientConnectDisconnect = null;
+        serverConfig.SendLoopbackPacket = null;
+        serverConfig.OverrideSendAndReceive = true;
+        serverConfig.SendPacketOverride = null;
+        serverConfig.ReceivePacketOverride = null;
+        serverConfig.MaxConnectTokenLifetime = 1;
+        serverConfig.EnablePacketTagging = true;
+        serverConfig.ProtocolId = 0;
+        Array.Clear(serverConfig.PrivateKey);
+
+        ClientServerTests.StartServer(server, 1);
+
+        ulong clientId = new TestRng(0xC11E17).NextUInt64();
+        client.Connect(GenerateConnectToken("[::1]:40000", clientId));
+
+        for (int i = 0; i < 1000 && client.State > ClientState.Disconnected && client.State != ClientState.Connected; i++)
+        {
+            simulator.Update(time);
+            client.Update(time);
+            server.Update(time);
+            time += deltaTime;
+        }
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server.ClientConnected(0));
+
+        var payload = new byte[Protocol.MaxPacketSize];
+        for (int i = 0; i < payload.Length; i++)
+            payload[i] = unchecked((byte)i);
+        var received = new byte[Protocol.MaxPacketSize];
+
+        bool clientReceived = false;
+        bool serverReceived = false;
+        for (int i = 0; i < 1000 && !(clientReceived && serverReceived); i++)
+        {
+            simulator.Update(time);
+            client.Update(time);
+            server.Update(time);
+
+            client.SendPacket(payload);
+            server.SendPacket(0, payload);
+
+            while (true)
+            {
+                int bytes = client.ReceivePacket(received, out _);
+                if (bytes < 0)
+                    break;
+                Check.That(bytes == Protocol.MaxPacketSize);
+                Check.That(received.AsSpan(0, bytes).SequenceEqual(payload));
+                clientReceived = true;
+            }
+
+            while (true)
+            {
+                int bytes = server.ReceivePacket(0, received, out _);
+                if (bytes < 0)
+                    break;
+                Check.That(bytes == Protocol.MaxPacketSize);
+                Check.That(received.AsSpan(0, bytes).SequenceEqual(payload));
+                serverReceived = true;
+            }
+
+            time += deltaTime;
+        }
+
+        Check.That(clientReceived);
+        Check.That(serverReceived);
     }
 }

@@ -137,6 +137,8 @@ internal static class Hostile
         rng.Fill(privateKey);
 
         byte[] packetData = new byte[Defines.MaxPayloadBytes];
+        byte[] clientSalt = new byte[Defines.ConnectSaltBytes];
+        byte[] serverNonce = new byte[Defines.ServerNonceBytes];
         byte[] buffer = new byte[2048];
 
         for (int iteration = 0; iteration < 2000; iteration++)
@@ -156,13 +158,14 @@ internal static class Hostile
                 ulong expireTimestamp = rng.NextUInt64() | (1UL << 62) | 1; // cannot be zeroed by one byte flip
                 byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
                 rng.Fill(nonce);
+                rng.Fill(clientSalt);
 
                 byte[] tokenData = new byte[Defines.ConnectTokenPrivateBytes];
                 rng.Fill(tokenData.AsSpan(0, Defines.ConnectTokenPrivateBytes - Protocol.MacBytes));
 
                 Check.That(ConnectTokenPrivate.Encrypt(tokenData, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, privateKey));
 
-                bytesWritten = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, tokenData);
+                bytesWritten = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, TestConstants.TestProtocolId, expireTimestamp, nonce, tokenData, clientSalt);
                 expectedDataLength = Defines.ConnectTokenPrivateBytes;
                 sequence = 0;
             }
@@ -177,8 +180,18 @@ internal static class Hostile
                 };
 
                 rng.Fill(packetData.AsSpan(0, dataLength));
+                bool hasServerNonce = packetType == PacketType.ConnectionDenied || packetType == PacketType.ConnectionChallenge;
+                if (hasServerNonce)
+                    rng.Fill(serverNonce);
 
-                bytesWritten = PacketIO.WriteEncryptedPacket(buffer, packetType, packetData.AsSpan(0, dataLength), sequence, packetKey, TestConstants.TestProtocolId);
+                bytesWritten = PacketIO.WriteEncryptedPacket(
+                    buffer,
+                    packetType,
+                    packetData.AsSpan(0, dataLength),
+                    sequence,
+                    packetKey,
+                    TestConstants.TestProtocolId,
+                    hasServerNonce ? serverNonce : ReadOnlySpan<byte>.Empty);
                 expectedDataLength = dataLength;
             }
 
@@ -186,8 +199,12 @@ internal static class Hostile
 
             byte[] original = buffer.AsSpan(0, bytesWritten).ToArray();
 
+            int corruptOffset = -1;
             if (corrupt)
-                buffer[rng.Next(bytesWritten)] ^= corruptXor;
+            {
+                corruptOffset = rng.Next(bytesWritten);
+                buffer[corruptOffset] ^= corruptXor;
+            }
 
             ReadPacketResult result = PacketIO.ReadPacket(
                 buffer.AsSpan(0, bytesWritten),
@@ -199,9 +216,29 @@ internal static class Hostile
 
             if (!corrupt)
             {
-                Check.That(result.Type == packetType);
-                Check.That(result.Sequence == sequence);
-                Check.That(result.DataLength == expectedDataLength);
+                if (packetType != PacketType.ConnectionRequest && sequence == ulong.MaxValue)
+                {
+                    Check.That(result.Type == -1);
+                }
+                else
+                {
+                    Check.That(result.Type == packetType);
+                    Check.That(result.Sequence == sequence);
+                    Check.That(result.DataLength == expectedDataLength);
+                    if (packetType == PacketType.ConnectionRequest)
+                        Check.That(buffer.AsSpan(result.NonceOffset, Defines.ConnectSaltBytes).SequenceEqual(clientSalt));
+                    else if (packetType == PacketType.ConnectionDenied || packetType == PacketType.ConnectionChallenge)
+                        Check.That(buffer.AsSpan(result.NonceOffset, Defines.ServerNonceBytes).SequenceEqual(serverNonce));
+                }
+            }
+            else if (packetType == PacketType.ConnectionRequest &&
+                     corruptOffset >= PacketIO.ConnectionRequestPacketBytes - Defines.ConnectSaltBytes)
+            {
+                // client_salt at the tail of a connection request is bound into the derived
+                // packet keys via HChaCha20 (rather than the token's backend MAC), so modifying
+                // it produces the altered salt and causes subsequent packets to fail AEAD.
+                Check.That(result.Type == PacketType.ConnectionRequest);
+                Check.That(!buffer.AsSpan(result.NonceOffset, Defines.ConnectSaltBytes).SequenceEqual(clientSalt));
             }
             else
             {
@@ -216,21 +253,42 @@ internal static class Hostile
     {
         var rng = new TestRng(0x70CE);
 
-        // hostile public connect tokens: must never throw, and mostly reject.
-        // when read succeeds (version bytes + field ranges can line up only if we
-        // plant them), the parsed fields must be within their documented ranges.
+        // Alternate random buffers with structured headers, leaving address
+        // contents, keys and other payload bytes random.
+        void PlantAddresses(Span<byte> buffer)
+        {
+            int count = 1 + rng.Next(Protocol.MaxServersPerConnect);
+            var writer = new ByteWriter(buffer);
+            writer.U32((uint)count);
+            int offset = writer.Position;
+            for (int i = 0; i < count; i++)
+            {
+                bool ipv6 = rng.Next(2) != 0;
+                buffer[offset] = (byte)(ipv6 ? AddressType.IPv6 : AddressType.IPv4);
+                offset += ipv6 ? 19 : 7;
+            }
+        }
 
         byte[] publicBuffer = new byte[Protocol.ConnectTokenBytes];
         var publicToken = new ConnectTokenData();
+        int publicReads = 0;
 
         for (int iteration = 0; iteration < 5000; iteration++)
         {
             rng.Fill(publicBuffer);
-            if (rng.Next(2) == 0)
+            if (iteration % 2 == 0)
+            {
                 Defines.VersionInfo.CopyTo(publicBuffer.AsSpan(0, Defines.VersionInfoBytes));
+                ulong first = rng.NextUInt64(), second = rng.NextUInt64();
+                var timestamps = new ByteWriter(publicBuffer.AsSpan(Defines.VersionInfoBytes + 8));
+                timestamps.U64(Math.Min(first, second));
+                timestamps.U64(Math.Max(first, second));
+                PlantAddresses(publicBuffer.AsSpan(Defines.VersionInfoBytes + 24 + Defines.ConnectTokenNonceBytes + Defines.ConnectTokenPrivateBytes + 4));
+            }
 
             if (publicToken.Read(publicBuffer))
             {
+                publicReads++;
                 Check.That(publicToken.NumServerAddresses >= 1 && publicToken.NumServerAddresses <= Protocol.MaxServersPerConnect);
                 Check.That(publicToken.CreateTimestamp <= publicToken.ExpireTimestamp);
             }
@@ -243,18 +301,25 @@ internal static class Hostile
 
         byte[] privateBuffer = new byte[Defines.ConnectTokenPrivateBytes];
         var privateToken = new ConnectTokenPrivate();
+        int privateReads = 0;
 
         for (int iteration = 0; iteration < 5000; iteration++)
         {
             rng.Fill(privateBuffer);
+            if (iteration % 2 == 0)
+                PlantAddresses(privateBuffer.AsSpan(8 + 4));
 
             if (privateToken.Read(privateBuffer))
             {
+                privateReads++;
                 Check.That(privateToken.NumServerAddresses >= 1 && privateToken.NumServerAddresses <= Protocol.MaxServersPerConnect);
                 for (int i = 0; i < privateToken.NumServerAddresses; i++)
                     Check.That(privateToken.ServerAddresses[i].Type == AddressType.IPv4 || privateToken.ServerAddresses[i].Type == AddressType.IPv6);
             }
         }
+
+        Check.That(publicReads > 0);
+        Check.That(privateReads > 0);
 
         // write/read round trip over the private token with random address mixes
 
@@ -270,17 +335,17 @@ internal static class Hostile
                 }
                 else
                 {
-                    addresses[i].SetIPv6((ushort)rng.NextUInt64(), (ushort)rng.NextUInt64(), (ushort)rng.NextUInt64(), (ushort)rng.NextUInt64(),
-                                         (ushort)rng.NextUInt64(), (ushort)rng.NextUInt64(), (ushort)rng.NextUInt64(), (ushort)rng.NextUInt64());
+                    addresses[i].SetIPv6(unchecked((ushort)rng.NextUInt64()), unchecked((ushort)rng.NextUInt64()), unchecked((ushort)rng.NextUInt64()), unchecked((ushort)rng.NextUInt64()),
+                                         unchecked((ushort)rng.NextUInt64()), unchecked((ushort)rng.NextUInt64()), unchecked((ushort)rng.NextUInt64()), unchecked((ushort)rng.NextUInt64()));
                 }
-                addresses[i].Port = (ushort)rng.NextUInt64();
+                addresses[i].Port = unchecked((ushort)rng.NextUInt64());
             }
 
             byte[] userData = new byte[Protocol.UserDataBytes];
             rng.Fill(userData);
 
             var input = new ConnectTokenPrivate();
-            input.Generate(rng.NextUInt64(), (int)(uint)rng.NextUInt64(), addresses, userData);
+            input.Generate(rng.NextUInt64(), unchecked((int)(uint)rng.NextUInt64()), addresses, userData);
             input.Write(privateBuffer);
 
             var output = new ConnectTokenPrivate();
@@ -296,7 +361,26 @@ internal static class Hostile
 
     public static void TestFuzzParseAddress()
     {
-        // the C repo's fuzz corpus seeds, when present (reused across implementations)
+        // embedded seeds keep corpus coverage available in standalone checkouts
+
+        string[] corpus =
+        {
+            "", "0.0.0.0", "127.0.0.1:0", "255.255.255.255:65535",
+            "::", "::1", "[::1]:40000", "[2001:db8::1]:65535",
+            "1:2:3:4:5:6:7:8", "[::ffff:192.0.2.1]:0",
+            "256.0.0.1", "127.1", "127.0.0.1:", "127.0.0.1:65536",
+            "127.0.0.1:-1", "127.0.0.1:port", "127.0.0.1\0:40000",
+            "[", "[::1", "[::1]:", "[::1]:65536", "[::1]:-1",
+            "1::2::3", "fe80::1%eth0", "[::1]:99999999999999999999"
+        };
+        int exercised = 0;
+        foreach (string text in corpus)
+        {
+            ExerciseParse(text);
+            exercised++;
+        }
+
+        // also reuse the C repo's fuzz corpus seeds when present
 
         string corpusDir = Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "netcode", "fuzz", "corpus", "fuzz_parse_address");
         string? envCorpus = Environment.GetEnvironmentVariable("NETCODE_FUZZ_CORPUS");
@@ -311,9 +395,12 @@ internal static class Hostile
                 string text = File.ReadAllText(file);
                 ExerciseParse(text);
                 corpusFiles++;
+                exercised++;
             }
         }
         Console.WriteLine($"  (corpus files exercised: {corpusFiles})");
+        Console.WriteLine($"  (corpus inputs exercised: {exercised})");
+        Check.That(exercised > 0);
 
         // seeded random strings over the parser's alphabet
 
@@ -429,12 +516,12 @@ internal static class Hostile
         using var client = new Client("127.0.0.1:50000", clientConfig, 0.0);
         using var server = new Server("127.0.0.1:40000", serverConfig, 0.0);
 
-        server.Start(1);
+        ClientServerTests.StartServer(server, 1);
 
         byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
         byte[] userData = new byte[Protocol.UserDataBytes];
         string[] address = { "127.0.0.1:40000" };
-        Check.That(ConnectTokenGenerator.Generate(address, address, 60, 15, 0x1234, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken));
+        Check.That(ConnectTokenGenerator.Generate(address, address, TestConstants.TestConnectTokenExpiry, 15, 0x1234, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken));
 
         client.Connect(connectToken);
 
@@ -479,6 +566,104 @@ internal static class Hostile
 
         if (allocated != 0)
             Console.WriteLine($"  steady state allocated {allocated} bytes over 2000 frames");
+        Check.That(allocated == 0);
+    }
+
+    public static void TestZeroAllocationSocketSteadyState()
+    {
+        var serverConfig = new ServerConfig
+        {
+            ProtocolId = TestConstants.TestProtocolId,
+        };
+        TestConstants.PrivateKey.CopyTo(serverConfig.PrivateKey, 0);
+
+        double time = 0.0;
+        double deltaTime = 1.0 / 60.0;
+
+        using var client = new Client("127.0.0.1:50001", new ClientConfig(), time);
+        using var server = new Server("127.0.0.1:40001", serverConfig, time);
+
+        ClientServerTests.StartServerAndWaitForNextSecond(server, 1);
+
+        byte[] connectToken = new byte[Protocol.ConnectTokenBytes];
+        byte[] userData = new byte[Protocol.UserDataBytes];
+        string[] address = { "127.0.0.1:40001" };
+        Check.That(ConnectTokenGenerator.Generate(address, address, TestConstants.TestConnectTokenExpiry, 15, 0x1234, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken));
+
+        client.Connect(connectToken);
+
+        while (client.State != ClientState.Connected)
+        {
+            Check.That(client.State > ClientState.Disconnected);
+            client.Update(time);
+            server.Update(time);
+            System.Threading.Thread.Sleep(10);
+            time += deltaTime;
+        }
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server.ClientConnected(0));
+
+        byte[] payload = new byte[Protocol.MaxPacketSize];
+        byte[] received = new byte[Protocol.MaxPacketSize];
+
+        void IdleFrame()
+        {
+            client.Update(time);
+            server.Update(time);
+            while (client.ReceivePacket(received, out _) >= 0) { }
+            while (server.ReceivePacket(0, received, out _) >= 0) { }
+            time += deltaTime;
+        }
+
+        void PayloadFrame()
+        {
+            client.SendPacket(payload);
+            server.SendPacket(0, payload);
+            client.Update(time);
+            server.Update(time);
+            while (client.ReceivePacket(received, out _) >= 0) { }
+            while (server.ReceivePacket(0, received, out _) >= 0) { }
+            time += deltaTime;
+        }
+
+        // warm up: fills queue pools, promotes jitted code
+        for (int i = 0; i < 2000; i++)
+        {
+            IdleFrame();
+            PayloadFrame();
+        }
+
+        // for a few seconds after warm up, tiered compilation keeps replacing the code behind
+        // the runtime's socket P/Invokes, and the runtime allocates on the calling thread when
+        // it does (56 bytes each on Linux, 48 on Windows). that is the runtime, not netcode, so
+        // the measured window is one in which the process compiled no method. a window with
+        // compilation in it is measured again; netcode allocating in steady state fails every one.
+
+        long allocated = 0;
+        bool quietWindow = false;
+
+        for (int attempt = 0; attempt < 200 && !quietWindow; attempt++)
+        {
+            long compiledBefore = System.Runtime.JitInfo.GetCompiledMethodCount(currentThread: false);
+            long before = GC.GetAllocatedBytesForCurrentThread();
+
+            for (int i = 0; i < 200; i++)
+            {
+                IdleFrame();
+                PayloadFrame();
+            }
+
+            allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            quietWindow = System.Runtime.JitInfo.GetCompiledMethodCount(currentThread: false) == compiledBefore;
+        }
+
+        Check.That(quietWindow);
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server.ClientConnected(0));
+
+        if (allocated != 0)
+            Console.WriteLine($"  socket steady state allocated {allocated} bytes over 400 frames");
         Check.That(allocated == 0);
     }
 }

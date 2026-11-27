@@ -52,7 +52,7 @@ Encrypted, signed packets and the protections against forged, replayed and malfo
 | amplification protection | ❌ |
 | each connection response is bound to its own challenge | ❌ |
 | replay protection at the top of the sequence space | ❌ |
-| pre-connect mappings expire even for tokens without a timeout | ❌ |
+| pre-connect mappings expire as in the reference, whatever the token timeout | ❌ |
 | servers sharing a connect token use distinct global packet nonces | ❌ |
 | key material zeroized on disconnect and stop | ❌ |
 | complete | 60% |

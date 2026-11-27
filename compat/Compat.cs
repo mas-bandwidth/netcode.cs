@@ -7,7 +7,7 @@
     runs live client/server session legs over localhost UDP.
 
     Subcommands: goldens <dir> | verify <dir> | mint <file> <address> |
-                 server <port> | client <port> <token-file>
+                 check-addresses | server <port> | client <port> <token-file>
     Exit code is the verdict.
 */
 
@@ -54,17 +54,30 @@ internal static class Program
         return condition;
     }
 
-    private static (byte[] tokenKey, byte[] challengeKey, byte[] packetKey, byte[] nonce) GoldenKeys()
+    private static (byte[] tokenKey, byte[] challengeKey, byte[] clientSalt, byte[] serverNonce, byte[] derivedC2S, byte[] derivedS2C, byte[] nonce) GoldenKeys()
     {
         byte[] tokenKey = new byte[Protocol.KeyBytes];
+        byte[] rootC2S = new byte[Protocol.KeyBytes];
+        byte[] rootS2C = new byte[Protocol.KeyBytes];
         byte[] challengeKey = new byte[Protocol.KeyBytes];
-        byte[] packetKey = new byte[Protocol.KeyBytes];
+        byte[] clientSalt = new byte[Defines.ConnectSaltBytes];
+        byte[] serverNonce = new byte[Defines.ServerNonceBytes];
+        byte[] derivedC2S = new byte[Protocol.KeyBytes];
+        byte[] derivedS2C = new byte[Protocol.KeyBytes];
         byte[] nonce = new byte[Defines.ConnectTokenNonceBytes];
+
         FillPattern(tokenKey, 1);
+        FillPattern(rootC2S, 2);
+        FillPattern(rootS2C, 3);
         FillPattern(challengeKey, 4);
-        FillPattern(packetKey, 5);
         FillPattern(nonce, 6);
-        return (tokenKey, challengeKey, packetKey, nonce);
+        FillPattern(clientSalt, 7);
+        FillPattern(serverNonce, 8);
+
+        Aead.DerivePacketKey(derivedC2S, rootC2S, clientSalt, serverNonce);
+        Aead.DerivePacketKey(derivedS2C, rootS2C, clientSalt, serverNonce);
+
+        return (tokenKey, challengeKey, clientSalt, serverNonce, derivedC2S, derivedS2C, nonce);
     }
 
     private static Address[] GoldenAddresses()
@@ -95,7 +108,7 @@ internal static class Program
 
     private static byte[] BuildGoldenPrivateToken()
     {
-        (byte[] tokenKey, _, _, byte[] nonce) = GoldenKeys();
+        (byte[] tokenKey, _, _, _, _, _, byte[] nonce) = GoldenKeys();
 
         byte[] buffer = new byte[Defines.ConnectTokenPrivateBytes];
         GoldenPrivateTokenStruct().Write(buffer);
@@ -108,7 +121,7 @@ internal static class Program
 
     private static byte[] BuildGoldenChallengeToken()
     {
-        (_, byte[] challengeKey, _, _) = GoldenKeys();
+        (_, byte[] challengeKey, _, _, _, _, _) = GoldenKeys();
 
         var token = new ChallengeToken { ClientId = GoldenClientId };
         FillPattern(token.UserData, 0);
@@ -121,7 +134,7 @@ internal static class Program
 
     private static int DoGoldens(string dir)
     {
-        (byte[] tokenKey, _, byte[] packetKey, byte[] nonce) = GoldenKeys();
+        (byte[] tokenKey, _, byte[] clientSalt, byte[] serverNonce, byte[] derivedC2S, byte[] derivedS2C, byte[] nonce) = GoldenKeys();
         _ = tokenKey;
 
         // 1. encrypted private connect token
@@ -160,36 +173,36 @@ internal static class Program
         byte[] buffer = new byte[Defines.MaxPacketBytes * 2];
         int bytes;
 
-        bytes = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, GoldenProtocolId, GoldenExpireTimestamp, nonce, privateToken);
+        bytes = PacketIO.WriteConnectionRequestPacket(buffer, Defines.VersionInfo, GoldenProtocolId, GoldenExpireTimestamp, nonce, privateToken, clientSalt);
         File.WriteAllBytes(Path.Combine(dir, "packet_request.bin"), buffer.AsSpan(0, bytes).ToArray());
 
-        bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionDenied, ReadOnlySpan<byte>.Empty, 1UL << 63, packetKey, GoldenProtocolId);
+        bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionDenied, ReadOnlySpan<byte>.Empty, 1UL << 63, derivedS2C, GoldenProtocolId, serverNonce);
         File.WriteAllBytes(Path.Combine(dir, "packet_denied.bin"), buffer.AsSpan(0, bytes).ToArray());
 
         byte[] challengeData = new byte[8 + Defines.ChallengeTokenBytes];
         BinaryPrimitives.WriteUInt64LittleEndian(challengeData.AsSpan(0, 8), GoldenChallengeSequence);
         challengeToken.CopyTo(challengeData.AsSpan(8));
 
-        bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionChallenge, challengeData, (1UL << 63) + 5, packetKey, GoldenProtocolId);
+        bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionChallenge, challengeData, (1UL << 63) + 5, derivedS2C, GoldenProtocolId, serverNonce);
         File.WriteAllBytes(Path.Combine(dir, "packet_challenge.bin"), buffer.AsSpan(0, bytes).ToArray());
 
-        bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionResponse, challengeData, 0x1F, packetKey, GoldenProtocolId);
+        bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionResponse, challengeData, 0x1F, derivedC2S, GoldenProtocolId);
         File.WriteAllBytes(Path.Combine(dir, "packet_response.bin"), buffer.AsSpan(0, bytes).ToArray());
 
         byte[] keepAliveData = new byte[8];
         BinaryPrimitives.WriteUInt32LittleEndian(keepAliveData.AsSpan(0, 4), 5);
         BinaryPrimitives.WriteUInt32LittleEndian(keepAliveData.AsSpan(4, 4), 32);
 
-        bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionKeepAlive, keepAliveData, 0x11223344, packetKey, GoldenProtocolId);
+        bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionKeepAlive, keepAliveData, 0x11223344, derivedS2C, GoldenProtocolId);
         File.WriteAllBytes(Path.Combine(dir, "packet_keepalive.bin"), buffer.AsSpan(0, bytes).ToArray());
 
         byte[] payload = new byte[Defines.MaxPayloadBytes];
         FillPattern(payload, 0);
 
-        bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionPayload, payload, 1000, packetKey, GoldenProtocolId);
+        bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionPayload, payload, 1000, derivedS2C, GoldenProtocolId);
         File.WriteAllBytes(Path.Combine(dir, "packet_payload.bin"), buffer.AsSpan(0, bytes).ToArray());
 
-        bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionDisconnect, ReadOnlySpan<byte>.Empty, 7, packetKey, GoldenProtocolId);
+        bytes = PacketIO.WriteEncryptedPacket(buffer, PacketType.ConnectionDisconnect, ReadOnlySpan<byte>.Empty, 7, derivedC2S, GoldenProtocolId);
         File.WriteAllBytes(Path.Combine(dir, "packet_disconnect.bin"), buffer.AsSpan(0, bytes).ToArray());
 
         Console.WriteLine($"goldens written to {dir}");
@@ -198,7 +211,7 @@ internal static class Program
 
     private static int DoVerify(string dir)
     {
-        (byte[] tokenKey, byte[] challengeKey, byte[] packetKey, byte[] nonce) = GoldenKeys();
+        (byte[] tokenKey, byte[] challengeKey, byte[] clientSalt, byte[] serverNonce, byte[] derivedC2S, byte[] derivedS2C, byte[] nonce) = GoldenKeys();
 
         Address[] expectedAddresses = GoldenAddresses();
 
@@ -255,46 +268,51 @@ internal static class Program
         var allAllowed = new bool[PacketType.NumPackets];
         Array.Fill(allAllowed, true);
 
-        ReadPacketResult ReadFile(string name, bool hasPrivateKey)
+        ReadPacketResult ReadFile(string name, byte[] key, bool hasPrivateKey)
         {
             byte[] data = File.ReadAllBytes(Path.Combine(dir, name));
-            return PacketIO.ReadPacket(data, hasReadPacketKey: true, packetKey, GoldenProtocolId, 0,
+            return PacketIO.ReadPacket(data, hasReadPacketKey: true, key, GoldenProtocolId, 0,
                 hasPrivateKey, tokenKey, allAllowed, null);
         }
 
         {
             byte[] data = File.ReadAllBytes(Path.Combine(dir, "packet_request.bin"));
-            ReadPacketResult result = PacketIO.ReadPacket(data, hasReadPacketKey: true, packetKey, GoldenProtocolId, 0,
+            if (!Verify(data.Length == PacketIO.ConnectionRequestPacketBytes, "request packet size")) return 1;
+            ReadPacketResult result = PacketIO.ReadPacket(data, hasReadPacketKey: true, derivedC2S, GoldenProtocolId, 0,
                 hasPrivateKey: true, tokenKey, allAllowed, null);
             if (!Verify(result.Type == PacketType.ConnectionRequest, "request packet type")) return 1;
+            if (!Verify(data.AsSpan(result.NonceOffset, Defines.ConnectSaltBytes).SequenceEqual(clientSalt), "request packet client salt")) return 1;
             var token = new ConnectTokenPrivate();
             if (!Verify(token.Read(data.AsSpan(result.DataOffset, result.DataLength)), "request packet token read")) return 1;
             if (!Verify(token.ClientId == GoldenClientId, "request packet client id")) return 1;
         }
 
         {
-            ReadPacketResult result = ReadFile("packet_denied.bin", false);
+            byte[] data = File.ReadAllBytes(Path.Combine(dir, "packet_denied.bin"));
+            ReadPacketResult result = PacketIO.ReadPacket(data, true, derivedS2C, GoldenProtocolId, 0, false, ReadOnlySpan<byte>.Empty, allAllowed, null);
             if (!Verify(result.Type == PacketType.ConnectionDenied, "denied packet type")) return 1;
             if (!Verify(result.Sequence == 1UL << 63, "denied packet sequence")) return 1;
+            if (!Verify(data.AsSpan(result.NonceOffset, Defines.ServerNonceBytes).SequenceEqual(serverNonce), "denied packet server nonce")) return 1;
         }
 
         {
             byte[] data = File.ReadAllBytes(Path.Combine(dir, "packet_challenge.bin"));
-            ReadPacketResult result = PacketIO.ReadPacket(data, true, packetKey, GoldenProtocolId, 0, false, ReadOnlySpan<byte>.Empty, allAllowed, null);
+            ReadPacketResult result = PacketIO.ReadPacket(data, true, derivedS2C, GoldenProtocolId, 0, false, ReadOnlySpan<byte>.Empty, allAllowed, null);
             if (!Verify(result.Type == PacketType.ConnectionChallenge, "challenge packet type")) return 1;
             if (!Verify(result.Sequence == (1UL << 63) + 5, "challenge packet sequence")) return 1;
+            if (!Verify(data.AsSpan(result.NonceOffset, Defines.ServerNonceBytes).SequenceEqual(serverNonce), "challenge packet server nonce")) return 1;
             if (!Verify(BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(result.DataOffset, 8)) == GoldenChallengeSequence, "challenge token sequence")) return 1;
         }
 
         {
-            ReadPacketResult result = ReadFile("packet_response.bin", false);
+            ReadPacketResult result = ReadFile("packet_response.bin", derivedC2S, false);
             if (!Verify(result.Type == PacketType.ConnectionResponse, "response packet type")) return 1;
             if (!Verify(result.Sequence == 0x1F, "response packet sequence")) return 1;
         }
 
         {
             byte[] data = File.ReadAllBytes(Path.Combine(dir, "packet_keepalive.bin"));
-            ReadPacketResult result = PacketIO.ReadPacket(data, true, packetKey, GoldenProtocolId, 0, false, ReadOnlySpan<byte>.Empty, allAllowed, null);
+            ReadPacketResult result = PacketIO.ReadPacket(data, true, derivedS2C, GoldenProtocolId, 0, false, ReadOnlySpan<byte>.Empty, allAllowed, null);
             if (!Verify(result.Type == PacketType.ConnectionKeepAlive, "keepalive packet type")) return 1;
             if (!Verify(result.Sequence == 0x11223344, "keepalive packet sequence")) return 1;
             if (!Verify(BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(result.DataOffset, 4)) == 5, "keepalive client index")) return 1;
@@ -303,7 +321,7 @@ internal static class Program
 
         {
             byte[] data = File.ReadAllBytes(Path.Combine(dir, "packet_payload.bin"));
-            ReadPacketResult result = PacketIO.ReadPacket(data, true, packetKey, GoldenProtocolId, 0, false, ReadOnlySpan<byte>.Empty, allAllowed, null);
+            ReadPacketResult result = PacketIO.ReadPacket(data, true, derivedS2C, GoldenProtocolId, 0, false, ReadOnlySpan<byte>.Empty, allAllowed, null);
             if (!Verify(result.Type == PacketType.ConnectionPayload, "payload packet type")) return 1;
             if (!Verify(result.Sequence == 1000, "payload packet sequence")) return 1;
             if (!Verify(result.DataLength == Defines.MaxPayloadBytes, "payload packet size")) return 1;
@@ -313,12 +331,44 @@ internal static class Program
         }
 
         {
-            ReadPacketResult result = ReadFile("packet_disconnect.bin", false);
+            ReadPacketResult result = ReadFile("packet_disconnect.bin", derivedC2S, false);
             if (!Verify(result.Type == PacketType.ConnectionDisconnect, "disconnect packet type")) return 1;
             if (!Verify(result.Sequence == 7, "disconnect packet sequence")) return 1;
         }
 
         Console.WriteLine($"verify passed: {dir}");
+        return 0;
+    }
+
+    private static int DoCheckAddresses()
+    {
+        // the same inputs and verdicts as do_check_addresses in compat/c/compat.c:
+        // both parsers must agree on every row. Zone-id inputs are covered by the
+        // C# unit tests only; inet_pton zone handling varies by platform.
+        (string input, bool valid, AddressType type, ushort port)[] cases =
+        {
+            ("[[::1]]", false, default, 0),
+            ("[::1]]:80", false, default, 0),
+            ("[::1]:80]", false, default, 0),
+            ("[::1]]", false, default, 0),
+            ("127.0.0.1", true, AddressType.IPv4, 0),
+            ("127.0.0.1:80", true, AddressType.IPv4, 80),
+            ("::1", true, AddressType.IPv6, 0),
+            ("[::1]", true, AddressType.IPv6, 0),
+            ("[::1]:80", true, AddressType.IPv6, 80),
+            ("fe80::1", true, AddressType.IPv6, 0),
+            ("[fe80::202:b3ff:fe1e:8329]:40000", true, AddressType.IPv6, 40000),
+        };
+
+        foreach ((string input, bool valid, AddressType type, ushort port) in cases)
+        {
+            bool parsed = Address.TryParse(input, out Address address);
+            if (!Verify(parsed == valid, $"address check '{input}' validity")) return 1;
+            if (valid && !Verify(address.Type == type && address.Port == port, $"address check '{input}' type/port")) return 1;
+            Console.WriteLine($"address check: '{input}' -> {(parsed ? $"{address.Type}:{address.Port}" : "invalid")}");
+        }
+
+        Console.WriteLine("address checks passed");
         return 0;
     }
 
@@ -488,6 +538,7 @@ internal static class Program
         {
             ["goldens", var dir] => DoGoldens(dir),
             ["verify", var dir] => DoVerify(dir),
+            ["check-addresses"] => DoCheckAddresses(),
             ["mint", var file, var address] => DoMint(file, address),
             ["server", var port] => DoServer(int.Parse(port)),
             ["client", var port, var token] => DoClient(int.Parse(port), token),
@@ -497,7 +548,7 @@ internal static class Program
 
     private static int Usage()
     {
-        Console.WriteLine("usage: compat goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token>");
+        Console.WriteLine("usage: compat goldens <dir> | verify <dir> | mint <file> <address> | check-addresses | server <port> | client <port> <token>");
         return 1;
     }
 }

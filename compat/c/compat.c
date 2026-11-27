@@ -10,6 +10,7 @@
         goldens <dir>            write golden files (fixed keys/nonces/timestamps)
         verify <dir>             read + decrypt + validate golden files (either side's)
         mint <file> <address>    mint a connect token with the shared test key
+        check-addresses          check address parsing verdicts against a fixed table
         server <port>            run a server session leg (connect/exchange/disconnect)
         client <port> <token>    run a client session leg against a server
 
@@ -101,12 +102,27 @@ static void golden_private_token_struct( struct netcode_connect_token_private_t 
     fill_pattern( token->user_data, NETCODE_USER_DATA_BYTES, 0 );
 }
 
-static void golden_keys_and_nonce( uint8_t * token_key, uint8_t * challenge_key, uint8_t * packet_key, uint8_t * nonce )
+static void golden_keys_and_nonce( uint8_t * token_key,
+                                   uint8_t * challenge_key,
+                                   uint8_t * client_salt,
+                                   uint8_t * server_nonce,
+                                   uint8_t * derived_c2s,
+                                   uint8_t * derived_s2c,
+                                   uint8_t * nonce )
 {
+    uint8_t root_c2s[NETCODE_KEY_BYTES];
+    uint8_t root_s2c[NETCODE_KEY_BYTES];
+
     fill_pattern( token_key, NETCODE_KEY_BYTES, 1 );
+    fill_pattern( root_c2s, NETCODE_KEY_BYTES, 2 );
+    fill_pattern( root_s2c, NETCODE_KEY_BYTES, 3 );
     fill_pattern( challenge_key, NETCODE_KEY_BYTES, 4 );
-    fill_pattern( packet_key, NETCODE_KEY_BYTES, 5 );
     fill_pattern( nonce, NETCODE_CONNECT_TOKEN_NONCE_BYTES, 6 );
+    fill_pattern( client_salt, NETCODE_CONNECT_SALT_BYTES, 7 );
+    fill_pattern( server_nonce, NETCODE_SERVER_NONCE_BYTES, 8 );
+
+    netcode_derive_packet_key( derived_c2s, root_c2s, client_salt, server_nonce );
+    netcode_derive_packet_key( derived_s2c, root_s2c, client_salt, server_nonce );
 }
 
 static int build_golden_private_token( uint8_t * buffer /* 1024 */ )
@@ -115,9 +131,11 @@ static int build_golden_private_token( uint8_t * buffer /* 1024 */ )
     golden_private_token_struct( &token );
     netcode_write_connect_token_private( &token, buffer, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
 
-    uint8_t token_key[NETCODE_KEY_BYTES], challenge_key[NETCODE_KEY_BYTES], packet_key[NETCODE_KEY_BYTES];
+    uint8_t token_key[NETCODE_KEY_BYTES], challenge_key[NETCODE_KEY_BYTES];
+    uint8_t client_salt[NETCODE_CONNECT_SALT_BYTES], server_nonce[NETCODE_SERVER_NONCE_BYTES];
+    uint8_t derived_c2s[NETCODE_KEY_BYTES], derived_s2c[NETCODE_KEY_BYTES];
     uint8_t nonce[NETCODE_CONNECT_TOKEN_NONCE_BYTES];
-    golden_keys_and_nonce( token_key, challenge_key, packet_key, nonce );
+    golden_keys_and_nonce( token_key, challenge_key, client_salt, server_nonce, derived_c2s, derived_s2c, nonce );
 
     return netcode_encrypt_connect_token_private( buffer, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES, NETCODE_VERSION_INFO,
                                                   GOLDEN_PROTOCOL_ID, GOLDEN_EXPIRE_TIMESTAMP, nonce, token_key ) == NETCODE_OK;
@@ -131,18 +149,22 @@ static int build_golden_challenge_token( uint8_t * buffer /* 300 */ )
     fill_pattern( token.user_data, NETCODE_USER_DATA_BYTES, 0 );
     netcode_write_challenge_token( &token, buffer, NETCODE_CHALLENGE_TOKEN_BYTES );
 
-    uint8_t token_key[NETCODE_KEY_BYTES], challenge_key[NETCODE_KEY_BYTES], packet_key[NETCODE_KEY_BYTES];
+    uint8_t token_key[NETCODE_KEY_BYTES], challenge_key[NETCODE_KEY_BYTES];
+    uint8_t client_salt[NETCODE_CONNECT_SALT_BYTES], server_nonce[NETCODE_SERVER_NONCE_BYTES];
+    uint8_t derived_c2s[NETCODE_KEY_BYTES], derived_s2c[NETCODE_KEY_BYTES];
     uint8_t nonce[NETCODE_CONNECT_TOKEN_NONCE_BYTES];
-    golden_keys_and_nonce( token_key, challenge_key, packet_key, nonce );
+    golden_keys_and_nonce( token_key, challenge_key, client_salt, server_nonce, derived_c2s, derived_s2c, nonce );
 
     return netcode_encrypt_challenge_token( buffer, NETCODE_CHALLENGE_TOKEN_BYTES, GOLDEN_CHALLENGE_SEQUENCE, challenge_key ) == NETCODE_OK;
 }
 
 static int do_goldens( const char * dir )
 {
-    uint8_t token_key[NETCODE_KEY_BYTES], challenge_key[NETCODE_KEY_BYTES], packet_key[NETCODE_KEY_BYTES];
+    uint8_t token_key[NETCODE_KEY_BYTES], challenge_key[NETCODE_KEY_BYTES];
+    uint8_t client_salt[NETCODE_CONNECT_SALT_BYTES], server_nonce[NETCODE_SERVER_NONCE_BYTES];
+    uint8_t derived_c2s[NETCODE_KEY_BYTES], derived_s2c[NETCODE_KEY_BYTES];
     uint8_t nonce[NETCODE_CONNECT_TOKEN_NONCE_BYTES];
-    golden_keys_and_nonce( token_key, challenge_key, packet_key, nonce );
+    golden_keys_and_nonce( token_key, challenge_key, client_salt, server_nonce, derived_c2s, derived_s2c, nonce );
 
     /* 1. encrypted private connect token */
 
@@ -194,7 +216,8 @@ static int do_goldens( const char * dir )
         packet.connect_token_expire_timestamp = GOLDEN_EXPIRE_TIMESTAMP;
         memcpy( packet.connect_token_nonce, nonce, NETCODE_CONNECT_TOKEN_NONCE_BYTES );
         memcpy( packet.connect_token_data, private_token, NETCODE_CONNECT_TOKEN_PRIVATE_BYTES );
-        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, packet_key, GOLDEN_PROTOCOL_ID );
+        memcpy( packet.client_salt, client_salt, NETCODE_CONNECT_SALT_BYTES );
+        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0, derived_c2s, GOLDEN_PROTOCOL_ID );
         if ( bytes <= 0 || !write_file( dir, "packet_request.bin", buffer, bytes ) )
             return 0;
     }
@@ -202,7 +225,8 @@ static int do_goldens( const char * dir )
     {
         struct netcode_connection_denied_packet_t packet;
         packet.packet_type = NETCODE_CONNECTION_DENIED_PACKET;
-        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 1ULL << 63, packet_key, GOLDEN_PROTOCOL_ID );
+        memcpy( packet.server_nonce, server_nonce, NETCODE_SERVER_NONCE_BYTES );
+        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 1ULL << 63, derived_s2c, GOLDEN_PROTOCOL_ID );
         if ( bytes <= 0 || !write_file( dir, "packet_denied.bin", buffer, bytes ) )
             return 0;
     }
@@ -210,9 +234,10 @@ static int do_goldens( const char * dir )
     {
         struct netcode_connection_challenge_packet_t packet;
         packet.packet_type = NETCODE_CONNECTION_CHALLENGE_PACKET;
+        memcpy( packet.server_nonce, server_nonce, NETCODE_SERVER_NONCE_BYTES );
         packet.challenge_token_sequence = GOLDEN_CHALLENGE_SEQUENCE;
         memcpy( packet.challenge_token_data, challenge_token, NETCODE_CHALLENGE_TOKEN_BYTES );
-        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), ( 1ULL << 63 ) + 5, packet_key, GOLDEN_PROTOCOL_ID );
+        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), ( 1ULL << 63 ) + 5, derived_s2c, GOLDEN_PROTOCOL_ID );
         if ( bytes <= 0 || !write_file( dir, "packet_challenge.bin", buffer, bytes ) )
             return 0;
     }
@@ -222,7 +247,7 @@ static int do_goldens( const char * dir )
         packet.packet_type = NETCODE_CONNECTION_RESPONSE_PACKET;
         packet.challenge_token_sequence = GOLDEN_CHALLENGE_SEQUENCE;
         memcpy( packet.challenge_token_data, challenge_token, NETCODE_CHALLENGE_TOKEN_BYTES );
-        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0x1F, packet_key, GOLDEN_PROTOCOL_ID );
+        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0x1F, derived_c2s, GOLDEN_PROTOCOL_ID );
         if ( bytes <= 0 || !write_file( dir, "packet_response.bin", buffer, bytes ) )
             return 0;
     }
@@ -232,7 +257,7 @@ static int do_goldens( const char * dir )
         packet.packet_type = NETCODE_CONNECTION_KEEP_ALIVE_PACKET;
         packet.client_index = 5;
         packet.max_clients = 32;
-        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0x11223344, packet_key, GOLDEN_PROTOCOL_ID );
+        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 0x11223344, derived_s2c, GOLDEN_PROTOCOL_ID );
         if ( bytes <= 0 || !write_file( dir, "packet_keepalive.bin", buffer, bytes ) )
             return 0;
     }
@@ -243,7 +268,7 @@ static int do_goldens( const char * dir )
         packet->packet_type = NETCODE_CONNECTION_PAYLOAD_PACKET;
         packet->payload_bytes = NETCODE_MAX_PAYLOAD_BYTES;
         fill_pattern( packet->payload_data, NETCODE_MAX_PAYLOAD_BYTES, 0 );
-        bytes = netcode_write_packet( packet, buffer, sizeof( buffer ), 1000, packet_key, GOLDEN_PROTOCOL_ID );
+        bytes = netcode_write_packet( packet, buffer, sizeof( buffer ), 1000, derived_s2c, GOLDEN_PROTOCOL_ID );
         if ( bytes <= 0 || !write_file( dir, "packet_payload.bin", buffer, bytes ) )
             return 0;
     }
@@ -251,7 +276,7 @@ static int do_goldens( const char * dir )
     {
         struct netcode_connection_disconnect_packet_t packet;
         packet.packet_type = NETCODE_CONNECTION_DISCONNECT_PACKET;
-        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 7, packet_key, GOLDEN_PROTOCOL_ID );
+        bytes = netcode_write_packet( &packet, buffer, sizeof( buffer ), 7, derived_c2s, GOLDEN_PROTOCOL_ID );
         if ( bytes <= 0 || !write_file( dir, "packet_disconnect.bin", buffer, bytes ) )
             return 0;
     }
@@ -271,9 +296,11 @@ static int do_goldens( const char * dir )
 
 static int do_verify( const char * dir )
 {
-    uint8_t token_key[NETCODE_KEY_BYTES], challenge_key[NETCODE_KEY_BYTES], packet_key[NETCODE_KEY_BYTES];
+    uint8_t token_key[NETCODE_KEY_BYTES], challenge_key[NETCODE_KEY_BYTES];
+    uint8_t client_salt[NETCODE_CONNECT_SALT_BYTES], server_nonce[NETCODE_SERVER_NONCE_BYTES];
+    uint8_t derived_c2s[NETCODE_KEY_BYTES], derived_s2c[NETCODE_KEY_BYTES];
     uint8_t nonce[NETCODE_CONNECT_TOKEN_NONCE_BYTES];
-    golden_keys_and_nonce( token_key, challenge_key, packet_key, nonce );
+    golden_keys_and_nonce( token_key, challenge_key, client_salt, server_nonce, derived_c2s, derived_s2c, nonce );
 
     struct netcode_address_t expected_addresses[2];
     golden_addresses( expected_addresses );
@@ -343,37 +370,41 @@ static int do_verify( const char * dir )
     uint64_t sequence;
 
     {
-        int bytes = 1 + NETCODE_VERSION_INFO_BYTES + 8 + 8 + NETCODE_CONNECT_TOKEN_NONCE_BYTES + NETCODE_CONNECT_TOKEN_PRIVATE_BYTES;
+        int bytes = 1 + NETCODE_VERSION_INFO_BYTES + 8 + 8 + NETCODE_CONNECT_TOKEN_NONCE_BYTES + NETCODE_CONNECT_TOKEN_PRIVATE_BYTES + NETCODE_CONNECT_SALT_BYTES;
         if ( !read_file( dir, "packet_request.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_request_packet_t * packet = (struct netcode_connection_request_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, token_key, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, derived_c2s, GOLDEN_PROTOCOL_ID, 0, 0, token_key, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_REQUEST_PACKET );
         VERIFY( packet->protocol_id == GOLDEN_PROTOCOL_ID );
         VERIFY( packet->connect_token_expire_timestamp == GOLDEN_EXPIRE_TIMESTAMP );
+        VERIFY( memcmp( packet->client_salt, client_salt, NETCODE_CONNECT_SALT_BYTES ) == 0 );
         free( packet );
     }
 
     {
-        int bytes = 1 + 8 + NETCODE_MAC_BYTES;      /* prefix + 8 sequence bytes + mac */
+        int bytes = 1 + 8 + NETCODE_SERVER_NONCE_BYTES + NETCODE_MAC_BYTES;
         if ( !read_file( dir, "packet_denied.bin", buffer, bytes ) )
             return 0;
-        void * packet = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
+        struct netcode_connection_denied_packet_t * packet = (struct netcode_connection_denied_packet_t*)
+            netcode_read_packet( buffer, bytes, &sequence, derived_s2c, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
-        VERIFY( ( (uint8_t*) packet )[0] == NETCODE_CONNECTION_DENIED_PACKET );
+        VERIFY( packet->packet_type == NETCODE_CONNECTION_DENIED_PACKET );
+        VERIFY( memcmp( packet->server_nonce, server_nonce, NETCODE_SERVER_NONCE_BYTES ) == 0 );
         VERIFY( sequence == 1ULL << 63 );
         free( packet );
     }
 
     {
-        int bytes = 1 + 8 + 8 + NETCODE_CHALLENGE_TOKEN_BYTES + NETCODE_MAC_BYTES;
+        int bytes = 1 + 8 + NETCODE_SERVER_NONCE_BYTES + 8 + NETCODE_CHALLENGE_TOKEN_BYTES + NETCODE_MAC_BYTES;
         if ( !read_file( dir, "packet_challenge.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_challenge_packet_t * packet = (struct netcode_connection_challenge_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, derived_s2c, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_CHALLENGE_PACKET );
+        VERIFY( memcmp( packet->server_nonce, server_nonce, NETCODE_SERVER_NONCE_BYTES ) == 0 );
         VERIFY( packet->challenge_token_sequence == GOLDEN_CHALLENGE_SEQUENCE );
         VERIFY( sequence == ( 1ULL << 63 ) + 5 );
         free( packet );
@@ -384,7 +415,7 @@ static int do_verify( const char * dir )
         if ( !read_file( dir, "packet_response.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_response_packet_t * packet = (struct netcode_connection_response_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, derived_c2s, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_RESPONSE_PACKET );
         VERIFY( packet->challenge_token_sequence == GOLDEN_CHALLENGE_SEQUENCE );
@@ -397,7 +428,7 @@ static int do_verify( const char * dir )
         if ( !read_file( dir, "packet_keepalive.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_keep_alive_packet_t * packet = (struct netcode_connection_keep_alive_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, derived_s2c, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_KEEP_ALIVE_PACKET );
         VERIFY( packet->client_index == 5 );
@@ -411,7 +442,7 @@ static int do_verify( const char * dir )
         if ( !read_file( dir, "packet_payload.bin", buffer, bytes ) )
             return 0;
         struct netcode_connection_payload_packet_t * packet = (struct netcode_connection_payload_packet_t*)
-            netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
+            netcode_read_packet( buffer, bytes, &sequence, derived_s2c, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( packet->packet_type == NETCODE_CONNECTION_PAYLOAD_PACKET );
         VERIFY( packet->payload_bytes == NETCODE_MAX_PAYLOAD_BYTES );
@@ -426,7 +457,7 @@ static int do_verify( const char * dir )
         int bytes = 1 + 1 + NETCODE_MAC_BYTES;
         if ( !read_file( dir, "packet_disconnect.bin", buffer, bytes ) )
             return 0;
-        void * packet = netcode_read_packet( buffer, bytes, &sequence, packet_key, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
+        void * packet = netcode_read_packet( buffer, bytes, &sequence, derived_c2s, GOLDEN_PROTOCOL_ID, 0, 0, NULL, allowed_packets, NULL, NULL, NULL );
         VERIFY( packet != NULL );
         VERIFY( ( (uint8_t*) packet )[0] == NETCODE_CONNECTION_DISCONNECT_PACKET );
         VERIFY( sequence == 7 );
@@ -434,6 +465,50 @@ static int do_verify( const char * dir )
     }
 
     printf( "verify passed: %s\n", dir );
+    return 1;
+}
+
+static int do_check_addresses( void )
+{
+    /* the same inputs and verdicts as DoCheckAddresses in compat/Compat.cs:
+       both parsers must agree on every row. Zone-id inputs are covered by the
+       C# unit tests only; inet_pton zone handling varies by platform. */
+    static const struct { const char * input; int valid; int type; int port; } cases[] = {
+        { "[[::1]]", 0, 0, 0 },
+        { "[::1]]:80", 0, 0, 0 },
+        { "[::1]:80]", 0, 0, 0 },
+        { "[::1]]", 0, 0, 0 },
+        { "127.0.0.1", 1, NETCODE_ADDRESS_IPV4, 0 },
+        { "127.0.0.1:80", 1, NETCODE_ADDRESS_IPV4, 80 },
+        { "::1", 1, NETCODE_ADDRESS_IPV6, 0 },
+        { "[::1]", 1, NETCODE_ADDRESS_IPV6, 0 },
+        { "[::1]:80", 1, NETCODE_ADDRESS_IPV6, 80 },
+        { "fe80::1", 1, NETCODE_ADDRESS_IPV6, 0 },
+        { "[fe80::202:b3ff:fe1e:8329]:40000", 1, NETCODE_ADDRESS_IPV6, 40000 },
+    };
+
+    int i;
+    for ( i = 0; i < (int) ( sizeof( cases ) / sizeof( cases[0] ) ); i++ )
+    {
+        struct netcode_address_t address;
+        int parsed = netcode_parse_address( cases[i].input, &address ) == NETCODE_OK;
+        if ( parsed != cases[i].valid )
+        {
+            printf( "verify failed: address check '%s' validity\n", cases[i].input );
+            return 0;
+        }
+        if ( cases[i].valid && ( (int) address.type != cases[i].type || (int) address.port != cases[i].port ) )
+        {
+            printf( "verify failed: address check '%s' type/port\n", cases[i].input );
+            return 0;
+        }
+        if ( parsed )
+            printf( "address check: '%s' -> %s:%d\n", cases[i].input, address.type == NETCODE_ADDRESS_IPV6 ? "IPv6" : "IPv4", (int) address.port );
+        else
+            printf( "address check: '%s' -> invalid\n", cases[i].input );
+    }
+
+    printf( "address checks passed\n" );
     return 1;
 }
 
@@ -665,6 +740,8 @@ int main( int argc, char ** argv )
         ok = do_goldens( argv[2] );
     else if ( argc == 3 && strcmp( argv[1], "verify" ) == 0 )
         ok = do_verify( argv[2] );
+    else if ( argc == 2 && strcmp( argv[1], "check-addresses" ) == 0 )
+        ok = do_check_addresses();
     else if ( argc == 4 && strcmp( argv[1], "mint" ) == 0 )
         ok = do_mint( argv[2], argv[3] );
     else if ( argc == 3 && strcmp( argv[1], "server" ) == 0 )
@@ -672,7 +749,7 @@ int main( int argc, char ** argv )
     else if ( argc == 4 && strcmp( argv[1], "client" ) == 0 )
         ok = do_client( atoi( argv[2] ), argv[3] );
     else
-        printf( "usage: compat-c goldens <dir> | verify <dir> | mint <file> <address> | server <port> | client <port> <token>\n" );
+        printf( "usage: compat-c goldens <dir> | verify <dir> | mint <file> <address> | check-addresses | server <port> | client <port> <token>\n" );
 
     netcode_term();
 

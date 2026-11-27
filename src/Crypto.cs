@@ -1,11 +1,12 @@
 /*
-    Crypto.cs — the two AEAD constructions netcode uses on the wire.
+    Crypto.cs — the AEAD and key-derivation constructions netcode uses on the wire.
 
     C# port of the slice of libsodium that the C reference implementation vendors
     (see sodium/NOTES.md in mas-bandwidth/netcode):
 
         crypto_aead_chacha20poly1305_ietf_{encrypt,decrypt}   (RFC 8439)
         crypto_aead_xchacha20poly1305_ietf_{encrypt,decrypt}  (HChaCha20 subkey + IETF)
+        crypto_core_hchacha20                                 (NETCODE 1.03 per-connection packet keys)
 
     This is a single, fully managed production path — no platform primitive, no
     P/Invoke — so behavior is identical on every OS and TFM. The BCL's
@@ -39,7 +40,6 @@ namespace Netcode
         public const int KeyBytes = 32;
         public const int MacBytes = 16;
         public const int NonceBytesIetf = 12;
-        public const int NonceBytesX = 24;
 
         // ------------------------------------------------------------------
         // ChaCha20 core (RFC 8439). 32-bit counter, 96-bit nonce.
@@ -47,10 +47,13 @@ namespace Netcode
 
         private static void QuarterRound(ref uint a, ref uint b, ref uint c, ref uint d)
         {
-            a += b; d ^= a; d = BitOperations.RotateLeft(d, 16);
-            c += d; b ^= c; b = BitOperations.RotateLeft(b, 12);
-            a += b; d ^= a; d = BitOperations.RotateLeft(d, 8);
-            c += d; b ^= c; b = BitOperations.RotateLeft(b, 7);
+            unchecked
+            {
+                a += b; d ^= a; d = BitOperations.RotateLeft(d, 16);
+                c += d; b ^= c; b = BitOperations.RotateLeft(b, 12);
+                a += b; d ^= a; d = BitOperations.RotateLeft(d, 8);
+                c += d; b ^= c; b = BitOperations.RotateLeft(b, 7);
+            }
         }
 
         private static void ChaCha20Rounds(Span<uint> x)
@@ -93,7 +96,7 @@ namespace Netcode
             state.CopyTo(x);
             ChaCha20Rounds(x);
             for (int i = 0; i < 16; i++)
-                BinaryPrimitives.WriteUInt32LittleEndian(keystream64.Slice(i * 4, 4), x[i] + state[i]);
+                BinaryPrimitives.WriteUInt32LittleEndian(keystream64.Slice(i * 4, 4), unchecked(x[i] + state[i]));
         }
 
         /// <summary>ChaCha20 stream xor: dst = src ^ keystream(key, nonce, counter...).
@@ -109,7 +112,7 @@ namespace Netcode
             while (remaining > 0)
             {
                 Block(state, keystream);
-                state[12]++;
+                unchecked { state[12]++; }
                 int n = remaining < 64 ? remaining : 64;
                 for (int i = 0; i < n; i++)
                     dst[offset + i] = (byte)(src[offset + i] ^ keystream[i]);
@@ -201,9 +204,9 @@ namespace Netcode
                 UInt128 d1 = (UInt128)h0 * r1 + (UInt128)h1 * r0 + (UInt128)h2 * s2;
                 UInt128 d2 = (UInt128)h0 * r2 + (UInt128)h1 * r1 + (UInt128)h2 * r0;
 
-                ulong c = (ulong)(d0 >> 44); h0 = (ulong)d0 & 0xfffffffffffUL;
-                d1 += c; c = (ulong)(d1 >> 44); h1 = (ulong)d1 & 0xfffffffffffUL;
-                d2 += c; c = (ulong)(d2 >> 42); h2 = (ulong)d2 & 0x3ffffffffffUL;
+                ulong c = unchecked((ulong)(d0 >> 44)); h0 = unchecked((ulong)d0) & 0xfffffffffffUL;
+                d1 += c; c = unchecked((ulong)(d1 >> 44)); h1 = unchecked((ulong)d1) & 0xfffffffffffUL;
+                d2 += c; c = unchecked((ulong)(d2 >> 42)); h2 = unchecked((ulong)d2) & 0x3ffffffffffUL;
                 h0 += c * 5; c = h0 >> 44; h0 &= 0xfffffffffffUL;
                 h1 += c;
 
@@ -273,7 +276,7 @@ namespace Netcode
             ulong g2 = unchecked(h2 + c - (1UL << 42));
 
             // select h if h < p, else h - p (constant time)
-            c = (g2 >> 63) - 1;
+            c = unchecked((g2 >> 63) - 1);
             g0 &= c; g1 &= c; g2 &= c;
             ulong nc = ~c;
             h0 = (h0 & nc) | g0;
@@ -296,6 +299,18 @@ namespace Netcode
             st.R0 = 0; st.R1 = 0; st.R2 = 0;
             st.S1 = 0; st.S2 = 0;
             st.Pad0 = 0; st.Pad1 = 0;
+        }
+
+        /// <summary>One-shot Poly1305 MAC (RFC 8439 Section 2.5) of a message
+        /// under a 32-byte one-time key r ‖ s.</summary>
+        internal static void Poly1305Mac(Span<byte> mac16, ReadOnlySpan<byte> message, ReadOnlySpan<byte> key32)
+        {
+            Poly1305State st = default;
+            Poly1305Init(ref st, key32);
+            Span<byte> scratch = stackalloc byte[16];
+            int scratchLen = 0;
+            Poly1305Update(ref st, message, scratch, ref scratchLen);
+            Poly1305Finish(ref st, scratch, scratchLen, mac16);
         }
 
         // ------------------------------------------------------------------
@@ -407,6 +422,20 @@ namespace Netcode
             HChaCha20(subkey, key, nonce24.Slice(0, 16));
             ietfNonce.Slice(0, 4).Clear();
             nonce24.Slice(16, 8).CopyTo(ietfNonce.Slice(4));
+        }
+
+        /// <summary>
+        /// Derive a 32-byte per-connection packet key from a 32-byte connect token root key,
+        /// 8-byte client salt, and 8-byte server nonce via HChaCha20(key, clientSalt ‖ serverNonce).
+        /// Matches netcode_derive_packet_key (crypto_core_hchacha20 with NULL constant).
+        /// </summary>
+        public static void DerivePacketKey(Span<byte> packetKey, ReadOnlySpan<byte> tokenKey, ReadOnlySpan<byte> clientSalt, ReadOnlySpan<byte> serverNonce)
+        {
+            Span<byte> input = stackalloc byte[16];
+            clientSalt.Slice(0, 8).CopyTo(input.Slice(0, 8));
+            serverNonce.Slice(0, 8).CopyTo(input.Slice(8, 8));
+            HChaCha20(packetKey.Slice(0, KeyBytes), tokenKey.Slice(0, KeyBytes), input);
+            CryptographicOperations.ZeroMemory(input);
         }
     }
 }

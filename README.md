@@ -4,11 +4,11 @@
 
 If this library helps you, please support it: **[Become a supporter](https://www.patreon.com/MasBandwidth/membership)**
 
-**Status: released** — v1.1.0, tested against the C reference at netcode 1.4.8. Wire compatibility with the C reference is proven in CI on every push (the "C wire compatibility" gate).
+**Status: released** — v1.2.0, tested against the C reference at netcode 1.5.0. Wire compatibility with the C reference is proven in CI on every push (the "C wire compatibility" gate).
 
 C# port of [netcode](https://github.com/mas-bandwidth/netcode), a simple protocol
 for creating secure client/server connections over UDP (protocol
-"NETCODE 1.02"). The wire is byte-identical to the C reference implementation:
+"NETCODE 1.03"). The wire is byte-identical to the C reference implementation:
 connect tokens minted by either implementation are accepted by the other,
 encrypted packets cross-decrypt, and a C client connects to a C# server (and
 vice versa) exactly as it would to the C one. Wire compatibility is proven, not
@@ -35,7 +35,8 @@ netcode solves connection-oriented, encrypted, authenticated UDP for games:
 3. The server validates the token (encrypted with a private key shared between
    backend and servers), challenges the client to prove its address, assigns it
    a slot, and from then on every packet is encrypted and authenticated with
-   per-session keys carried inside the token.
+   per-connection keys derived via HChaCha20 from the token's root keys, an
+   8-byte client salt, and an 8-byte server nonce.
 
 The API is idiomatic C# over the same non-blocking update-loop model as the C
 library — games call `Update(time)` every frame; nothing spawns threads or
@@ -105,10 +106,12 @@ scripts/interop.sh ../netcode                         # the interop gate (needs 
 
 ## The crypto
 
-netcode uses exactly two libsodium constructions on the wire:
+netcode uses three libsodium constructions on the wire:
 **XChaCha20-Poly1305** (`crypto_aead_xchacha20poly1305_ietf`) for the private
-connect token, and **ChaCha20-Poly1305 IETF** (RFC 8439) for challenge tokens
-and encrypted packets.
+connect token, **HChaCha20** (`crypto_core_hchacha20`) to derive fresh
+per-connection packet keys from the connect token's root keys over
+`client_salt[8] || server_nonce[8]`, and **ChaCha20-Poly1305 IETF** (RFC 8439)
+for challenge tokens and encrypted packets.
 
 This port implements both in fully managed C# (`src/Crypto.cs`) — ChaCha20,
 Poly1305 (44-bit limbs over `UInt128`), HChaCha20 — as a single production code
@@ -150,8 +153,9 @@ Inherited from the C reference implementation, on purpose:
   scale (~100 players).
 - **Connect-token single-use tracking is constant-time worst-case**: the
   find-or-add scan always walks every entry, so timing does not leak whether a
-  token was seen. Pending entries admit only same-address retransmits;
-  installation consumes the token for every address, and unexpired entries are
+  token was seen. Pending entries admit only same-address, same-client-salt
+  retransmits within `timeout_seconds` of creation; installation or a half-open
+  disconnect consumes the token for every address, and unexpired entries are
   never evicted.
 - **Per-packet socket send errors are swallowed.** UDP is unreliable; a send
   error is semantically identical to a dropped packet, and a persistently dead
@@ -159,9 +163,11 @@ Inherited from the C reference implementation, on purpose:
 - **The server has no state machine of its own** beyond stopped/started; all
   other state is per-client.
 - **The server's global packet sequence is re-seeded to 2^63 on every start.**
-  Global packets (challenge/denied) share per-token keys with per-client
-  packets whose sequences start at zero; the split sequence space keeps AEAD
-  nonces disjoint. Regression-tested.
+  Global packets (challenge/denied) share the derived per-connection
+  server-to-client key with per-client packets whose sequences start at zero;
+  the split sequence space keeps AEAD nonces disjoint within a connection, while
+  HChaCha20 key derivation over client salt and server nonce keeps keys disjoint
+  across attempts and servers. Regression-tested.
 - **Replay protection advances its window only after AEAD authentication.**
   The pre-decrypt check is an optimization; advancing before authentication
   would let spoofed sequence numbers poison the window.
@@ -182,5 +188,5 @@ Differences from the C library, also on purpose:
 
 Never embed a production private key in a client. The fixed key in the test
 suite and interop harness is the C repo's published test key — test-only and
-obviously non-production. Report vulnerabilities privately (see the C repo's
-SECURITY.md for the family process).
+obviously non-production. Report vulnerabilities privately — see
+[SECURITY.md](SECURITY.md).

@@ -1,18 +1,23 @@
 /*
     ClientServer.cs — client/server integration tests, ported test-for-test from
-    netcode.c: deterministic network-simulator tests plus real UDP socket
-    connects, all error states, disconnect flows, reconnect, disable timeout and
-    loopback. Also the soak runner.
+    netcode.c: deterministic network-simulator tests (unit tier: no sockets,
+    injected time), all error states, disconnect flows, reconnect, disable
+    timeout and loopback; real UDP socket creates and connects (functional
+    tier, --functional). Also the soak runner.
 */
 
 using System;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 
 namespace Netcode.Tests;
 
 internal static class ClientServerTests
 {
-    private static byte[] GenerateConnectToken(string serverAddress, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry, int timeout = TestConstants.TestTimeoutSeconds)
+    private delegate void ProcessAtTime(in Address from, Span<byte> packet, ulong timestamp);
+
+    internal static byte[] GenerateConnectToken(string serverAddress, ulong clientId, int expiry = TestConstants.TestConnectTokenExpiry, int timeout = TestConstants.TestTimeoutSeconds)
     {
         return GenerateConnectToken(new[] { serverAddress }, clientId, expiry, timeout);
     }
@@ -37,7 +42,33 @@ internal static class ClientServerTests
         };
     }
 
-    private static ServerConfig CreateServerConfig(NetworkSimulator? simulator)
+    // the server refuses connect tokens issued in the second it started, so a test issues its
+    // tokens a second after its server starts. unit tests, whose unix clock is injected, start
+    // the server a second earlier; tests on the wall clock wait for the next second.
+
+    internal static void StartServer(Server server, int maxClients)
+    {
+        Func<ulong> now = UnixTime.Now;
+        UnixTime.Now = () => now() - 1;
+        try
+        {
+            server.Start(maxClients);
+        }
+        finally
+        {
+            UnixTime.Now = now;
+        }
+    }
+
+    internal static void StartServerAndWaitForNextSecond(Server server, int maxClients)
+    {
+        server.Start(maxClients);
+        ulong startSecond = UnixTime.Now();
+        while (UnixTime.Now() == startSecond)
+            Thread.Sleep(10);
+    }
+
+    internal static ServerConfig CreateServerConfig(NetworkSimulator? simulator)
     {
         var config = new ServerConfig { ProtocolId = TestConstants.TestProtocolId, Simulator = simulator };
         TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
@@ -61,65 +92,60 @@ internal static class ClientServerTests
         }
     }
 
-    public static void TestClientCreate()
+    public static void TestClientServerAddressFamilies()
     {
+        static byte[] Token(params string[] addresses)
         {
-            using var client = new Client("127.0.0.1:40000");
-            Check.That(client.Port == 40000);
-            Check.That(client.State == ClientState.Disconnected);
+            var parsed = new Address[addresses.Length];
+            for (int i = 0; i < addresses.Length; i++)
+                Check.That(Address.TryParse(addresses[i], out parsed[i]));
+            byte[] token = new byte[Protocol.ConnectTokenBytes];
+            Check.That(ConnectTokenGenerator.GenerateInternal(parsed, parsed, 1000, 2000,
+                TestConstants.TestTimeoutSeconds, 1, TestConstants.TestProtocolId,
+                TestConstants.PrivateKey, new byte[Protocol.UserDataBytes], new byte[Defines.ConnectTokenNonceBytes], token));
+            return token;
         }
-        {
-            using var client = new Client("[::]:50000");
-            Check.That(client.Port == 50000);
-        }
-        {
-            using var client = new Client("127.0.0.1:40000", "[::]:50000", null, 0.0);
-            Check.That(client.Port == 40000);
-        }
-        {
-            using var client = new Client("[::]:50000", "127.0.0.1:40000", null, 0.0);
-            Check.That(client.Port == 50000);
-        }
-        // bad address must throw with the right error code
-        try
-        {
-            using var client = new Client("not an address");
-            Check.That(false);
-        }
-        catch (NetcodeException e)
-        {
-            Check.That(e.ErrorCode == (int)ClientCreateError.ParseAddressFailed);
-        }
-    }
 
-    public static void TestServerCreate()
-    {
+        foreach (bool ipv6 in new[] { false, true })
         {
-            using var server = new Server("127.0.0.1:40000", CreateServerConfig(null));
-            Check.That(server.Port == 40000);
-            Check.That(!server.Running);
-        }
-        {
-            using var server = new Server("[::1]:50000", CreateServerConfig(null));
-            Check.That(server.Port == 50000);
-        }
-        {
-            using var server = new Server("127.0.0.1:40000", "[::1]:50000", CreateServerConfig(null), 0.0);
-            Check.That(server.Port == 40000);
-        }
-        {
-            using var server = new Server("[::1]:50000", "127.0.0.1:40000", CreateServerConfig(null), 0.0);
-            Check.That(server.Port == 50000);
-        }
-        // bad address must throw with the right error code
-        try
-        {
-            using var server = new Server("not an address", CreateServerConfig(null));
-            Check.That(false);
-        }
-        catch (NetcodeException e)
-        {
-            Check.That(e.ErrorCode == (int)ServerCreateError.ParseAddressFailed);
+            string matching = ipv6 ? "[::1]:50000" : "127.0.0.1:50000";
+            string mismatched = ipv6 ? "127.0.0.1:50001" : "[::1]:50001";
+            var config = new ClientConfig
+            {
+                OverrideSendAndReceive = true,
+                SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+                ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0,
+            };
+            using var client = new Client(matching, config, 1000.0);
+            var socketField = typeof(Client).GetField(ipv6 ? "_socketIpv6" : "_socketIpv4",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            var configField = typeof(Client).GetField("_config",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            var clientConfig = (ClientConfig)configField.GetValue(client)!;
+            // Only socket presence is read by address selection. A sentinel exercises
+            // that path without opening a socket or sending/receiving any packets.
+            socketField.SetValue(client, System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(NetcodeSocket)));
+            clientConfig.OverrideSendAndReceive = false;
+            try
+            {
+                client.Connect(Token(mismatched));
+                Check.That(client.State == ClientState.InvalidConnectToken);
+
+                client.Connect(Token(mismatched, matching, mismatched, matching, mismatched));
+                Check.That(client.State == ClientState.SendingConnectionRequest);
+                Check.That(client.ServerAddress.ToString() == matching);
+                var next = typeof(Client).GetMethod("ConnectToNextServer",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+                Check.That((bool)next.Invoke(client, null)!);
+                Check.That(client.ServerAddress.ToString() == matching);
+                Check.That(!(bool)next.Invoke(client, null)!);
+            }
+            finally
+            {
+                // The sentinel has no underlying socket and must never be disposed.
+                socketField.SetValue(client, null);
+                clientConfig.OverrideSendAndReceive = true;
+            }
         }
     }
 
@@ -129,7 +155,7 @@ internal static class ClientServerTests
         // per-client packets, so the global sequence must stay in the top half of the
         // sequence space or a stopped and restarted server reuses AEAD nonces.
 
-        using var server = new Server("127.0.0.1:40000", CreateServerConfig(null));
+        using var server = new Server("127.0.0.1:40000", CreateServerConfig(new NetworkSimulator()), 1000.0);
 
         Check.That(server.GlobalSequence == 1UL << 63);
 
@@ -154,53 +180,70 @@ internal static class ClientServerTests
 
         ulong currentTimestamp = 1000;
         ulong expireTimestamp = currentTimestamp + 30;
+        int timeoutSeconds = 30;
         byte[] mac = new byte[Protocol.MacBytes];
         mac[0] = 1;
 
-        int index = history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 100.0);
+        byte[] saltA = new byte[Defines.ConnectSaltBytes];
+        byte[] saltB = new byte[Defines.ConnectSaltBytes];
+        saltA.AsSpan().Fill(0xAA);
+        saltB.AsSpan().Fill(0xBB);
+
+        // a connect token the history has not seen creates a pending entry
+        int index = history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 100.0, timeoutSeconds);
         Check.That(index >= 0);
-        Check.That(history.State(index) == ConnectTokenEntryState.Pending);
-        Check.That(history.EntryTime(index) == 100.0);
 
-        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 200.0) == index);
-        Check.That(history.EntryTime(index) == 100.0);
-        Check.That(history.FindOrAdd(in addressB, mac, expireTimestamp, currentTimestamp, 200.0) == ConnectTokenHistory.Refused);
+        // a pending entry admits a retransmitted connection request from the same address with the
+        // same client salt within timeoutSeconds, without refreshing entry creation time
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 130.0, timeoutSeconds) == index);
 
+        // a pending entry refuses a different client salt without mutating the entry
+        Check.That(history.FindOrAdd(in addressA, mac, saltB, expireTimestamp, currentTimestamp, 110.0, timeoutSeconds) == ConnectTokenHistory.Refused);
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 120.0, timeoutSeconds) == index);
+
+        // a pending entry refuses every other address
+        Check.That(history.FindOrAdd(in addressB, mac, saltA, expireTimestamp, currentTimestamp, 120.0, timeoutSeconds) == ConnectTokenHistory.Refused);
+
+        // once timeoutSeconds have elapsed since creation, a pending entry admits nothing
+        // (unless timeoutSeconds <= 0, which disables the timeout)
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 130.1, timeoutSeconds) == ConnectTokenHistory.Refused);
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 200.0, -1) == index);
+
+        // a consumed entry admits nothing, including the address and salt that used the connect token
         history.Consume(index);
-        Check.That(history.State(index) == ConnectTokenEntryState.Consumed);
-        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 300.0) == ConnectTokenHistory.Refused);
-        Check.That(history.FindOrAdd(in addressB, mac, expireTimestamp, currentTimestamp, 300.0) == ConnectTokenHistory.Refused);
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 110.0, timeoutSeconds) == ConnectTokenHistory.Refused);
+        Check.That(history.FindOrAdd(in addressB, mac, saltA, expireTimestamp, currentTimestamp, 110.0, timeoutSeconds) == ConnectTokenHistory.Refused);
 
         for (int i = 1; i < ConnectTokenHistory.MaxEntries; i++)
         {
             mac = new byte[Protocol.MacBytes];
-            mac[0] = (byte)(i + 1);
-            mac[1] = (byte)((i + 1) >> 8);
-            Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 400.0) >= 0);
+            mac[0] = unchecked((byte)(i + 1));
+            mac[1] = unchecked((byte)((i + 1) >> 8));
+            Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 400.0, timeoutSeconds) >= 0);
         }
 
         mac = new byte[Protocol.MacBytes];
         mac[0] = 0xFF;
         mac[1] = 0xFF;
-        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 500.0) == ConnectTokenHistory.Full);
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 500.0, timeoutSeconds) == ConnectTokenHistory.Full);
 
         mac[0] = 1;
         mac[1] = 0;
-        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, currentTimestamp, 500.0) == ConnectTokenHistory.Refused);
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, currentTimestamp, 500.0, timeoutSeconds) == ConnectTokenHistory.Refused);
 
         mac[0] = 0xFF;
         mac[1] = 0xFF;
-        Check.That(history.FindOrAdd(in addressA, mac, expireTimestamp, expireTimestamp, 600.0) >= 0);
+        Check.That(history.FindOrAdd(in addressA, mac, saltA, expireTimestamp, expireTimestamp, 600.0, timeoutSeconds) >= 0);
     }
 
     public static void TestClientReconnectUsedConnectToken()
     {
         NetworkSimulator simulator = CreateSimulator();
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
-        server.Start(1);
+        StartServer(server, 1);
 
         byte[] connectToken = GenerateConnectToken("[::1]:40000", 0x1234);
         client.Connect(connectToken);
@@ -227,7 +270,7 @@ internal static class ClientServerTests
     public static void TestClientErrorConnectTokenPredatesServerStart()
     {
         NetworkSimulator simulator = CreateSimulator();
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
         var serverConfig = CreateServerConfig(simulator);
         serverConfig.MaxConnectTokenLifetime = 30;
@@ -240,24 +283,552 @@ internal static class ClientServerTests
         Check.That(client.State == ClientState.ConnectionRequestTimedOut);
         Check.That(server.NumConnectedClients == 0);
 
-        simulator.Reset();
-        client.Connect(GenerateConnectToken("[::1]:40000", 0x5678, expiry: 30));
+        // a full-lifetime token issued in the next second is accepted
+        ConnectInNextSecond(simulator, client, server, ref time, deltaTime, 0x5678);
+    }
+
+    private static void ConnectInNextSecond(NetworkSimulator simulator, Client client, Server server, ref double time, double deltaTime, ulong clientId)
+    {
+        Func<ulong> now = UnixTime.Now;
+        UnixTime.Now = () => now() + 1;
+        try
+        {
+            simulator.Reset();
+            client.Connect(GenerateConnectToken("[::1]:40000", clientId));
+            ConnectLoop(simulator, client, server, ref time, deltaTime);
+            Check.That(client.State == ClientState.Connected);
+            Check.That(server.NumConnectedClients == 1);
+        }
+        finally
+        {
+            UnixTime.Now = now;
+        }
+    }
+
+    public static void TestClientErrorConnectTokenAtServerStart()
+    {
+        NetworkSimulator simulator = CreateSimulator();
+        double time = 1000.0;
+        double deltaTime = 1.0 / 10.0;
+        var serverConfig = CreateServerConfig(simulator);
+        serverConfig.MaxConnectTokenLifetime = 30;
+        using var server = new Server("[::1]:40000", serverConfig, time);
+        using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
+        server.Start(1);
+
+        // a full-lifetime token issued in the second the server started expires exactly at the
+        // start floor, and does not open a session
+        client.Connect(GenerateConnectToken("[::1]:40000", 0x1234, expiry: 30));
         ConnectLoop(simulator, client, server, ref time, deltaTime);
+        Check.That(client.State == ClientState.ConnectionRequestTimedOut);
+        Check.That(server.NumConnectedClients == 0);
+
+        // the same lifetime issued in the next second does
+        ConnectInNextSecond(simulator, client, server, ref time, deltaTime, 0x5678);
+    }
+
+    private sealed class HandshakeWireHarness : IDisposable
+    {
+        public readonly Address ClientAddress = Address.Parse("[::1]:50000");
+        public readonly Address ServerAddress = Address.Parse("[::1]:40000");
+        public readonly Client Client;
+        public readonly Server Server;
+        public readonly System.Collections.Generic.HashSet<(string KeyHex, ulong Sequence)> SeenKeyNonces = new();
+
+        public bool ShuttingDown;
+        public bool DropClientRequestPackets;
+        public bool DropClientResponsePackets;
+        public bool DropClientDisconnectPackets;
+        public int NumConnectionRequests;
+        public int NumConnectionResponses;
+        public byte[]? CapturedChallengePacket;
+        public byte[]? FirstRequestClientSalt;
+        public byte[]? LastRequestClientSalt;
+
+        private byte[] _rootC2s = Array.Empty<byte>();
+        private byte[] _rootS2c = Array.Empty<byte>();
+        private byte[] _activeClientWriteKey = Array.Empty<byte>();
+        private byte[] _activeServerSlotKey = Array.Empty<byte>();
+        private static readonly bool[] AllAllowed = BuildAllAllowed();
+
+        private static bool[] BuildAllAllowed()
+        {
+            var a = new bool[PacketType.NumPackets];
+            Array.Fill(a, true);
+            return a;
+        }
+
+        public HandshakeWireHarness()
+        {
+            var clientConfig = new ClientConfig
+            {
+                OverrideSendAndReceive = true,
+                SendPacketOverride = OnClientSend,
+                ReceivePacketOverride = (ref Address from, Span<byte> data) => 0,
+            };
+            Client = new Client("[::1]:50000", clientConfig, 0.0);
+
+            var serverConfig = CreateServerConfig(null);
+            serverConfig.OverrideSendAndReceive = true;
+            serverConfig.SendPacketOverride = OnServerSend;
+            serverConfig.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+            Server = new Server("[::1]:40000", serverConfig, 0.0);
+            StartServer(Server, 1);
+        }
+
+        public byte[] MintToken(ulong clientId)
+        {
+            byte[] tokenBytes = GenerateConnectToken("[::1]:40000", clientId);
+            var parsed = new ConnectTokenData();
+            Check.That(parsed.Read(tokenBytes));
+            _rootC2s = (byte[])parsed.ClientToServerKey.Clone();
+            _rootS2c = (byte[])parsed.ServerToClientKey.Clone();
+            return tokenBytes;
+        }
+
+        public void RecordAndVerifyEncrypted(ReadOnlySpan<byte> packetData, byte[] key)
+        {
+            byte[] copy = packetData.ToArray();
+            ReadPacketResult parsed = PacketIO.ReadPacket(copy, true, key, TestConstants.TestProtocolId, 0, false, default, AllAllowed, null);
+            Check.That(parsed.Type > 0);
+            Check.That(SeenKeyNonces.Add((Convert.ToHexString(key), parsed.Sequence)));
+        }
+
+        private void OnClientSend(in Address to, ReadOnlySpan<byte> packetData)
+        {
+            if (ShuttingDown)
+                return;
+
+            if (packetData[0] == PacketType.ConnectionRequest)
+            {
+                NumConnectionRequests++;
+                byte[] salt = packetData.Slice(PacketIO.ConnectionRequestPacketBytes - Defines.ConnectSaltBytes, Defines.ConnectSaltBytes).ToArray();
+                FirstRequestClientSalt ??= salt;
+                LastRequestClientSalt = salt;
+                if (DropClientRequestPackets)
+                    return;
+            }
+            else
+            {
+                RecordAndVerifyEncrypted(packetData, _activeClientWriteKey);
+
+                int packetType = packetData[0] & 0xF;
+                if (packetType == PacketType.ConnectionResponse)
+                {
+                    NumConnectionResponses++;
+                    if (DropClientResponsePackets)
+                        return;
+                }
+                else if (packetType == PacketType.ConnectionDisconnect)
+                {
+                    if (DropClientDisconnectPackets)
+                        return;
+                }
+            }
+
+            byte[] delivered = packetData.ToArray();
+            Server.ProcessPacket(in ClientAddress, delivered);
+        }
+
+        private void OnServerSend(in Address to, ReadOnlySpan<byte> packetData)
+        {
+            if (ShuttingDown)
+                return;
+
+            int packetType = packetData[0] & 0xF;
+            if (packetType == PacketType.ConnectionDenied || packetType == PacketType.ConnectionChallenge)
+            {
+                int seqBytes = packetData[0] >> 4;
+                ReadOnlySpan<byte> serverNonce = packetData.Slice(1 + seqBytes, Defines.ServerNonceBytes);
+                byte[] derivedS2c = new byte[Protocol.KeyBytes];
+                Aead.DerivePacketKey(derivedS2c, _rootS2c, LastRequestClientSalt!, serverNonce);
+                RecordAndVerifyEncrypted(packetData, derivedS2c);
+
+                if (packetType == PacketType.ConnectionChallenge)
+                {
+                    CapturedChallengePacket ??= packetData.ToArray();
+                    if (Client.State == ClientState.SendingConnectionRequest)
+                    {
+                        _activeClientWriteKey = new byte[Protocol.KeyBytes];
+                        Aead.DerivePacketKey(_activeClientWriteKey, _rootC2s, Client.ClientSalt, serverNonce);
+                        _activeServerSlotKey = derivedS2c;
+                    }
+                }
+            }
+            else
+            {
+                RecordAndVerifyEncrypted(packetData, _activeServerSlotKey);
+            }
+
+            byte[] delivered = packetData.ToArray();
+            Client.ProcessPacket(in ServerAddress, delivered);
+        }
+
+        public void PumpConnect(byte[] connectToken, ref double time, double deltaTime)
+        {
+            Client.Connect(connectToken);
+            while (true)
+            {
+                Client.Update(time);
+                Server.Update(time);
+                if (Client.State <= ClientState.Disconnected || Client.State == ClientState.Connected)
+                    break;
+                time += deltaTime;
+                Check.That(time < 120.0);
+            }
+        }
+
+        public int ServerEncryptionMappingIndex(double time)
+        {
+            const System.Reflection.BindingFlags Fields = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+            var em = (EncryptionManager)typeof(Server).GetField("_encryptionManager", Fields)!.GetValue(Server)!;
+            return em.FindEncryptionMapping(in ClientAddress, time);
+        }
+
+        public void Dispose()
+        {
+            ShuttingDown = true;
+            Server.Dispose();
+            Client.Dispose();
+        }
+    }
+
+    public static void TestClientReconnectAfterUnfinishedHandshake()
+    {
+        using var wire = new HandshakeWireHarness();
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+
+        byte[] connectToken = wire.MintToken(TestConstants.TestClientId);
+
+        // attempt 1: drop every connection response until the client times out
+        wire.DropClientResponsePackets = true;
+        wire.PumpConnect(connectToken, ref time, deltaTime);
+
+        Check.That(wire.Client.State == ClientState.ConnectionResponseTimedOut);
+        Check.That(wire.NumConnectionResponses >= 2);
+        Check.That(wire.Server.NumConnectedClients == 0);
+
+        // attempt 2: retry with the same connect token after the unfinished handshake timed out
+        wire.DropClientResponsePackets = false;
+        wire.PumpConnect(connectToken, ref time, deltaTime);
+
+        Check.That(wire.Client.State == ClientState.ConnectionRequestTimedOut);
+        Check.That(wire.Server.NumConnectedClients == 0);
+        Check.That(wire.SeenKeyNonces.Count > 0);
+    }
+
+    public static void TestClientReconnectAfterAbortedHandshake()
+    {
+        using var wire = new HandshakeWireHarness();
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+
+        byte[] connectToken = wire.MintToken(TestConstants.TestClientId);
+
+        // attempt 1: drop connection responses, then explicitly abort before timeout
+        wire.DropClientResponsePackets = true;
+        wire.Client.Connect(connectToken);
+
+        while (wire.NumConnectionResponses < 2)
+        {
+            wire.Client.Update(time);
+            wire.Server.Update(time);
+            time += deltaTime;
+            Check.That(time < 2.0);
+        }
+
+        Check.That(wire.Client.State == ClientState.SendingConnectionResponse);
+
+        wire.Client.Disconnect();
+        wire.Server.Update(time);
+
+        Check.That(wire.Client.State == ClientState.Disconnected);
+        Check.That(wire.Server.NumConnectedClients == 0);
+        Check.That(wire.ServerEncryptionMappingIndex(time) == -1);
+
+        // attempt 2: immediate retry with the same connect token is refused
+        wire.DropClientResponsePackets = false;
+        wire.PumpConnect(connectToken, ref time, deltaTime);
+
+        Check.That(wire.Client.State == ClientState.ConnectionRequestTimedOut);
+        Check.That(wire.Server.NumConnectedClients == 0);
+        Check.That(wire.SeenKeyNonces.Count > 0);
+    }
+
+    public static void TestClientReconnectSubTimeoutPacketLoss()
+    {
+        using var wire = new HandshakeWireHarness();
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+
+        byte[] connectToken = wire.MintToken(TestConstants.TestClientId);
+
+        // attempt 1: drop both connection responses and disconnect packets so the server's
+        // pending entry and half-open mapping remain live and sub-timeout
+        wire.DropClientResponsePackets = true;
+        wire.DropClientDisconnectPackets = true;
+        wire.Client.Connect(connectToken);
+
+        while (wire.NumConnectionResponses < 2)
+        {
+            wire.Client.Update(time);
+            wire.Server.Update(time);
+            time += deltaTime;
+            Check.That(time < 2.0);
+        }
+
+        byte[] salt1 = wire.FirstRequestClientSalt!;
+        wire.Client.Disconnect();
+        wire.Server.Update(time);
+
+        Check.That(wire.ServerEncryptionMappingIndex(time) != -1);
+
+        // attempt 2: sub-timeout reconnect with the same connect token carries a fresh client_salt,
+        // so the pending entry refuses it and zero (key, nonce) pairs repeat
+        wire.DropClientResponsePackets = false;
+        wire.DropClientDisconnectPackets = false;
+        wire.PumpConnect(connectToken, ref time, deltaTime);
+
+        Check.That(!wire.LastRequestClientSalt!.AsSpan().SequenceEqual(salt1));
+        Check.That(wire.Client.State == ClientState.ConnectionRequestTimedOut);
+        Check.That(wire.Server.NumConnectedClients == 0);
+        Check.That(wire.SeenKeyNonces.Count > 0);
+    }
+
+    public static void TestClientReplayedChallengeOnReusedToken()
+    {
+        using var wire = new HandshakeWireHarness();
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+
+        byte[] connectToken = wire.MintToken(TestConstants.TestClientId);
+
+        wire.DropClientResponsePackets = true;
+        wire.DropClientDisconnectPackets = true;
+        wire.Client.Connect(connectToken);
+
+        while (wire.NumConnectionResponses < 2)
+        {
+            wire.Client.Update(time);
+            wire.Server.Update(time);
+            time += deltaTime;
+            Check.That(time < 2.0);
+        }
+
+        Check.That(wire.CapturedChallengePacket != null);
+        wire.Client.Disconnect();
+
+        // attempt 2: hold the client in SendingConnectionRequest by dropping outgoing requests,
+        // then replay attempt 1's challenge packet. AEAD fails under the fresh client_salt.
+        int responsesBeforeReplay = wire.NumConnectionResponses;
+
+        wire.DropClientRequestPackets = true;
+        wire.DropClientResponsePackets = false;
+        wire.DropClientDisconnectPackets = false;
+
+        wire.Client.Connect(connectToken);
+        wire.Client.Update(time);
+
+        Check.That(wire.Client.State == ClientState.SendingConnectionRequest);
+        Check.That(!wire.Client.HasServerNonce);
+
+        byte[] replayedChallenge = (byte[])wire.CapturedChallengePacket!.Clone();
+        wire.Client.ProcessPacket(in wire.ServerAddress, replayedChallenge);
+
+        Check.That(wire.Client.State == ClientState.SendingConnectionRequest);
+        Check.That(!wire.Client.HasServerNonce);
+
+        time += deltaTime;
+        wire.Client.Update(time);
+
+        Check.That(wire.Client.State == ClientState.SendingConnectionRequest);
+        Check.That(wire.NumConnectionResponses == responsesBeforeReplay);
+    }
+
+    public static void TestMultipleServersNonceDisjoint()
+    {
+        Address clientAddress = Address.Parse("[::1]:50000");
+        Address server1Address = Address.Parse("[::1]:40000");
+        Address server2Address = Address.Parse("[::1]:40001");
+
+        var seenKeyNonces = new System.Collections.Generic.HashSet<(string KeyHex, ulong Sequence)>();
+        var allAllowed = new bool[PacketType.NumPackets];
+        Array.Fill(allAllowed, true);
+
+        bool shuttingDown = false;
+        int numDeniedFromServer1 = 0;
+        int numChallengesFromServer2 = 0;
+        byte[]? saltToServer1 = null;
+        byte[]? saltToServer2 = null;
+        byte[] rootC2s = Array.Empty<byte>();
+        byte[] rootS2c = Array.Empty<byte>();
+        byte[] activeClientWriteKey = Array.Empty<byte>();
+        byte[] activeServer2SlotKey = Array.Empty<byte>();
+
+        Client? clientRef = null;
+        Server? server1Ref = null;
+        Server? server2Ref = null;
+
+        void RecordEncrypted(ReadOnlySpan<byte> packetData, byte[] key)
+        {
+            byte[] copy = packetData.ToArray();
+            ReadPacketResult parsed = PacketIO.ReadPacket(copy, true, key, TestConstants.TestProtocolId, 0, false, default, allAllowed, null);
+            Check.That(parsed.Type > 0);
+            Check.That(seenKeyNonces.Add((Convert.ToHexString(key), parsed.Sequence)));
+        }
+
+        var clientConfig = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> packetData) =>
+            {
+                if (shuttingDown)
+                    return;
+
+                if (packetData[0] == PacketType.ConnectionRequest)
+                {
+                    byte[] salt = packetData.Slice(PacketIO.ConnectionRequestPacketBytes - Defines.ConnectSaltBytes, Defines.ConnectSaltBytes).ToArray();
+                    if (to.Equals(server1Address))
+                        saltToServer1 = salt;
+                    else if (to.Equals(server2Address))
+                        saltToServer2 = salt;
+                }
+                else
+                {
+                    RecordEncrypted(packetData, activeClientWriteKey);
+                }
+
+                byte[] copy = packetData.ToArray();
+                if (to.Equals(server1Address))
+                    server1Ref!.ProcessPacket(in clientAddress, copy);
+                else if (to.Equals(server2Address))
+                    server2Ref!.ProcessPacket(in clientAddress, copy);
+            },
+            ReceivePacketOverride = (ref Address from, Span<byte> data) => 0,
+        };
+
+        var server1Config = CreateServerConfig(null);
+        server1Config.SendLoopbackPacket = (clientIndex, payload, sequence) => { };
+        server1Config.OverrideSendAndReceive = true;
+        server1Config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> packetData) =>
+        {
+            if (shuttingDown)
+                return;
+
+            if ((packetData[0] & 0xF) == PacketType.ConnectionDenied)
+                numDeniedFromServer1++;
+
+            int seqBytes = packetData[0] >> 4;
+            ReadOnlySpan<byte> serverNonce = packetData.Slice(1 + seqBytes, Defines.ServerNonceBytes);
+            byte[] derivedS2c = new byte[Protocol.KeyBytes];
+            Aead.DerivePacketKey(derivedS2c, rootS2c, saltToServer1!, serverNonce);
+            RecordEncrypted(packetData, derivedS2c);
+
+            byte[] copy = packetData.ToArray();
+            clientRef!.ProcessPacket(in server1Address, copy);
+        };
+        server1Config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+
+        var server2Config = CreateServerConfig(null);
+        server2Config.OverrideSendAndReceive = true;
+        server2Config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> packetData) =>
+        {
+            if (shuttingDown)
+                return;
+
+            int packetType = packetData[0] & 0xF;
+            if (packetType == PacketType.ConnectionChallenge)
+            {
+                numChallengesFromServer2++;
+                int seqBytes = packetData[0] >> 4;
+                ReadOnlySpan<byte> serverNonce = packetData.Slice(1 + seqBytes, Defines.ServerNonceBytes);
+                byte[] derivedS2c = new byte[Protocol.KeyBytes];
+                Aead.DerivePacketKey(derivedS2c, rootS2c, saltToServer2!, serverNonce);
+                RecordEncrypted(packetData, derivedS2c);
+
+                if (clientRef!.State == ClientState.SendingConnectionRequest)
+                {
+                    activeClientWriteKey = new byte[Protocol.KeyBytes];
+                    Aead.DerivePacketKey(activeClientWriteKey, rootC2s, clientRef.ClientSalt, serverNonce);
+                    activeServer2SlotKey = derivedS2c;
+                }
+            }
+            else
+            {
+                RecordEncrypted(packetData, activeServer2SlotKey);
+            }
+
+            byte[] copy = packetData.ToArray();
+            clientRef!.ProcessPacket(in server2Address, copy);
+        };
+        server2Config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+
+        using var client = new Client("[::1]:50000", clientConfig, 0.0);
+        using var server1 = new Server("[::1]:40000", server1Config, 0.0);
+        using var server2 = new Server("[::1]:40001", server2Config, 0.0);
+        clientRef = client;
+        server1Ref = server1;
+        server2Ref = server2;
+
+        StartServer(server1, 1);
+        StartServer(server2, 1);
+
+        // fill server1's single slot via loopback so server1.GlobalSequence stays at 1UL << 63
+        server1.ConnectLoopbackClient(0, 100UL, ReadOnlySpan<byte>.Empty);
+        Check.That(server1.NumConnectedClients == 1);
+        Check.That(server1.GlobalSequence == (1UL << 63));
+        Check.That(server2.GlobalSequence == (1UL << 63));
+
+        byte[] connectToken = GenerateConnectToken(new[] { "[::1]:40000", "[::1]:40001" }, TestConstants.TestClientId);
+        var parsedToken = new ConnectTokenData();
+        Check.That(parsedToken.Read(connectToken));
+        rootC2s = (byte[])parsedToken.ClientToServerKey.Clone();
+        rootS2c = (byte[])parsedToken.ServerToClientKey.Clone();
+
+        double time = 0.0;
+        double deltaTime = 1.0 / 10.0;
+
+        client.Connect(connectToken);
+
+        while (true)
+        {
+            client.Update(time);
+            server1.Update(time);
+            server2.Update(time);
+
+            if (client.State <= ClientState.Disconnected || client.State == ClientState.Connected)
+                break;
+
+            time += deltaTime;
+            Check.That(time < 10.0);
+        }
+
+        // server1 emitted ConnectionDenied at global sequence 2^63 and server2 emitted
+        // ConnectionChallenge at global sequence 2^63 for the same connect token, under
+        // distinct HChaCha20-derived per-connection keys and rotated client_salt
+        Check.That(numDeniedFromServer1 >= 1);
+        Check.That(numChallengesFromServer2 >= 1);
+        Check.That(!saltToServer1!.AsSpan().SequenceEqual(saltToServer2!));
+        Check.That(server1.GlobalSequence == (1UL << 63) + 1);
+        Check.That(server2.GlobalSequence > (1UL << 63));
         Check.That(client.State == ClientState.Connected);
-        Check.That(server.NumConnectedClients == 1);
+        Check.That(server2.NumConnectedClients == 1);
+
+        shuttingDown = true;
     }
 
     public static void TestClientServerConnect()
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         ulong clientId = new TestRng(0xC11E17).NextUInt64();
         client.Connect(GenerateConnectToken("[::1]:40000", clientId));
@@ -275,7 +846,7 @@ internal static class ClientServerTests
 
         byte[] packetData = new byte[Protocol.MaxPacketSize];
         for (int i = 0; i < packetData.Length; i++)
-            packetData[i] = (byte)i;
+            packetData[i] = unchecked((byte)i);
 
         byte[] received = new byte[Protocol.MaxPacketSize];
 
@@ -323,86 +894,153 @@ internal static class ClientServerTests
         Check.That(clientNumPacketsReceived >= 10 && serverNumPacketsReceived >= 10);
     }
 
-    private static void ClientServerSocketConnectTo(string clientAddress, string? clientAddress2, string serverAddress, string? serverAddress2, string connectAddress)
+    public static void TestKeepAliveClientIndexOutOfRange()
     {
-        double time = 0.0;
-        double deltaTime = 1.0 / 10.0;
+        Console.WriteLine("test_keep_alive_client_index_out_of_range");
 
-        using var client = new Client(clientAddress, clientAddress2, null, time);
-        using var server = new Server(serverAddress, serverAddress2, CreateServerConfig(null), time);
+        TestConnectedKeepAliveClientIndexOutOfRange();
 
-        server.Start(1);
+        const string serverAddress = "127.0.0.1:40000";
+        using var client = OpenRespondingClient(serverAddress, out Address from, out byte[] serverToClientKey);
 
-        ulong clientId = new TestRng((ulong)Environment.TickCount64 | 1).NextUInt64();
-        client.Connect(GenerateConnectToken(connectAddress, clientId));
-
-        while (true)
+        // Each of these is stored on the unfixed path: uint.MaxValue casts to -1,
+        // 5000 is past any server, 0 is not a slot count, and MaxClients is the ceiling.
+        (uint clientIndex, uint maxClients)[] rejected =
         {
-            client.Update(time);
-            server.Update(time);
+            (uint.MaxValue, 32),
+            (5000, 32),
+            (1, 0),
+            (0, (uint)Protocol.MaxClients + 1),
+        };
 
-            if (client.State <= ClientState.Disconnected)
-                break;
-            if (client.State == ClientState.Connected)
-                break;
-
-            // this test runs over real sockets while advancing virtual time, so it must
-            // yield real time each iteration or the virtual timeouts can expire before
-            // the OS delivers a single loopback packet
-            Thread.Sleep(10);
-
-            time += deltaTime;
+        ulong sequence = 2;
+        foreach (var rejectedPacket in rejected)
+        {
+            DeliverKeepAlive(client, in from, serverToClientKey, sequence, rejectedPacket.clientIndex, rejectedPacket.maxClients);
+            sequence++;
+            Console.WriteLine($"rejected keep-alive wire clientIndex={rejectedPacket.clientIndex} maxClients={rejectedPacket.maxClients} stored clientIndex={client.ClientIndex} maxClients={client.MaxClients} state={client.State}");
+            Check.That(client.State == ClientState.SendingConnectionResponse);
+            Check.That(client.ClientIndex == 0);
+            Check.That(client.MaxClients == 0);
         }
 
+        DeliverKeepAlive(client, in from, serverToClientKey, sequence, 3, 32);
         Check.That(client.State == ClientState.Connected);
-        Check.That(server.NumConnectedClients == 1);
+        Check.That(client.ClientIndex == 3);
+        Check.That(client.MaxClients == 32);
     }
 
-    private static void ClientServerSocketConnect(string clientAddress, string? clientAddress2, string serverAddress, string? serverAddress2)
+    private static void TestConnectedKeepAliveClientIndexOutOfRange()
     {
-        ClientServerSocketConnectTo(clientAddress, clientAddress2, serverAddress, serverAddress2, serverAddress);
+        const string serverAddress = "127.0.0.1:40000";
+        using var client = OpenRespondingClient(serverAddress, out Address from, out byte[] serverToClientKey);
+
+        DeliverKeepAlive(client, in from, serverToClientKey, 2, 3, 32);
+        Check.That(client.State == ClientState.Connected);
+        Check.That(client.ClientIndex == 3);
+        Check.That(client.MaxClients == 32);
+
+        client.Update(TestConstants.TestTimeoutSeconds - 1.0);
+
+        // a keep-alive that names a slot outside the server's client range must not
+        // hold an established connection open, nor change the stored index
+
+        DeliverKeepAlive(client, in from, serverToClientKey, 3, uint.MaxValue, 32);
+        DeliverKeepAlive(client, in from, serverToClientKey, 4, 5000, 32);
+        DeliverKeepAlive(client, in from, serverToClientKey, 5, 1, 0);
+        DeliverKeepAlive(client, in from, serverToClientKey, 6, 0, (uint)Protocol.MaxClients + 1);
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(client.ClientIndex == 3);
+        Check.That(client.MaxClients == 32);
+
+        client.Update(TestConstants.TestTimeoutSeconds + 1.0);
+        Check.That(client.State == ClientState.ConnectionTimedOut);
     }
 
-    public static void TestClientServerIpv4SocketConnect()
+    public static void TestClientPacketFromOtherAddressLeavesReplayProtection()
     {
-        ClientServerSocketConnect("0.0.0.0:50000", null, "127.0.0.1:40000", null);
-        ClientServerSocketConnect("0.0.0.0:50000", null, "127.0.0.1:40000", "[::1]:40000");
-        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", null);
-        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000");
+        const string serverAddress = "127.0.0.1:40000";
+        using var client = OpenRespondingClient(serverAddress, out Address from, out byte[] serverToClientKey);
+        Check.That(Address.TryParse("127.0.0.1:40001", out Address otherAddress));
+
+        DeliverKeepAlive(client, in from, serverToClientKey, 2, 0, 1);
+        Check.That(client.State == ClientState.Connected);
+
+        // a packet that authenticates under the client's key, but comes from another address,
+        // must not move the client's replay protection
+
+        DeliverKeepAlive(client, in otherAddress, serverToClientKey, 1000000, 0, 1);
+
+        // so the client still accepts the next packet from its server, which keeps it connected
+
+        client.Update(10.0);
+        DeliverKeepAlive(client, in from, serverToClientKey, 3, 0, 1);
+
+        client.Update(TestConstants.TestTimeoutSeconds + 5.0);
+        Check.That(client.State == ClientState.Connected);
     }
 
-    public static void TestClientServerIpv6SocketConnect()
+    private static Client OpenRespondingClient(string serverAddress, out Address from, out byte[] serverToClientKey)
     {
-        ClientServerSocketConnect("[::]:50000", null, "[::1]:40000", null);
-        ClientServerSocketConnect("[::]:50000", null, "[::1]:40000", "127.0.0.1:40000");
-        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "[::1]:40000", null);
-        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "[::1]:40000", "127.0.0.1:40000");
+        byte[] tokenBytes = GenerateConnectToken(serverAddress, 0x11);
+        var token = new ConnectTokenData();
+        Check.That(token.Read(tokenBytes));
+        Check.That(Address.TryParse(serverAddress, out from));
+
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+            ReceivePacketOverride = (ref Address receiveFrom, Span<byte> payload) => 0,
+        };
+        var client = new Client("127.0.0.1:0", config, 0.0);
+        client.Connect(tokenBytes);
+        Check.That(client.State == ClientState.SendingConnectionRequest);
+
+        byte[] serverNonce = new byte[Defines.ServerNonceBytes];
+        new TestRng(0x5E27).Fill(serverNonce);
+
+        serverToClientKey = new byte[Protocol.KeyBytes];
+        Aead.DerivePacketKey(serverToClientKey, token.ServerToClientKey, client.ClientSalt, serverNonce);
+
+        byte[] challenge = new byte[8 + Defines.ChallengeTokenBytes];
+        Deliver(client, in from, serverToClientKey, PacketType.ConnectionChallenge, challenge, 1, serverNonce);
+        Check.That(client.State == ClientState.SendingConnectionResponse);
+        Check.That(client.ClientIndex == 0);
+        Check.That(client.MaxClients == 0);
+        return client;
     }
 
-    public static void TestClientServerDualSocketConnect()
+    private static void Deliver(Client client, in Address from, byte[] key, int packetType, ReadOnlySpan<byte> packetData, ulong sequence, ReadOnlySpan<byte> serverNonce = default)
     {
-        // dual stack client connects to dual stack server over ipv4, then over ipv6
+        byte[] buffer = new byte[Defines.MaxPacketBytes];
+        int written = PacketIO.WriteEncryptedPacket(buffer, packetType, packetData, sequence, key, TestConstants.TestProtocolId, serverNonce);
+        Check.That(written > 0);
+        client.ProcessPacket(in from, buffer.AsSpan(0, written));
+    }
 
-        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000");
-        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "[::1]:40000", "127.0.0.1:40000");
-
-        // dual stack client connects to the second address of a dual stack server
-
-        ClientServerSocketConnectTo("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000", "[::1]:40000");
-        ClientServerSocketConnectTo("0.0.0.0:50000", "[::]:50000", "[::1]:40000", "127.0.0.1:40000", "127.0.0.1:40000");
+    private static void DeliverKeepAlive(Client client, in Address from, byte[] key, ulong sequence, uint clientIndex, uint maxClients)
+    {
+        byte[] data = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(0, 4), clientIndex);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(data.AsSpan(4, 4), maxClients);
+        Deliver(client, in from, key, PacketType.ConnectionKeepAlive, data, sequence);
     }
 
     public static void TestClientServerKeepAlive()
     {
+        TestKeepAliveClientIndexOutOfRange();
+
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x1234));
 
@@ -438,14 +1076,14 @@ internal static class ClientServerTests
 
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
         for (int i = 0; i < maxClients.Length; i++)
         {
-            server.Start(maxClients[i]);
+            StartServer(server, maxClients[i]);
 
             var clients = new Client[maxClients[i]];
             for (int j = 0; j < maxClients[i]; j++)
@@ -501,7 +1139,7 @@ internal static class ClientServerTests
 
             byte[] packetData = new byte[Protocol.MaxPacketSize];
             for (int j = 0; j < packetData.Length; j++)
-                packetData[j] = (byte)j;
+                packetData[j] = unchecked((byte)j);
 
             byte[] received = new byte[Protocol.MaxPacketSize];
 
@@ -575,20 +1213,20 @@ internal static class ClientServerTests
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         // the first two addresses point at servers that do not exist; the client works
         // through them and connects to the third
 
         string[] serverAddresses = { "10.10.10.10:1000", "100.100.100.100:50000", "[::1]:40000" };
 
-        client.Connect(GenerateConnectToken(serverAddresses, 0x8877));
+        client.Connect(GenerateConnectToken(serverAddresses, 0x8877, expiry: 60));
 
         ConnectLoop(simulator, client, server, ref time, deltaTime);
 
@@ -602,7 +1240,7 @@ internal static class ClientServerTests
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
 
@@ -613,13 +1251,43 @@ internal static class ClientServerTests
         client.Update(time);
 
         Check.That(client.State == ClientState.ConnectTokenExpired);
+
+        TestClientErrorConnectTokenExpiredMultipleServers();
+    }
+
+    public static void TestClientErrorConnectTokenExpiredMultipleServers()
+    {
+        NetworkSimulator simulator = CreateSimulator();
+
+        double time = 1000.0;
+        double deltaTime = 1.0 / 10.0;
+
+        using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
+
+        string[] serverAddresses = { "10.10.10.10:1000", "100.100.100.100:50000" };
+
+        client.Connect(GenerateConnectToken(serverAddresses, 0x8878, expiry: 20));
+
+        while (true)
+        {
+            simulator.Update(time);
+            client.Update(time);
+
+            if (client.State <= ClientState.Disconnected)
+                break;
+
+            time += deltaTime;
+        }
+
+        Check.That(client.State == ClientState.ConnectTokenExpired);
+        Check.That(time < 1025.0);
     }
 
     public static void TestClientErrorInvalidConnectToken()
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, 0.0);
+        using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, 1000.0);
 
         byte[] garbage = new byte[Protocol.ConnectTokenBytes];
         new TestRng(0xBAD).Fill(garbage);
@@ -636,13 +1304,13 @@ internal static class ClientServerTests
 
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x2));
 
@@ -670,13 +1338,13 @@ internal static class ClientServerTests
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         // the server ignores connection response packets, so the client hangs in
         // SendingConnectionResponse until it times out
@@ -704,13 +1372,13 @@ internal static class ClientServerTests
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         // the server ignores connection request packets, so the client hangs in
         // SendingConnectionRequest until it times out
@@ -741,13 +1409,13 @@ internal static class ClientServerTests
 
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x5));
 
@@ -784,13 +1452,13 @@ internal static class ClientServerTests
 
         NetworkSimulator simulator = new NetworkSimulator(); // clean network for the disconnect packets
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x7));
 
@@ -824,13 +1492,36 @@ internal static class ClientServerTests
 
         NetworkSimulator simulator = new NetworkSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
-        using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
-        using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
+        int disconnectCallbackCount = 0;
+        Server? serverRef = null;
+        Address departingAddress = default;
+        byte[] departingUserData = new byte[Protocol.UserDataBytes];
+        var serverConfig = CreateServerConfig(simulator);
+        serverConfig.OnClientConnectDisconnect = (clientIndex, connected) =>
+        {
+            if (!connected)
+            {
+                disconnectCallbackCount++;
 
-        server.Start(1);
+                // the departing client stays readable through the callback, already disconnected
+                Check.That(!serverRef!.ClientConnected(clientIndex));
+                Check.That(serverRef.ClientId(clientIndex) == 0x8);
+                Check.That(serverRef.ClientAddress(clientIndex).Equals(departingAddress));
+                Check.That(serverRef.ClientUserData(clientIndex).SequenceEqual(departingUserData));
+
+                if (disconnectCallbackCount == 1)
+                    serverRef.DisconnectClient(clientIndex);
+            }
+        };
+
+        using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
+        using var server = new Server("[::1]:40000", serverConfig, time);
+        serverRef = server;
+
+        StartServer(server, 1);
 
         client.Connect(GenerateConnectToken("[::1]:40000", 0x8));
 
@@ -838,7 +1529,14 @@ internal static class ClientServerTests
 
         Check.That(client.State == ClientState.Connected);
 
+        departingAddress = server.ClientAddress(0);
+        Check.That(departingAddress.Type == AddressType.IPv6);
+        server.ClientUserData(0).CopyTo(departingUserData);
+
         server.DisconnectClient(0);
+        Check.That(disconnectCallbackCount == 1);
+        Check.That(server.ClientId(0) == 0);
+        Check.That(server.ClientAddress(0).Type == AddressType.None);
 
         for (int i = 0; i < 10; i++)
         {
@@ -856,13 +1554,62 @@ internal static class ClientServerTests
         Check.That(server.NumConnectedClients == 0);
     }
 
+    public static void TestServerSideDisconnectMultipleServers()
+    {
+        // a connected client that the server disconnects goes to disconnected; it does not
+        // move on to the next server address in its connect token
+
+        NetworkSimulator simulator = new NetworkSimulator();
+
+        double time = 1000.0;
+        double deltaTime = 1.0 / 10.0;
+
+        var transitions = new System.Collections.Generic.List<(ClientState Previous, ClientState Next)>();
+        var clientConfig = new ClientConfig
+        {
+            Simulator = simulator,
+            OnStateChange = (previous, next) => transitions.Add((previous, next)),
+        };
+
+        using var client = new Client("[::]:50000", clientConfig, time);
+        using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
+
+        StartServer(server, 1);
+
+        client.Connect(GenerateConnectToken(new[] { "[::1]:40000", "[::1]:40001" }, 0x8008, timeout: 5));
+
+        ConnectLoop(simulator, client, server, ref time, deltaTime);
+
+        Check.That(client.State == ClientState.Connected);
+
+        transitions.Clear();
+
+        server.DisconnectClient(0);
+
+        for (int i = 0; i < 100; i++)
+        {
+            simulator.Update(time);
+            client.Update(time);
+            server.Update(time);
+
+            if (client.State <= ClientState.Disconnected)
+                break;
+
+            time += deltaTime;
+        }
+
+        Check.That(client.State == ClientState.Disconnected);
+        Check.That(transitions.Count == 1);
+        Check.That(transitions[0] == (ClientState.Connected, ClientState.Disconnected));
+    }
+
     public static void TestServerClientDisconnectReason()
     {
         // the disconnect reason is recorded before the callback fires and queryable inside it
 
         NetworkSimulator simulator = new NetworkSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         DisconnectReason reasonInCallback = DisconnectReason.None;
@@ -883,7 +1630,7 @@ internal static class ClientServerTests
         using var server = new Server("[::1]:40000", serverConfig, time);
         serverRef = server;
 
-        server.Start(1);
+        StartServer(server, 1);
 
         // server-side disconnect
 
@@ -940,13 +1687,13 @@ internal static class ClientServerTests
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         ulong clientId = 0xCAFE;
 
@@ -993,17 +1740,116 @@ internal static class ClientServerTests
         Check.That(server.NumConnectedClients == 1);
     }
 
+    public static void TestPendingEncryptionMappingExpiry()
+    {
+        const System.Reflection.BindingFlags Fields = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+
+        var config = new ServerConfig { ProtocolId = TestConstants.TestProtocolId, OverrideSendAndReceive = true };
+        TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
+        config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { };
+        config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+        using var server = new Server("127.0.0.1:40000", config, 0.0);
+        // the tokens below are issued 30 seconds after the server starts, so none falls under its start floor
+        Func<ulong> now = UnixTime.Now;
+        UnixTime.Now = () => 970;
+        try
+        {
+            server.Start(4);
+        }
+        finally
+        {
+            UnixTime.Now = now;
+        }
+        var process = typeof(Server).GetMethod("ReadAndProcessPacket", Fields)!.CreateDelegate<ProcessAtTime>(server);
+        var encryptionManager = (EncryptionManager)typeof(Server).GetField("_encryptionManager", Fields)!.GetValue(server)!;
+        Address serverAddress = Address.Parse("127.0.0.1:40000");
+        Address firstAddress = Address.Parse("127.0.0.1:50000");
+        Address secondAddress = Address.Parse("127.0.0.1:50001");
+        Address thirdAddress = Address.Parse("127.0.0.1:50002");
+        Address fourthAddress = Address.Parse("127.0.0.1:50003");
+        Address fifthAddress = Address.Parse("127.0.0.1:50004");
+        Address sixthAddress = Address.Parse("127.0.0.1:50005");
+
+        void Request(in Address from, ulong clientId, ulong expireTimestamp, double time, int timeout = -1)
+        {
+            byte[] tokenBytes = new byte[Protocol.ConnectTokenBytes];
+            byte[] userData = new byte[Protocol.UserDataBytes];
+            Span<Address> addresses = stackalloc Address[1] { serverAddress };
+            Span<byte> nonce = stackalloc byte[Defines.ConnectTokenNonceBytes];
+            new TestRng(clientId).Fill(nonce);
+            Check.That(ConnectTokenGenerator.GenerateInternal(addresses, addresses, 1000, expireTimestamp, timeout,
+                clientId, TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, nonce, tokenBytes));
+            var token = new ConnectTokenData();
+            Check.That(token.Read(tokenBytes));
+            Span<byte> clientSalt = stackalloc byte[Defines.ConnectSaltBytes];
+            new TestRng(clientId ^ 0x5A17UL).Fill(clientSalt);
+            byte[] wire = new byte[Defines.MaxPacketBytes];
+            int bytes = PacketIO.WriteConnectionRequestPacket(wire, token.VersionInfo, token.ProtocolId,
+                token.ExpireTimestamp, token.Nonce, token.PrivateData, clientSalt);
+            server.Update(time);
+            process(in from, wire.AsSpan(0, bytes), 1001);
+        }
+
+        // as the reference: a pending mapping expires after the token's timeout when it is zero
+        // or more, and after the token's remaining lifetime when the timeout is negative
+
+        // timeout -1 and four seconds left on the token: the mapping lives four seconds
+        Request(in firstAddress, 0x1001, 1005, 0.0);
+        Check.That(encryptionManager.NumEncryptionMappings == 1);
+        Check.That(encryptionManager.ExpireTime[0] == 4.0);
+
+        server.Update(6.0);
+        Check.That(encryptionManager.EntryExpired(0, server.Time));
+
+        // the expired mapping's slot is available to another pending request
+        // (timeout -1, 29 seconds left on the token)
+        Request(in secondAddress, 0x1002, 1030, 6.0);
+        Check.That(encryptionManager.NumEncryptionMappings == 1);
+        Check.That(encryptionManager.Address[0].Equals(secondAddress));
+        Check.That(encryptionManager.ExpireTime[0] == 6.0 + 29.0);
+
+        // a timeout of zero or more sets the lifetime, whatever is left on the token
+        Request(in thirdAddress, 0x1003, 1005, 6.0, timeout: 30);
+        Check.That(encryptionManager.NumEncryptionMappings == 2);
+        Check.That(encryptionManager.ExpireTime[1] == 6.0 + 30.0);
+
+        Request(in fourthAddress, 0x1004, 1030, 6.0, timeout: 0);
+        Check.That(encryptionManager.NumEncryptionMappings == 3);
+        Check.That(encryptionManager.ExpireTime[2] == 6.0);
+
+        // a timeout 0 mapping is gone on the next update; the others are not
+        server.Update(7.0);
+        Check.That(encryptionManager.EntryExpired(2, server.Time));
+        Check.That(encryptionManager.FindEncryptionMapping(in fourthAddress, server.Time) == -1);
+        Check.That(encryptionManager.FindEncryptionMapping(in secondAddress, server.Time) == 0);
+        Check.That(encryptionManager.FindEncryptionMapping(in thirdAddress, server.Time) == 1);
+
+        // each expires at its own time and its slot is reclaimed
+        server.Update(36.0);
+        Check.That(encryptionManager.EntryExpired(0, server.Time));
+        Check.That(!encryptionManager.EntryExpired(1, server.Time));
+
+        Request(in fifthAddress, 0x1005, 1030, 36.0);
+        Check.That(encryptionManager.FindEncryptionMapping(in fifthAddress, server.Time) != -1);
+
+        server.Update(37.0);
+        Check.That(encryptionManager.EntryExpired(1, server.Time));
+
+        Request(in sixthAddress, 0x1006, 1030, 37.0);
+        Check.That(encryptionManager.FindEncryptionMapping(in sixthAddress, server.Time) != -1);
+    }
+
     public static void TestDisableTimeout()
     {
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         using var client = new Client("[::]:50000", new ClientConfig { Simulator = simulator }, time);
         using var server = new Server("[::1]:40000", CreateServerConfig(simulator), time);
 
-        server.Start(1);
+        StartServer(server, 1);
 
         // timeout of -1 disables timeouts entirely (dev only)
 
@@ -1018,7 +1864,7 @@ internal static class ClientServerTests
 
         byte[] packetData = new byte[Protocol.MaxPacketSize];
         for (int i = 0; i < packetData.Length; i++)
-            packetData[i] = (byte)i;
+            packetData[i] = unchecked((byte)i);
 
         byte[] received = new byte[Protocol.MaxPacketSize];
 
@@ -1054,9 +1900,12 @@ internal static class ClientServerTests
 
     public static void TestLoopback()
     {
+        TestLoopbackStateChanges();
+        TestClientStateChangeNotification();
+
         NetworkSimulator simulator = CreateSimulator();
 
-        double time = 0.0;
+        double time = 1000.0;
         double deltaTime = 1.0 / 10.0;
 
         int numLoopbackPacketsSentToClient = 0;
@@ -1064,7 +1913,7 @@ internal static class ClientServerTests
 
         byte[] packetData = new byte[Protocol.MaxPacketSize];
         for (int i = 0; i < packetData.Length; i++)
-            packetData[i] = (byte)i;
+            packetData[i] = unchecked((byte)i);
 
         Client? loopbackClientRef = null;
         Server? serverRef = null;
@@ -1098,7 +1947,7 @@ internal static class ClientServerTests
         loopbackClientRef = loopbackClient;
         serverRef = server;
 
-        server.Start(2);
+        StartServer(server, 2);
 
         // connect the loopback client to slot 0
 
@@ -1163,6 +2012,150 @@ internal static class ClientServerTests
         Check.That(server.ClientConnected(1));
         Check.That(server.NumConnectedClients == 1);
         Check.That(loopbackClient.State == ClientState.Disconnected);
+    }
+
+    public static void TestLoopbackDisconnectReentry()
+    {
+        // a disconnect callback that disconnects its own loopback slot again, or stops the
+        // server, sees the departing client once, already disconnected and still readable
+
+        int callbackCount = 0;
+        bool stopInCallback = false;
+        Server? serverRef = null;
+
+        var config = new ServerConfig { ProtocolId = TestConstants.TestProtocolId, OverrideSendAndReceive = true };
+        TestConstants.PrivateKey.CopyTo(config.PrivateKey, 0);
+        config.SendPacketOverride = (in Address to, ReadOnlySpan<byte> data) => { };
+        config.ReceivePacketOverride = (ref Address from, Span<byte> data) => 0;
+        config.SendLoopbackPacket = (clientIndex, payload, sequence) => { };
+        config.OnClientConnectDisconnect = (clientIndex, connected) =>
+        {
+            if (connected)
+                return;
+
+            callbackCount++;
+
+            // bounded so a regression fails the checks below instead of overflowing the stack
+            if (callbackCount > 4)
+                return;
+
+            if (stopInCallback)
+            {
+                serverRef!.Stop();
+                return;
+            }
+
+            Check.That(!serverRef!.ClientConnected(clientIndex));
+            Check.That(serverRef.ClientId(clientIndex) == 0x5151);
+            serverRef.DisconnectLoopbackClient(clientIndex);
+        };
+
+        using var server = new Server("127.0.0.1:40000", config, 1000.0);
+        serverRef = server;
+
+        server.Start(2);
+        server.ConnectLoopbackClient(1, 0x5151, ReadOnlySpan<byte>.Empty);
+        Check.That(server.NumConnectedClients == 1);
+
+        server.DisconnectLoopbackClient(1);
+        Check.That(callbackCount == 1);
+        Check.That(!server.ClientConnected(1));
+        Check.That(server.ClientId(1) == 0);
+        Check.That(server.NumConnectedClients == 0);
+
+        server.ConnectLoopbackClient(1, 0x5151, ReadOnlySpan<byte>.Empty);
+        Check.That(server.NumConnectedClients == 1);
+
+        callbackCount = 0;
+        stopInCallback = true;
+        server.DisconnectLoopbackClient(1);
+        Check.That(callbackCount == 1);
+        Check.That(!server.Running);
+        Check.That(server.NumConnectedClients == 0);
+    }
+
+    private static void TestLoopbackStateChanges()
+    {
+        int changes = 0;
+        Client? clientRef = null;
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0,
+            SendLoopbackPacket = (clientIndex, payload, sequence) => { },
+            OnStateChange = (previous, next) =>
+            {
+                if (changes == 0)
+                {
+                    Check.That(previous == ClientState.Disconnected);
+                    Check.That(next == ClientState.Connected);
+                    Check.That(clientRef!.IsLoopback);
+                    Check.That(clientRef.ClientIndex == 2);
+                    Check.That(clientRef.MaxClients == 4);
+                }
+                else
+                {
+                    Check.That(changes == 1);
+                    Check.That(previous == ClientState.Connected);
+                    Check.That(next == ClientState.Disconnected);
+                }
+                changes++;
+            },
+        };
+        using var client = new Client("127.0.0.1:40000", config, 1000.0);
+        clientRef = client;
+
+        client.ConnectLoopback(2, 4);
+        Check.That(changes == 1);
+        Check.That(client.State == ClientState.Connected);
+
+        client.DisconnectLoopback();
+        Check.That(changes == 2);
+        Check.That(client.State == ClientState.Disconnected);
+    }
+
+    private static void TestClientStateChangeNotification()
+    {
+        Client? clientRef = null;
+        bool observedNewState = false;
+        int disconnectNotifications = 0;
+        var callbackException = new InvalidOperationException("state notification");
+        var config = new ClientConfig
+        {
+            OverrideSendAndReceive = true,
+            SendPacketOverride = (in Address to, ReadOnlySpan<byte> payload) => { },
+            ReceivePacketOverride = (ref Address from, Span<byte> payload) => 0,
+            SendLoopbackPacket = (clientIndex, payload, sequence) => { },
+            OnStateChange = (previous, next) =>
+            {
+                if (next != ClientState.Disconnected)
+                    return;
+                Check.That(previous == ClientState.Connected);
+                observedNewState = clientRef!.State == next;
+                disconnectNotifications++;
+                throw callbackException;
+            },
+        };
+        using var client = new Client("127.0.0.1:40000", config, 1000.0);
+        clientRef = client;
+        client.ConnectLoopback(0, 1);
+
+        try
+        {
+            client.Disconnect();
+            Check.That(false);
+        }
+        catch (InvalidOperationException exception)
+        {
+            Check.That(ReferenceEquals(exception, callbackException));
+        }
+
+        Check.That(observedNewState);
+        Check.That(client.State == ClientState.Disconnected);
+        Check.That(disconnectNotifications == 1);
+        client.Disconnect();
+        Check.That(disconnectNotifications == 1);
     }
 
     public static void TestClientCreateMissingOverrideCallback()
@@ -1238,7 +2231,7 @@ internal static class ClientServerTests
         // entering loopback with SendLoopbackPacket unset must refuse to connect, in
         // every build, rather than calling null on the next send.
 
-        using var client = new Client("127.0.0.1:40000");
+        using var client = new Client("127.0.0.1:40000", new ClientConfig { Simulator = new NetworkSimulator() }, 1000.0);
 
         client.ConnectLoopback(0, 1);
 
@@ -1254,7 +2247,7 @@ internal static class ClientServerTests
         // attaching a loopback client with SendLoopbackPacket unset must refuse the slot,
         // in every build, rather than calling null on the next send.
 
-        using var server = new Server("127.0.0.1:40000", CreateServerConfig(null));
+        using var server = new Server("127.0.0.1:40000", CreateServerConfig(new NetworkSimulator()), 1000.0);
         server.Start(1);
 
         server.ConnectLoopbackClient(0, 0x11111111, ReadOnlySpan<byte>.Empty);
@@ -1265,6 +2258,355 @@ internal static class ClientServerTests
         Check.That(!server.ClientLoopback(0));
         Check.That(!server.ClientConnected(0));
         Check.That(server.NumConnectedClients == 0);
+    }
+
+    // functional tests below: real loopback sockets. each binds an ephemeral port
+    // first and reuses the port the OS gave it, so nothing depends on a fixed port
+    // being free, and no packets are exchanged.
+
+    public static void TestClientCreatePortInUse()
+    {
+        // functional. port of the "port already in use" blocks of test_client_create_error:
+        // a second client bound to a port in use fails at socket creation, per family.
+
+        {
+            using var first = new Client("127.0.0.1:0");
+            Check.That(first.Port != 0);
+            try
+            {
+                using var second = new Client($"127.0.0.1:{first.Port}");
+                Check.That(false);
+            }
+            catch (NetcodeException e)
+            {
+                Check.That(e.ErrorCode == (int)ClientCreateError.CreateSocketIpv4Failed);
+            }
+        }
+
+        {
+            using var first = new Client("[::1]:0");
+            Check.That(first.Port != 0);
+            try
+            {
+                using var second = new Client($"[::1]:{first.Port}");
+                Check.That(false);
+            }
+            catch (NetcodeException e)
+            {
+                Check.That(e.ErrorCode == (int)ClientCreateError.CreateSocketIpv6Failed);
+            }
+        }
+    }
+
+    public static void TestServerCreatePortInUse()
+    {
+        // functional. port of the "port already in use" blocks of test_server_create_error:
+        // a port in use is reported as a bind failure, distinct from other socket errors,
+        // per family.
+
+        {
+            using var first = new Server("127.0.0.1:0", CreateServerConfig(null));
+            Check.That(first.Port != 0);
+            try
+            {
+                using var second = new Server($"127.0.0.1:{first.Port}", CreateServerConfig(null));
+                Check.That(false);
+            }
+            catch (NetcodeException e)
+            {
+                Check.That(e.ErrorCode == (int)ServerCreateError.BindSocketIpv4Failed);
+            }
+        }
+
+        {
+            using var first = new Server("[::1]:0", CreateServerConfig(null));
+            Check.That(first.Port != 0);
+            try
+            {
+                using var second = new Server($"[::1]:{first.Port}", CreateServerConfig(null));
+                Check.That(false);
+            }
+            catch (NetcodeException e)
+            {
+                Check.That(e.ErrorCode == (int)ServerCreateError.BindSocketIpv6Failed);
+            }
+        }
+    }
+
+    private static System.Net.Sockets.Socket UnderlyingSocket(object owner, string field)
+    {
+        const System.Reflection.BindingFlags Flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+
+        object? netcodeSocket = owner.GetType().GetField(field, Flags)?.GetValue(owner);
+        Check.That(netcodeSocket is NetcodeSocket);
+
+        object? socket = typeof(NetcodeSocket).GetField("_socket", Flags)?.GetValue(netcodeSocket);
+        Check.That(socket is System.Net.Sockets.Socket);
+
+        return (System.Net.Sockets.Socket)socket!;
+    }
+
+    private static int TrafficClass(System.Net.Sockets.Socket socket)
+    {
+        if (socket.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+        {
+            // IPV6_TCLASS: 67 on linux, 36 on macOS/BSD
+            int optname = OperatingSystem.IsLinux() ? 67 : 36;
+            byte[] value = new byte[4];
+            int bytes = socket.GetRawSocketOption(41 /* IPPROTO_IPV6 */, optname, value);
+            Check.That(bytes == 4);
+            return BitConverter.ToInt32(value, 0);
+        }
+
+        object? tos = socket.GetSocketOption(System.Net.Sockets.SocketOptionLevel.IP, System.Net.Sockets.SocketOptionName.TypeOfService);
+        Check.That(tos is int);
+        return (int)tos!;
+    }
+
+    public static void TestPacketTagging()
+    {
+        // functional. port of test_packet_tagging: create a server and a client with
+        // packet tagging on and connect, over ipv4 and ipv6. beyond the C smoke test,
+        // read the option back from each socket: DSCP EF (46) as IP_TOS / IPV6_TCLASS
+        // when tagging is on, and not 46 when it is off. tagging is a documented no-op
+        // on Windows, so the option is only checked elsewhere.
+
+        string[] bindAddresses = { "127.0.0.1", "[::1]" };
+        string[] socketFields = { "_socketIpv4", "_socketIpv6" };
+
+        for (int i = 0; i < bindAddresses.Length; i++)
+        {
+            foreach (bool tagging in new[] { true, false })
+            {
+                var serverConfig = CreateServerConfig(null);
+                serverConfig.EnablePacketTagging = tagging;
+
+                using var server = new Server($"{bindAddresses[i]}:0", serverConfig);
+                Check.That(server.Port != 0);
+
+                using var client = new Client($"{bindAddresses[i]}:0", new ClientConfig { EnablePacketTagging = tagging });
+                Check.That(client.Port != 0);
+
+                byte[] connectToken = GenerateConnectToken($"{bindAddresses[i]}:{server.Port}", TestConstants.TestClientId);
+
+                server.Start(1);
+                client.Connect(connectToken);
+                Check.That(client.State == ClientState.SendingConnectionRequest);
+
+                if (OperatingSystem.IsWindows())
+                    continue;
+
+                int serverTrafficClass = TrafficClass(UnderlyingSocket(server, socketFields[i]));
+                int clientTrafficClass = TrafficClass(UnderlyingSocket(client, socketFields[i]));
+
+                if (tagging)
+                {
+                    Check.That(serverTrafficClass == 46);
+                    Check.That(clientTrafficClass == 46);
+                }
+                else
+                {
+                    Check.That(serverTrafficClass != 46);
+                    Check.That(clientTrafficClass != 46);
+                }
+            }
+        }
+    }
+}
+
+// The functional tier: real UDP sockets on fixed loopback ports, and real time.
+// Run with --functional; the default run is the unit tier above.
+internal static class FunctionalTests
+{
+    public static void TestClientCreate()
+    {
+        {
+            using var client = new Client("127.0.0.1:40000");
+            Check.That(client.Port == 40000);
+            Check.That(client.State == ClientState.Disconnected);
+        }
+        {
+            using var client = new Client("[::]:50000");
+            Check.That(client.Port == 50000);
+        }
+        {
+            using var client = new Client("127.0.0.1:40000", "[::]:50000", null, 0.0);
+            Check.That(client.Port == 40000);
+        }
+        {
+            using var client = new Client("[::]:50000", "127.0.0.1:40000", null, 0.0);
+            Check.That(client.Port == 50000);
+        }
+        // bad address must throw with the right error code
+        try
+        {
+            using var client = new Client("not an address");
+            Check.That(false);
+        }
+        catch (NetcodeException e)
+        {
+            Check.That(e.ErrorCode == (int)ClientCreateError.ParseAddressFailed);
+        }
+    }
+
+    public static void TestServerCreate()
+    {
+        {
+            using var server = new Server("127.0.0.1:40000", ClientServerTests.CreateServerConfig(null));
+            Check.That(server.Port == 40000);
+            Check.That(!server.Running);
+        }
+        {
+            using var server = new Server("[::1]:50000", ClientServerTests.CreateServerConfig(null));
+            Check.That(server.Port == 50000);
+        }
+        {
+            using var server = new Server("127.0.0.1:40000", "[::1]:50000", ClientServerTests.CreateServerConfig(null), 0.0);
+            Check.That(server.Port == 40000);
+        }
+        {
+            using var server = new Server("[::1]:50000", "127.0.0.1:40000", ClientServerTests.CreateServerConfig(null), 0.0);
+            Check.That(server.Port == 50000);
+        }
+        // bad address must throw with the right error code
+        try
+        {
+            using var server = new Server("not an address", ClientServerTests.CreateServerConfig(null));
+            Check.That(false);
+        }
+        catch (NetcodeException e)
+        {
+            Check.That(e.ErrorCode == (int)ServerCreateError.ParseAddressFailed);
+        }
+    }
+
+    private static void ClientServerSocketConnectTo(string clientAddress, string? clientAddress2, string serverAddress, string? serverAddress2, string connectAddress)
+    {
+        // real sockets run on real time: each update passes the wall clock, so a lost
+        // packet is resent by the client and the connect succeeds or fails within the
+        // token's timeout, however long the OS takes to deliver.
+
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        double time = 1000.0;
+
+        using var client = new Client(clientAddress, clientAddress2, null, time);
+        using var server = new Server(serverAddress, serverAddress2, ClientServerTests.CreateServerConfig(null), time);
+
+        ClientServerTests.StartServerAndWaitForNextSecond(server, 1);
+
+        ulong clientId = new TestRng((ulong)Environment.TickCount64 | 1).NextUInt64();
+        client.Connect(ClientServerTests.GenerateConnectToken(connectAddress, clientId));
+
+        while (true)
+        {
+            time = 1000.0 + clock.Elapsed.TotalSeconds;
+
+            client.Update(time);
+            server.Update(time);
+
+            if (client.State <= ClientState.Disconnected)
+                break;
+            if (client.State == ClientState.Connected)
+                break;
+
+            Thread.Sleep(1);
+        }
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server.NumConnectedClients == 1);
+    }
+
+    private static void ClientServerSocketConnect(string clientAddress, string? clientAddress2, string serverAddress, string? serverAddress2)
+    {
+        ClientServerSocketConnectTo(clientAddress, clientAddress2, serverAddress, serverAddress2, serverAddress);
+    }
+
+    // N empty UDP datagrams sit ahead of one payload in the real socket queue.
+    // One server Update must deliver that payload. Time is injected; this does
+    // not sleep and does not wait on the clock.
+    public static void TestReceiveSkipsEmptyDatagrams()
+    {
+        double time = 1000.0;
+        // Equality with the send interval still suppresses a send, so step past it.
+        double step = (1.0 / Defines.PacketSendRate) + 1e-3;
+
+        // The server's public address, port included, must be the address in the
+        // connect token. Port 0 would stay 0 in that address after the bind.
+        ushort port;
+        using (var probe = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+        {
+            probe.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            port = (ushort)((IPEndPoint)probe.LocalEndPoint!).Port;
+        }
+
+        string serverAddress = $"127.0.0.1:{port}";
+        using var server = new Server(serverAddress, ClientServerTests.CreateServerConfig(null), time);
+        ClientServerTests.StartServerAndWaitForNextSecond(server, 1);
+        using var client = new Client("127.0.0.1:0", null, time);
+
+        client.Connect(ClientServerTests.GenerateConnectToken(serverAddress, 0xE001));
+
+        for (int i = 0; i < 32 && client.State > ClientState.Disconnected && client.State != ClientState.Connected; i++)
+        {
+            client.Update(time);
+            server.Update(time);
+            time += step;
+        }
+
+        Check.That(client.State == ClientState.Connected);
+        Check.That(server.NumConnectedClients == 1);
+        Check.That(server.ClientConnected(0));
+
+        byte[] packetData = new byte[32];
+        for (int i = 0; i < packetData.Length; i++)
+            packetData[i] = unchecked((byte)(i ^ 0x5A));
+
+        const int emptyDatagrams = 8;
+        using (var sender = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+        {
+            var serverEndpoint = new IPEndPoint(IPAddress.Loopback, server.Port);
+            for (int i = 0; i < emptyDatagrams; i++)
+                sender.SendTo(Array.Empty<byte>(), serverEndpoint);
+        }
+
+        client.SendPacket(packetData);
+
+        server.Update(time);
+
+        byte[] received = new byte[Protocol.MaxPacketSize];
+        int bytes = server.ReceivePacket(0, received, out _);
+        Check.That(bytes == packetData.Length);
+        Check.That(received.AsSpan(0, bytes).SequenceEqual(packetData));
+    }
+
+    public static void TestClientServerIpv4SocketConnect()
+    {
+        TestReceiveSkipsEmptyDatagrams();
+        ClientServerSocketConnect("0.0.0.0:50000", null, "127.0.0.1:40000", null);
+        ClientServerSocketConnect("0.0.0.0:50000", null, "127.0.0.1:40000", "[::1]:40000");
+        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", null);
+        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000");
+    }
+
+    public static void TestClientServerIpv6SocketConnect()
+    {
+        ClientServerSocketConnect("[::]:50000", null, "[::1]:40000", null);
+        ClientServerSocketConnect("[::]:50000", null, "[::1]:40000", "127.0.0.1:40000");
+        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "[::1]:40000", null);
+        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "[::1]:40000", "127.0.0.1:40000");
+    }
+
+    public static void TestClientServerDualSocketConnect()
+    {
+        // dual stack client connects to dual stack server over ipv4, then over ipv6
+
+        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000");
+        ClientServerSocketConnect("0.0.0.0:50000", "[::]:50000", "[::1]:40000", "127.0.0.1:40000");
+
+        // dual stack client connects to the second address of a dual stack server
+
+        ClientServerSocketConnectTo("0.0.0.0:50000", "[::]:50000", "127.0.0.1:40000", "[::1]:40000", "[::1]:40000");
+        ClientServerSocketConnectTo("0.0.0.0:50000", "[::]:50000", "[::1]:40000", "127.0.0.1:40000", "127.0.0.1:40000");
     }
 }
 
@@ -1295,7 +2637,7 @@ internal static class Soak
         TestConstants.PrivateKey.CopyTo(serverConfig.PrivateKey, 0);
 
         using var server = new Server("[::1]:40000", serverConfig, time);
-        server.Start(MaxClients);
+        ClientServerTests.StartServerAndWaitForNextSecond(server, MaxClients);
 
         var clients = new Client[MaxClients];
         for (int i = 0; i < MaxClients; i++)
@@ -1337,7 +2679,7 @@ internal static class Soak
                         byte[] userData = new byte[Protocol.UserDataBytes];
                         rng.Fill(userData);
                         string[] address = { "[::1]:40000" };
-                        if (!ConnectTokenGenerator.Generate(address, address, 30, 5, rng.NextUInt64(), TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken))
+                        if (!ConnectTokenGenerator.Generate(address, address, TestConstants.TestConnectTokenExpiry, 5, rng.NextUInt64(), TestConstants.TestProtocolId, TestConstants.PrivateKey, userData, connectToken))
                         {
                             Console.WriteLine("soak: failed to generate connect token");
                             return 1;

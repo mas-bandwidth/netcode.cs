@@ -4,12 +4,10 @@
 ; :tested-revision is the main commit whose CI passed with that evidence.
 (:schema 1
  :root "goal"
- :page (:title "netcode.cs roadmap"
-        :roadmaps ("connection" "security" "network" "dotnet" "compat" "testing"))
+ :page (:roadmaps ("connection" "security" "network" "dotnet" "compat" "testing"))
  :nodes
  ((:id "goal" :type :work-set :children ("connection" "security" "network" "dotnet" "compat" "testing"))
   (:id "connection" :type :roadmap :title "Connection"
-   :text "Connect tokens, client slots, the handshake, keep-alive, disconnects and timeouts between a client and a server."
    :rows (("connect-tokens" "connect tokens issued by a web backend")
           ("handshake" "request, challenge and response handshake")
           ("slots" "client slots; a full server denies at once")
@@ -70,7 +68,6 @@
    :sprint-branch "sprint/netcode-cs-port"
    :landed-commit "e4fa521")
   (:id "security" :type :roadmap :title "Security"
-   :text "Encrypted, signed packets and the protections against forged, replayed and malformed traffic."
    :rows (("aead" "encrypted and signed packets (ChaCha20-Poly1305)")
           ("private-token" "encrypted connect token private data (XChaCha20-Poly1305)")
           ("managed-crypto" "fully managed crypto, checked against the .NET built-in AEAD")
@@ -83,7 +80,7 @@
           ("amplification" "amplification protection")
           ("own-challenge" "each connection response is bound to its own challenge")
           ("replay-top" "replay protection at the top of the sequence space")
-          ("mapping-lifetime" "pre-connect mappings expire even for tokens without a timeout")
+          ("mapping-lifetime" "pre-connect mappings expire as in the reference, whatever the token timeout")
           ("shared-token-nonces" "servers sharing a connect token use distinct global packet nonces")
           ("zeroize-keys" "key material zeroized on disconnect and stop"))
    :columns (("done" "done"))
@@ -127,8 +124,8 @@
    :sprint-card "cs-netcode-replay-top-sequence-and-restart-floor-edges"
    :sprint-branch "sprint/netcode-cs-port"
    :landed-commit "398e8c8")
-  (:id "security/mapping-lifetime" :type :task :title "pre-connect mappings expire even for tokens without a timeout" :state :todo
-   :note "A pre-connect mapping lives timeoutSeconds, or PreconnectMappingSeconds (10) when the token timeout is not positive; over-long tokens are refused. Landed on sprint/netcode-cs-port (commit ae6a97a), not yet merged to main; done when it is on main with its test green."
+  (:id "security/mapping-lifetime" :type :task :title "pre-connect mappings expire as in the reference, whatever the token timeout" :state :todo
+   :note "A pending encryption mapping expires as in the reference: at time + timeout when the token timeout is zero or more, and at time + the token's remaining lifetime when it is negative (the connection request path in src/Server.cs). Landed on sprint/netcode-cs-port (commit ae6a97a), not yet merged to main; done when it is on main with its test green."
    :sprint-card "cs-netcode-token-lifetimes-are-bounded"
    :sprint-branch "sprint/netcode-cs-port"
    :landed-commit "ae6a97a")
@@ -140,7 +137,6 @@
   (:id "security/zeroize-keys" :type :task :title "key material zeroized on disconnect and stop" :state :todo
    :note "Post-release hardening item 1 (notes/post-release-hardening.md): EncryptionManager send/receive keys, the challenge key and the connect token private data linger on the GC heap.")
   (:id "network" :type :roadmap :title "Networking"
-   :text "Sockets, address families, platforms and the tools for testing under bad networks."
    :rows (("ipv4" "IPv4")
           ("ipv6" "IPv6")
           ("dual-stack" "dual-stack server (IPv4 and IPv6 at once)")
@@ -180,7 +176,6 @@
   (:id "network/socket-review" :type :task :title "socket layer reviewed line by line against the C" :state :todo
    :note "Post-release hardening item 2 (notes/post-release-hardening.md): NetcodeSocket, the simulator and the loopback paths were not line-diffed against netcode.c.")
   (:id "dotnet" :type :roadmap :title ".NET"
-   :text "The runtimes the library targets and the properties it keeps on them."
    :rows (("net10" ".NET 10")
           ("net8" ".NET 8 (LTS)")
           ("zero-alloc" "zero allocation on the steady-state packet paths")
@@ -199,7 +194,6 @@
   (:id "dotnet/unity" :type :task :title "Unity (netstandard2.1)" :state :todo
    :note "Not attempted: UInt128, InlineArray and u8 literals would need shims (STATUS.md).")
   (:id "compat" :type :roadmap :title "Compatibility"
-   :text "Wire compatibility with the C reference implementation and the netcode 1.02 standard."
    :rows (("standard" "netcode 1.02 standard, kept in sync with upstream")
           ("golden-vectors" "every token and packet type byte-identical to C, both directions")
           ("c-interop" "live sessions with the C client and server, both directions")
@@ -217,7 +211,6 @@
   (:id "compat/packets" :type :task :title "every packet type reads and writes as the C suite expects" :state :done :evidence ("tests/Tests.cs: TestConnectionRequestPacket" "tests/Tests.cs: TestEmptyPacket" "tests/Tests.cs: TestChallengeResponsePacket" "tests/Tests.cs: TestConnectionKeepAlivePacket" "tests/Tests.cs: TestConnectionPayloadPacket") :tested-revision "c1fcf5a17adc91b02bb70a88b49519bd3de154a8")
   (:id "compat/version" :type :task :title "tracks the C reference release (1.4.8)" :state :done :evidence ("commit 194f150 (release: netcode.cs 1.1.0)" "commit fc235d2 (Pin C interop to the reviewed security release API)") :tested-revision "c1fcf5a17adc91b02bb70a88b49519bd3de154a8")
   (:id "testing" :type :roadmap :title "Testing"
-   :text "How the implementation is checked on every change."
    :rows (("c-suite" "test-for-test port of the C test suite")
           ("soak" "soak test"))
    :columns (("done" "done"))
